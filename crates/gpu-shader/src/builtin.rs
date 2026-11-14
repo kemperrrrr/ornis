@@ -143,6 +143,39 @@ pub fn vertex_store_2<const LOC: u32>(x: f32, y: f32) {
     }
 }
 
+/// Write the `vec3<f32>` vertex output at `LOC`.
+///
+/// Three lanes are a width of their own: padding to `vec4` would change the
+/// declared varying the fragment stage reads.
+#[inline(always)]
+pub fn vertex_store_3<const LOC: u32>(x: f32, y: f32, z: f32) {
+    const { assert!(LOC < 16, "a vertex output is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_store_3(LOC, x, y, z);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (x, y, z);
+        crate::host_unavailable()
+    }
+}
+
+/// Write the scalar `u32` vertex output at `LOC`, declared `@interpolate(flat)`.
+#[inline(always)]
+pub fn vertex_store_u32<const LOC: u32>(value: u32) {
+    const { assert!(LOC < 16, "a vertex output is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_store_u32(LOC, value);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
+        crate::host_unavailable()
+    }
+}
+
 /// Write the `vec4<f32>` vertex output at `LOC`.
 #[inline(always)]
 pub fn vertex_store_4<const LOC: u32>(x: f32, y: f32, z: f32, w: f32) {
@@ -174,6 +207,57 @@ pub fn fragment_input_lane<const LOC: u32, const LANES: u32, const LANE: u32>() 
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        crate::host_unavailable()
+    }
+}
+
+/// The scalar `u32` fragment input at `LOC`.
+///
+/// The integer twin of [`fragment_input_lane`]: the vertex stage wrote one
+/// word at that location with [`vertex_store_u32`].
+#[inline(always)]
+#[must_use]
+pub fn fragment_input_u32<const LOC: u32>() -> u32 {
+    const { assert!(LOC < 16, "a fragment input is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_input_u32(LOC)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::host_unavailable()
+    }
+}
+
+/// Write the `vec2<f32>` fragment output at `LOC`.
+#[inline(always)]
+pub fn fragment_store_2_at<const LOC: u32>(x: f32, y: f32) {
+    const { assert!(LOC < 16, "a fragment output is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_store_2(LOC, x, y);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (x, y);
+        crate::host_unavailable()
+    }
+}
+
+/// Write the scalar `u32` fragment output at `LOC`.
+///
+/// An integer attachment (material id, quantized depth) is a `u32` target, not
+/// a color: the output struct member is a plain `u32`.
+#[inline(always)]
+pub fn fragment_store_u32_at<const LOC: u32>(value: u32) {
+    const { assert!(LOC < 16, "a fragment output is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_store_u32(LOC, value);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
         crate::host_unavailable()
     }
 }

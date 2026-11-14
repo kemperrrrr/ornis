@@ -455,7 +455,7 @@ impl Renderer3D {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &vs_module,
-                entry_point: Some(shaders::gbuffer_generated::vs_main::entry_point()),
+                entry_point: Some(shaders::gbuffer_generated::VS_ENTRY),
                 buffers: &[Some(Vertex::desc())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },

@@ -316,7 +316,7 @@ impl Renderer3D {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &fs_module,
-                    entry_point: Some(shaders::gbuffer_generated::fs_main::entry_point()),
+                    entry_point: Some(shaders::gbuffer_generated::FS_ENTRY),
                     targets,
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 }),

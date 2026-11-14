@@ -162,7 +162,7 @@ impl QualityFlags {
     ///
     /// The clippy stage runs two commands (the workspace lint and the
     /// render-bench lint under `test-util`), and `build-shaders` checks
-    /// seventeen artifacts, so that id counts seventeen times: the denominator
+    /// nineteen artifacts, so that id counts nineteen times: the denominator
     /// has to be right before the first stage prints its header.
     fn total_stages(&self) -> usize {
         let stages = self
@@ -173,8 +173,8 @@ impl QualityFlags {
         // `build-shaders` runs the base id plus one extra per remaining
         // artifact: cull, clusters, gtao, histogram, adapt, ssao, gtao 4x,
         // ssao 4x, the AO blur, and the translated post passes (composite, hdr,
-        // fog 1x/4x, bloom, aa edge, aa taa 1x/4x).
-        let shader_checks = 16 * usize::from(self.ci && self.enabled("build-shaders"));
+        // fog 1x/4x, bloom, aa edge, aa taa 1x/4x, gbuffer, gbuffer vertex-only).
+        let shader_checks = 18 * usize::from(self.ci && self.enabled("build-shaders"));
         stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
@@ -2156,6 +2156,20 @@ fn ci_stages(stages: &mut StageList<'_>) {
         "crates/render/src/shaders/aa_taa_generated.wgsl",
         "cargo xtask build-shaders --check (aa taa WGSL drift)",
     );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-gbuffer"),
+        Some("all"),
+        "crates/render/src/shaders/gbuffer_generated.wgsl",
+        "cargo xtask build-shaders --check (gbuffer WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-gbuffer"),
+        Some("vs_main"),
+        "crates/render/src/shaders/gbuffer_vertex_generated.wgsl",
+        "cargo xtask build-shaders --check (gbuffer vertex-only WGSL drift)",
+    );
     check_shader_artifact_listed(
         stages,
         Some("ornis-gpu-aa-taa"),
@@ -3834,7 +3848,7 @@ mod tests {
         assert_eq!(only_fmt.total_stages(), 1);
         let only_shaders =
             QualityFlags::parse(&["--ci".to_string(), "--only=build-shaders".to_string()]);
-        assert_eq!(only_shaders.total_stages(), 17);
+        assert_eq!(only_shaders.total_stages(), 19);
     }
 
     #[test]

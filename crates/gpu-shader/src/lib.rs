@@ -94,9 +94,10 @@ mod workgroup;
 
 pub use access::{ReadOnly, ReadWrite, StorageAccess};
 pub use builtin::{
-    fragment_input_lane, fragment_store, fragment_store_at, fragment_uv, global_invocation_lane,
-    instance_index, local_invocation_index, vertex_index, vertex_input_lane, vertex_position,
-    vertex_store_2, vertex_store_4,
+    fragment_input_lane, fragment_input_u32, fragment_store, fragment_store_2_at,
+    fragment_store_at, fragment_store_u32_at, fragment_uv, global_invocation_lane, instance_index,
+    local_invocation_index, vertex_index, vertex_input_lane, vertex_position, vertex_store_2,
+    vertex_store_3, vertex_store_4, vertex_store_u32,
 };
 pub use elements::{AtomicU32, Vec4U32};
 pub use math::{

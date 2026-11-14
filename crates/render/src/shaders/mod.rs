@@ -688,12 +688,16 @@ pub fn outline_fragment() -> String {
 
 // ── GBUFFER_VERTEX ────────────────────────────────────────────────────
 
-/// Assemble the gbuffer vertex shader (instance transforms + world position).
+/// The g-buffer module, both pipelines draw from it.
 ///
-/// Single source of truth — [`gbuffer_generated::wgsl_vertex_source`]
-/// (Rust → WGSL, path 2); shape pinned by `gbuffer_vertex_entry_matches_legacy_shape`.
+/// Single source of truth — [`gbuffer_generated::wgsl_source`] (Rust → WGSL,
+/// path 2). It carries every entry of the pass: the direct and the indirect
+/// vertex stage and the fragment stage. A pipeline layout only has to cover the
+/// bindings the entry point it names actually uses, so one module serves all
+/// three. The forward-PBR pass shares the narrower
+/// [`gbuffer_generated::wgsl_vertex_source`] instead.
 pub fn gbuffer_vertex() -> String {
-    gbuffer_generated::wgsl_vertex_source()
+    gbuffer_generated::wgsl_source()
 }
 
 // ── GBUFFER_FRAGMENT ──────────────────────────────────────────────────
@@ -824,10 +828,7 @@ mod tests {
                 GbufferVertexOutput::WGSL_FIELDS,
             ),
         ];
-        let entries: &[String] = &[
-            lighting_generated::vs_main::wgsl_source().to_string(),
-            gbuffer_generated::vs_main::wgsl_source().to_string(),
-        ];
+        let entries: &[String] = &[lighting_generated::vs_main::wgsl_source().to_string()];
         let mut checked = 0;
         for src in entries {
             for (ty, names) in extract_ctors(src) {
@@ -858,8 +859,6 @@ mod tests {
     fn stage_globals_declared() {
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
-        let gbuffer_fragment = gbuffer_generated::wgsl_source();
         let pbr = pbr_generated::wgsl_source();
         let textured = material_textures::wgsl_source_textured();
         // (bundle/entry globals, assemblies containing them). QuadConsts is
@@ -873,14 +872,6 @@ mod tests {
                 vec![lighting.clone()],
             ),
             (lighting_generated::LightingMaps::GLOBALS, vec![lighting]),
-            (
-                gbuffer_generated::GbufferVertexContext::GLOBALS,
-                vec![gbuffer_vertex],
-            ),
-            (
-                gbuffer_generated::fs_main::globals(),
-                vec![gbuffer_fragment],
-            ),
             (pbr_generated::PbrContext::GLOBALS, vec![pbr]),
             (
                 material_textures::PbrTexturedContext::GLOBALS,
@@ -922,8 +913,9 @@ mod tests {
         assert_eq!(lighting_generated::fs_main::entry_point(), "fs_main");
         assert_eq!(composite_generated::VS_ENTRY, "vs_main");
         assert_eq!(composite_generated::FS_ENTRY, "fs_main");
-        assert_eq!(gbuffer_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(gbuffer_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(gbuffer_generated::VS_ENTRY, "vs_main");
+        assert_eq!(gbuffer_generated::VS_INDIRECT_ENTRY, "vs_main_indirect");
+        assert_eq!(gbuffer_generated::FS_ENTRY, "fs_main");
         assert_eq!(pbr_generated::fs_main::entry_point(), "fs_main");
     }
 
@@ -1021,9 +1013,7 @@ mod tests {
     /// real definitions, the text is the real output.
     #[test]
     fn stage_field_uses_resolve() {
-        use super::interface::{
-            GbufferFragmentInput, GbufferOutput, GbufferVertexInput, GbufferVertexOutput,
-        };
+        use super::interface::GbufferFragmentInput;
         use crate::renderer::{
             BloomUniform, CameraUniform, CsmBlock, GpuLight, LightingUniform, PerObjectGpu,
         };
@@ -1035,16 +1025,6 @@ mod tests {
             output: Option<&'static [&'static str]>,
         }
         let entries = [
-            Entry {
-                src: gbuffer_generated::vs_main::wgsl_source(),
-                input: Some(GbufferVertexInput::WGSL_FIELDS),
-                output: Some(GbufferVertexOutput::WGSL_FIELDS),
-            },
-            Entry {
-                src: gbuffer_generated::fs_main::wgsl_source(),
-                input: Some(GbufferFragmentInput::WGSL_FIELDS),
-                output: Some(GbufferOutput::WGSL_FIELDS),
-            },
             Entry {
                 src: pbr_generated::fs_main::wgsl_source(),
                 input: Some(GbufferFragmentInput::WGSL_FIELDS),
@@ -1179,19 +1159,9 @@ mod tests {
         // (entry source, its assembled shader)
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
-        let gbuffer_fragment = gbuffer_generated::wgsl_source();
         let pbr = pbr_generated::wgsl_source();
         let textured = material_textures::wgsl_source_textured();
         let pairs: &[(&str, &str)] = &[
-            (
-                gbuffer_generated::vs_main::wgsl_source(),
-                gbuffer_vertex.as_str(),
-            ),
-            (
-                gbuffer_generated::fs_main::wgsl_source(),
-                gbuffer_fragment.as_str(),
-            ),
             (pbr_generated::fs_main::wgsl_source(), pbr.as_str()),
             (
                 material_textures::fs_main_textured::wgsl_source(),
@@ -1244,16 +1214,6 @@ mod tests {
                 QuadConsts::GLOBALS,
                 &composite_generated::COMPOSITE_RESOURCES,
                 ShaderStages::VERTEX,
-            ),
-            (
-                gbuffer_generated::GbufferVertexContext::GLOBALS,
-                &gbuffer_generated::GBUFFER_RESOURCES,
-                ShaderStages::VERTEX,
-            ),
-            (
-                gbuffer_generated::fs_main::globals(),
-                &gbuffer_generated::GBUFFER_RESOURCES,
-                ShaderStages::FRAGMENT,
             ),
             (
                 pbr_generated::PbrContext::GLOBALS,

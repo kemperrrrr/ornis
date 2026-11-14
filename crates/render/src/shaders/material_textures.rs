@@ -809,14 +809,25 @@ mod tests {
     /// first seven rows mirror the legacy table one-to-one.
     #[test]
     fn textured_resources_cover_stages_and_layout() {
-        use super::super::{bgl_entry, resource_decl};
+        use super::super::{bgl_entry, declared_bindings};
         use crate::shaders::pbr_generated::{PBR_RESOURCES, wgsl_vertex_source};
         // Vertex-only rows (per_objects) live in the shared vertex stage,
-        // like the legacy table — cover both assemblies together.
-        let src = wgsl_vertex_source() + &wgsl_source_textured();
+        // like the legacy table — cover both assemblies together. The vertex
+        // stage is the translated g-buffer kernel, so its bindings come from
+        // the parsed module rather than from a `resource_decl` line.
+        let vertex = naga::front::wgsl::parse_str(&wgsl_vertex_source()).expect("vertex");
+        let fragment = naga::front::wgsl::parse_str(&wgsl_source_textured()).expect("fragment");
+        let mut bindings = declared_bindings(&vertex);
+        bindings.extend(declared_bindings(&fragment));
         assert_eq!(TEXTURED_PBR_RESOURCES.len(), 20);
         for (i, r) in TEXTURED_PBR_RESOURCES.iter().enumerate() {
-            assert!(src.contains(&resource_decl(r)), "missing {}", r.name);
+            assert!(
+                bindings.contains(&(r.group, r.binding)),
+                "missing {} at {}:{}",
+                r.name,
+                r.group,
+                r.binding
+            );
             let e = bgl_entry(r, false);
             assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
             // The original seven rows stay aligned with the untextured
