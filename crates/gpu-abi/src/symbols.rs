@@ -246,9 +246,22 @@ pub const VERTEX_POSITION: &str = "vertex_position";
 /// The first operand is the location, the rest are the lanes.
 pub const VERTEX_STORE_F32X2: &str = "vertex_store_f32x2";
 
+/// `(param i32 f32 f32 f32)` — write one `vec3<f32>` vertex `@location`
+/// output.
+///
+/// The G-buffer varyings (world position, normal, tangent) are three-lane, so
+/// the width has an import of its own instead of a padded `vec4`.
+pub const VERTEX_STORE_F32X3: &str = "vertex_store_f32x3";
+
 /// `(param i32 f32 f32 f32 f32)` — write one `vec4<f32>` vertex `@location`
 /// output.
 pub const VERTEX_STORE_F32X4: &str = "vertex_store_f32x4";
+
+/// `(param i32 i32)` — write one scalar `u32` vertex `@location` output.
+///
+/// An integer varying is `@interpolate(flat)`: it carries an index (the
+/// G-buffer's material id), not an interpolated quantity.
+pub const VERTEX_STORE_U32: &str = "vertex_store_u32";
 
 /// `(param i32 i32 i32) (result f32)` — lane of a fragment `@location` input.
 ///
@@ -256,6 +269,24 @@ pub const VERTEX_STORE_F32X4: &str = "vertex_store_f32x4";
 /// declare the interpolant the vertex stage writes at the same location, so the
 /// lane count is declared on both sides and not inferred.
 pub const FRAGMENT_INPUT_LANE: &str = "fragment_input_lane";
+
+/// `(param i32) (result i32)` — the scalar `u32` fragment `@location` input.
+///
+/// The integer twin of [`FRAGMENT_INPUT_LANE`]: a flat varying carries one
+/// word, not lanes of an interpolated vector.
+pub const FRAGMENT_INPUT_U32: &str = "fragment_input_u32";
+
+/// `(param i32 f32 f32)` — write one `vec2<f32>` fragment `@location` output.
+///
+/// The G-buffer's encoded normal, world-position xy and motion vector are two
+/// lanes each; padding them to a `vec4` would change the attachment formats.
+pub const FRAGMENT_STORE_F32X2_LOCATION: &str = "fragment_store_f32x2_location";
+
+/// `(param i32 i32)` — write one scalar `u32` fragment `@location` output.
+///
+/// Integer attachments (material id, quantized previous depth) are `u32`
+/// targets, not colors: the output struct member is a plain `u32`.
+pub const FRAGMENT_STORE_U32_LOCATION: &str = "fragment_store_u32_location";
 
 /// `(param i32 f32 f32 f32 f32)` — write one fragment `@location` output.
 ///

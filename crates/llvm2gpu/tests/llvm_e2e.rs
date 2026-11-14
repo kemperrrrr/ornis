@@ -614,6 +614,77 @@ start:
     assert!(outputs[1].1.1 >= outputs[0].1.1 + 16, "{wgsl}");
 }
 
+/// The G-buffer shape: three-lane varyings, a flat `u32` index, and integer
+/// and two-lane attachments.
+#[test]
+fn gbuffer_interface_declares_vec3_flat_u32_and_integer_targets() {
+    let ir = r#"
+declare float @vertex_input_lane(i32, i32, i32)
+declare void @vertex_position(float, float, float, float)
+declare void @vertex_store_f32x3(i32, float, float, float)
+declare void @vertex_store_u32(i32, i32)
+define dso_local void @vs_main() {
+start:
+  %x = call float @vertex_input_lane(i32 0, i32 3, i32 0)
+  %y = call float @vertex_input_lane(i32 0, i32 3, i32 1)
+  %z = call float @vertex_input_lane(i32 0, i32 3, i32 2)
+  call void @vertex_position(float %x, float %y, float %z, float 1.000000e+00)
+  call void @vertex_store_f32x3(i32 0, float %x, float %y, float %z)
+  call void @vertex_store_u32(i32 4, i32 7)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("vertex entry with vec3 and flat u32");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("@interpolate(flat)"), "{wgsl}");
+    let interface = stage_interface(wgsl);
+    let outputs = &interface.outputs;
+    assert_eq!(outputs.len(), 3, "{wgsl}");
+    assert!(at_builtin(
+        &outputs[0].0,
+        naga::BuiltIn::Position { invariant: false }
+    ));
+    assert!(at_location(&outputs[1].0, 0), "{wgsl}");
+    assert_eq!(
+        outputs[1].1.0, 3,
+        "a vec3 varying keeps three lanes: {wgsl}"
+    );
+    assert!(at_location(&outputs[2].0, 4), "{wgsl}");
+    assert_eq!(outputs[2].1.0, 1, "the flat index is one word: {wgsl}");
+
+    let fragment = r#"
+declare float @fragment_input_lane(i32, i32, i32)
+declare i32 @fragment_input_u32(i32)
+declare void @fragment_store_location(i32, float, float, float, float)
+declare void @fragment_store_f32x2_location(i32, float, float)
+declare void @fragment_store_u32_location(i32, i32)
+define dso_local void @fs_main() {
+start:
+  %x = call float @fragment_input_lane(i32 0, i32 3, i32 0)
+  %id = call i32 @fragment_input_u32(i32 4)
+  call void @fragment_store_location(i32 0, float %x, float %x, float %x, float 1.000000e+00)
+  call void @fragment_store_f32x2_location(i32 1, float %x, float %x)
+  call void @fragment_store_u32_location(i32 2, i32 %id)
+  ret void
+}
+"#;
+    let translated = translate(fragment).expect("fragment entry with integer target");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("-> FragmentOut"), "{wgsl}");
+    let interface = stage_interface(wgsl);
+    let outputs = &interface.outputs;
+    assert_eq!(outputs.len(), 3, "{wgsl}");
+    assert_eq!(outputs[0].1.0, 4, "{wgsl}");
+    assert_eq!(outputs[1].1.0, 2, "the vec2 target stays two lanes: {wgsl}");
+    assert_eq!(outputs[2].1.0, 1, "the u32 target is one word: {wgsl}");
+    // Only the varying input is flat: a fragment output is never interpolated.
+    assert_eq!(
+        wgsl.matches("@interpolate(flat)").count(),
+        1,
+        "the integer target must not be interpolated: {wgsl}"
+    );
+}
+
 #[test]
 fn one_location_cannot_have_two_widths() {
     let ir = r#"

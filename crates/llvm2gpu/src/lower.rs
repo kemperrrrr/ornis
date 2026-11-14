@@ -271,10 +271,38 @@ struct StageIo {
     instance_index: bool,
     /// `@builtin(position)` of a vertex entry is written.
     position_out: bool,
-    /// Declared inputs: location -> lanes.
-    inputs: BTreeMap<u32, u32>,
-    /// Written outputs: location -> lanes.
-    outputs: BTreeMap<u32, u32>,
+    /// Declared inputs: location -> value kind.
+    inputs: BTreeMap<u32, IoValue>,
+    /// Written outputs: location -> value kind.
+    outputs: BTreeMap<u32, IoValue>,
+}
+
+/// Type of one `@location` interface value.
+///
+/// The subset had only `vecN<f32>`; an integer attachment or a flat varying
+/// carries one `u32`, so the declared type is per location instead of a lane
+/// count every value shares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IoValue {
+    /// `vecN<f32>` with `N` in `2..=4`.
+    Vec(u32),
+    /// Scalar `u32`: `@interpolate(flat)` as a varying, a plain `u32` target.
+    U32,
+}
+
+impl IoValue {
+    /// The value a `LANES`-lane float import declares.
+    fn floats(lanes: u32) -> Self {
+        Self::Vec(lanes)
+    }
+
+    /// Naga type of this value in `module`.
+    fn ty(self, module: &mut naga::Module) -> Result<naga::Handle<naga::Type>, TranslateError> {
+        match self {
+            Self::Vec(lanes) => vec_f32_type(module, lanes).ok_or(TranslateError::Unsupported),
+            Self::U32 => Ok(scalar(module, naga::ScalarKind::Uint)),
+        }
+    }
 }
 
 /// The stage-interface import a call names.
@@ -290,23 +318,33 @@ enum IoImport {
     VertexPosition,
     /// Two-lane vertex `@location` output.
     VertexOutput2,
+    /// Three-lane vertex `@location` output.
+    VertexOutput3,
     /// Four-lane vertex `@location` output.
     VertexOutput4,
+    /// Scalar `u32` vertex `@location` output.
+    VertexOutputU32,
     /// `@builtin(position)` of a fragment entry.
     FragmentPosition,
     /// Lane of a fragment `@location` input.
     FragmentInput,
+    /// Scalar `u32` fragment `@location` input.
+    FragmentInputU32,
     /// Lane of the fragment's `@location(0)` vec2, the AO-pass shape.
     FragmentUv,
     /// Fragment output at a named location.
     FragmentOutput,
+    /// Two-lane fragment output at a named location.
+    FragmentOutput2,
+    /// Scalar `u32` fragment output at a named location.
+    FragmentOutputU32,
     /// Fragment output at `@location(0)`, the bare-vec4 shape.
     FragmentOutput0,
 }
 
 /// Order matters only where one import name is a prefix of another, which is
 /// why the located fragment output precedes the `@location(0)` one.
-const IO_IMPORTS: [(&str, IoImport); 11] = [
+const IO_IMPORTS: [(&str, IoImport); 16] = [
     (
         ornis_gpu_abi::symbols::VERTEX_INPUT_LANE,
         IoImport::VertexInput,
@@ -316,8 +354,16 @@ const IO_IMPORTS: [(&str, IoImport); 11] = [
         IoImport::VertexOutput2,
     ),
     (
+        ornis_gpu_abi::symbols::VERTEX_STORE_F32X3,
+        IoImport::VertexOutput3,
+    ),
+    (
         ornis_gpu_abi::symbols::VERTEX_STORE_F32X4,
         IoImport::VertexOutput4,
+    ),
+    (
+        ornis_gpu_abi::symbols::VERTEX_STORE_U32,
+        IoImport::VertexOutputU32,
     ),
     (
         ornis_gpu_abi::symbols::VERTEX_POSITION,
@@ -327,6 +373,14 @@ const IO_IMPORTS: [(&str, IoImport); 11] = [
     (
         ornis_gpu_abi::symbols::INSTANCE_INDEX,
         IoImport::InstanceIndex,
+    ),
+    (
+        ornis_gpu_abi::symbols::FRAGMENT_STORE_F32X2_LOCATION,
+        IoImport::FragmentOutput2,
+    ),
+    (
+        ornis_gpu_abi::symbols::FRAGMENT_STORE_U32_LOCATION,
+        IoImport::FragmentOutputU32,
     ),
     (
         ornis_gpu_abi::symbols::FRAGMENT_STORE_LOCATION,
@@ -339,6 +393,10 @@ const IO_IMPORTS: [(&str, IoImport); 11] = [
     (
         ornis_gpu_abi::symbols::FRAGMENT_INPUT_LANE,
         IoImport::FragmentInput,
+    ),
+    (
+        ornis_gpu_abi::symbols::FRAGMENT_INPUT_U32,
+        IoImport::FragmentInputU32,
     ),
     (
         ornis_gpu_abi::symbols::FRAGMENT_UV_LANE,
@@ -377,32 +435,55 @@ fn scan_io(func: &LlvmFunc, stage: Stage) -> Result<StageIo, TranslateError> {
                 (Stage::Vertex, IoImport::InstanceIndex) => io.instance_index = true,
                 (Stage::Vertex, IoImport::VertexInput) => {
                     let (location, lanes) = input_lanes(args)?;
-                    record_lanes(&mut io.inputs, location, lanes)?;
+                    record_io(&mut io.inputs, location, IoValue::floats(lanes))?;
                 }
                 (Stage::Vertex, IoImport::VertexPosition) => io.position_out = true,
-                (Stage::Vertex, IoImport::VertexOutput2 | IoImport::VertexOutput4) => {
-                    let lanes = if import == IoImport::VertexOutput2 {
-                        VEC2_LANES
-                    } else {
-                        VEC4_LANES
+                (Stage::Vertex, IoImport::VertexOutputU32) => {
+                    record_io(&mut io.outputs, location_of(args)?, IoValue::U32)?;
+                }
+                (
+                    Stage::Vertex,
+                    IoImport::VertexOutput2 | IoImport::VertexOutput3 | IoImport::VertexOutput4,
+                ) => {
+                    let lanes = match import {
+                        IoImport::VertexOutput2 => VEC2_LANES,
+                        IoImport::VertexOutput3 => VEC3_LANES,
+                        _ => VEC4_LANES,
                     };
-                    record_lanes(&mut io.outputs, location_of(args)?, lanes)?;
+                    record_io(&mut io.outputs, location_of(args)?, IoValue::floats(lanes))?;
                 }
                 // The fragment's `@builtin(position)` argument is always
                 // declared, so reading it needs no interface bookkeeping.
                 (Stage::Fragment, IoImport::FragmentPosition) => {}
                 (Stage::Fragment, IoImport::FragmentInput) => {
                     let (location, lanes) = input_lanes(args)?;
-                    record_lanes(&mut io.inputs, location, lanes)?;
+                    record_io(&mut io.inputs, location, IoValue::floats(lanes))?;
+                }
+                (Stage::Fragment, IoImport::FragmentInputU32) => {
+                    record_io(&mut io.inputs, location_of(args)?, IoValue::U32)?;
                 }
                 (Stage::Fragment, IoImport::FragmentUv) => {
-                    record_lanes(&mut io.inputs, 0, VEC2_LANES)?;
+                    record_io(&mut io.inputs, 0, IoValue::floats(VEC2_LANES))?;
                 }
                 (Stage::Fragment, IoImport::FragmentOutput0) => {
-                    record_lanes(&mut io.outputs, 0, VEC4_LANES)?;
+                    record_io(&mut io.outputs, 0, IoValue::floats(VEC4_LANES))?;
                 }
                 (Stage::Fragment, IoImport::FragmentOutput) => {
-                    record_lanes(&mut io.outputs, location_of(args)?, VEC4_LANES)?;
+                    record_io(
+                        &mut io.outputs,
+                        location_of(args)?,
+                        IoValue::floats(VEC4_LANES),
+                    )?;
+                }
+                (Stage::Fragment, IoImport::FragmentOutput2) => {
+                    record_io(
+                        &mut io.outputs,
+                        location_of(args)?,
+                        IoValue::floats(VEC2_LANES),
+                    )?;
+                }
+                (Stage::Fragment, IoImport::FragmentOutputU32) => {
+                    record_io(&mut io.outputs, location_of(args)?, IoValue::U32)?;
                 }
                 // A stage reading the other stage's interface would declare an
                 // argument its entry point cannot have.
@@ -432,24 +513,26 @@ fn location_of(args: &[Operand]) -> Result<u32, TranslateError> {
     const_u32(args.first().ok_or(TranslateError::Unsupported)?)
 }
 
-/// Record that `location` carries `lanes` lanes.
-fn record_lanes(
-    map: &mut BTreeMap<u32, u32>,
+/// Record that `location` carries `value`.
+fn record_io(
+    map: &mut BTreeMap<u32, IoValue>,
     location: u32,
-    lanes: u32,
+    value: IoValue,
 ) -> Result<(), TranslateError> {
-    if !(1..=VEC4_LANES).contains(&lanes) {
+    if let IoValue::Vec(lanes) = value
+        && !(VEC2_LANES..=VEC4_LANES).contains(&lanes)
+    {
         return Err(TranslateError::UnsupportedType(format!(
-            "@location({location}) needs one to four lanes, got {lanes}"
+            "@location({location}) needs two to four lanes, got {lanes}"
         )));
     }
     match map.get(&location) {
-        Some(&existing) if existing != lanes => Err(TranslateError::UnsupportedType(format!(
-            "@location({location}) is used as both a {existing}-lane and a {lanes}-lane value"
+        Some(&existing) if existing != value => Err(TranslateError::UnsupportedType(format!(
+            "@location({location}) is used as both {existing:?} and {value:?}"
         ))),
         Some(_) => Ok(()),
         None => {
-            map.insert(location, lanes);
+            map.insert(location, value);
             Ok(())
         }
     }
@@ -466,6 +549,33 @@ fn location_binding(location: u32) -> naga::Binding {
     }
 }
 
+/// `@location` binding of one interface value.
+///
+/// An integer varying is `@interpolate(flat)` — WGSL forbids interpolating a
+/// `u32` — and a fragment output is never interpolated.
+fn value_binding(location: u32, value: IoValue, output: bool) -> naga::Binding {
+    let mut binding = location_binding(location);
+    if let naga::Binding::Location {
+        interpolation,
+        sampling,
+        ..
+    } = &mut binding
+    {
+        match (value, output) {
+            (IoValue::U32, false) => {
+                *interpolation = Some(naga::Interpolation::Flat);
+                *sampling = None;
+            }
+            (_, true) => {
+                *interpolation = None;
+                *sampling = None;
+            }
+            _ => {}
+        }
+    }
+    binding
+}
+
 /// Stage-output struct under construction: members, their layout, and the
 /// member index of every output slot.
 #[derive(Default)]
@@ -479,11 +589,14 @@ struct OutputLayout {
 }
 
 impl OutputLayout {
-    /// Append the member for `slot`: `lanes` of `ty` at `binding`.
+    /// Append the member for `slot`: `value` of `ty` at `binding`.
+    ///
+    /// The struct is laid out like the WGSL one: a `vec3` occupies 12 bytes at
+    /// alignment 16, so its member cannot be padded to four lanes.
     fn push(
         &mut self,
         slot: OutSlot,
-        lanes: u32,
+        value: IoValue,
         ty: naga::Handle<naga::Type>,
         binding: naga::Binding,
     ) {
@@ -491,10 +604,14 @@ impl OutputLayout {
             OutSlot::Position => "position".to_string(),
             OutSlot::Location(location) => format!("o{location}"),
         };
-        self.specs.push(ornis_gpu_abi::FieldLayout {
-            size: lanes * WORD_BYTES,
-            align: lanes * WORD_BYTES,
-        });
+        let (size, align) = match value {
+            IoValue::Vec(VEC2_LANES) => (VEC2_LANES * WORD_BYTES, VEC2_LANES * WORD_BYTES),
+            // A `vec3` is three words wide at a four-word alignment.
+            IoValue::Vec(VEC3_LANES) => (VEC3_LANES * WORD_BYTES, VEC4_LANES * WORD_BYTES),
+            IoValue::Vec(_) => (VEC4_LANES * WORD_BYTES, VEC4_LANES * WORD_BYTES),
+            IoValue::U32 => (WORD_BYTES, WORD_BYTES),
+        };
+        self.specs.push(ornis_gpu_abi::FieldLayout { size, align });
         self.slots.insert(slot, self.members.len() as u32);
         self.members.push(naga::StructMember {
             name: Some(name),
@@ -2000,17 +2117,19 @@ fn stage_arguments(
         .then(|| vec4_f32_type(module))
         .map(|ty| position_arg(ty, function));
     let mut inputs = BTreeMap::new();
-    for (&location, &lanes) in &io.inputs {
-        let ty = vec_f32_type(module, lanes).ok_or(TranslateError::Unsupported)?;
+    for (&location, &value) in &io.inputs {
+        let ty = value.ty(module)?;
         // A fragment's location-0 two-lane interpolant keeps the `uv`
         // parameter name the checked-in AO artifacts already carry.
-        let legacy_uv = stage == Stage::Fragment && location == 0 && lanes == VEC2_LANES;
+        let legacy_uv =
+            stage == Stage::Fragment && location == 0 && value == IoValue::floats(VEC2_LANES);
         let name = if legacy_uv {
             "uv".to_string()
         } else {
             format!("in{location}")
         };
-        inputs.insert(location, location_arg(function, ty, location, &name));
+        let binding = value_binding(location, value, false);
+        inputs.insert(location, location_arg(function, ty, binding, &name));
     }
     Ok(StageArguments {
         global_id,
@@ -2040,7 +2159,7 @@ fn stage_output(
     }
     let bare_fragment = stage == Stage::Fragment
         && io.outputs.len() == 1
-        && io.outputs.get(&0) == Some(&VEC4_LANES)
+        && io.outputs.get(&0) == Some(&IoValue::floats(VEC4_LANES))
         && !io.position_out;
     if bare_fragment {
         let ty = vec4_f32_type(module);
@@ -2083,19 +2202,15 @@ fn output_struct(
     if stage == Stage::Vertex {
         layout.push(
             OutSlot::Position,
-            VEC4_LANES,
+            IoValue::floats(VEC4_LANES),
             vec4_f32_type(module),
             naga::Binding::BuiltIn(naga::BuiltIn::Position { invariant: false }),
         );
     }
-    for (&location, &lanes) in &io.outputs {
-        let ty = vec_f32_type(module, lanes).ok_or(TranslateError::Unsupported)?;
-        layout.push(
-            OutSlot::Location(location),
-            lanes,
-            ty,
-            location_binding(location),
-        );
+    for (&location, &value) in &io.outputs {
+        let ty = value.ty(module)?;
+        let binding = value_binding(location, value, stage == Stage::Fragment);
+        layout.push(OutSlot::Location(location), value, ty, binding);
     }
     let position = layout.slots.get(&OutSlot::Position).copied();
     let slots = layout.slots.clone();
@@ -4009,6 +4124,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains("fragment_uv_lane") {
             return self.input_lane(out, 0, args.first().ok_or(TranslateError::Unsupported)?);
         }
+        if callee.contains(ornis_gpu_abi::symbols::FRAGMENT_INPUT_U32) {
+            return self.input_word(const_u32(args.first().ok_or(TranslateError::Unsupported)?)?);
+        }
         if callee.contains("vertex_input_lane") || callee.contains("fragment_input_lane") {
             if args.len() != INPUT_LANE_ARGS {
                 return Err(TranslateError::Unsupported);
@@ -4427,11 +4545,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         lane: &Operand,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let lane = const_u32(lane)?;
-        let lanes = *self
-            .io
-            .inputs
-            .get(&location)
-            .ok_or(TranslateError::Unsupported)?;
+        let Some(IoValue::Vec(lanes)) = self.io.inputs.get(&location).copied() else {
+            return Err(TranslateError::Unsupported);
+        };
         if lane >= lanes {
             return Err(TranslateError::Unsupported);
         }
@@ -4994,23 +5110,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             );
             return Ok(());
         }
-        if callee.contains("vertex_position") {
-            if args.len() != POSITION_LANES as usize {
-                return Err(TranslateError::Unsupported);
-            }
-            return self.position_store(out, args);
-        }
-        if callee.contains("vertex_store_f32x2")
-            || callee.contains("vertex_store_f32x4")
-            || callee.contains("fragment_store_location")
-        {
-            if args.len() < 2 {
-                return Err(TranslateError::Unsupported);
-            }
-            return self.store_lanes(out, const_u32(&args[0])?, &args[1..]);
-        }
-        if callee.contains("fragment_store_f32x4") {
-            return self.store_lanes(out, 0, args);
+        if let Some(import) = io_import(callee) {
+            return self.stage_store(out, import, args);
         }
         if callee.contains("storage_write_u32x4") {
             return self.storage_write_vec4(out, args);
@@ -5080,7 +5181,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         };
         let var = stage_out.var;
         if let OutSlot::Location(location) = slot
-            && self.io.outputs.get(&location) != Some(&(lanes.len() as u32))
+            && self.io.outputs.get(&location) != Some(&IoValue::floats(lanes.len() as u32))
         {
             return Err(TranslateError::Unsupported);
         }
@@ -5092,6 +5193,47 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let ty =
             vec_f32_type(&mut self.builders.module, width).ok_or(TranslateError::Unsupported)?;
         let value = self.expr(out, naga::Expression::Compose { ty, components });
+        self.write_slot(out, var, member, value)
+    }
+
+    /// Store one `u32` into output `slot` (a flat varying or an integer target).
+    fn store_scalar(
+        &mut self,
+        out: &mut naga::Block,
+        location: u32,
+        value: &Operand,
+    ) -> Result<(), TranslateError> {
+        let slot = OutSlot::Location(location);
+        if self.io.outputs.get(&location) != Some(&IoValue::U32) {
+            return Err(TranslateError::Unsupported);
+        }
+        let member = self
+            .stage_out
+            .as_ref()
+            .and_then(|stage_out| {
+                stage_out
+                    .locations
+                    .as_ref()
+                    .and_then(|members| members.get(&slot).copied())
+            })
+            .ok_or(TranslateError::Unsupported)?;
+        let value = self.operand(out, value)?;
+        let var = self
+            .stage_out
+            .as_ref()
+            .ok_or(TranslateError::Unsupported)?
+            .var;
+        self.write_slot(out, var, member, value)
+    }
+
+    /// Store `value` into member `member` of the stage-output local `var`.
+    fn write_slot(
+        &mut self,
+        out: &mut naga::Block,
+        var: naga::Handle<naga::LocalVariable>,
+        member: u32,
+        value: naga::Handle<naga::Expression>,
+    ) -> Result<(), TranslateError> {
         let base = self.expr(out, naga::Expression::LocalVariable(var));
         let pointer = if self
             .stage_out
@@ -5113,6 +5255,60 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             naga::Span::default(),
         );
         Ok(())
+    }
+
+    /// Store one stage-interface output the body writes.
+    fn stage_store(
+        &mut self,
+        out: &mut naga::Block,
+        import: IoImport,
+        args: &[Operand],
+    ) -> Result<(), TranslateError> {
+        match import {
+            IoImport::VertexPosition => {
+                if args.len() != POSITION_LANES as usize {
+                    return Err(TranslateError::Unsupported);
+                }
+                self.position_store(out, args)
+            }
+            IoImport::VertexOutputU32 | IoImport::FragmentOutputU32 => {
+                if args.len() != 2 {
+                    return Err(TranslateError::Unsupported);
+                }
+                self.store_scalar(out, location_of(args)?, &args[1])
+            }
+            IoImport::FragmentOutput0 => {
+                if args.len() != VEC4_LANES as usize {
+                    return Err(TranslateError::Unsupported);
+                }
+                self.store_lanes(out, 0, args)
+            }
+            IoImport::VertexOutput2
+            | IoImport::VertexOutput3
+            | IoImport::VertexOutput4
+            | IoImport::FragmentOutput
+            | IoImport::FragmentOutput2 => {
+                if args.len() < 2 {
+                    return Err(TranslateError::Unsupported);
+                }
+                self.store_lanes(out, location_of(args)?, &args[1..])
+            }
+            _ => Err(TranslateError::Unsupported),
+        }
+    }
+
+    /// The scalar `u32` fragment input at `location`.
+    fn input_word(
+        &mut self,
+        location: u32,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if self.io.inputs.get(&location) != Some(&IoValue::U32) {
+            return Err(TranslateError::Unsupported);
+        }
+        self.inputs
+            .get(&location)
+            .copied()
+            .ok_or(TranslateError::Unsupported)
     }
 
     /// `storage_write_u32x4(group, binding, index, x, y, z, w)`.
@@ -5591,14 +5787,14 @@ fn builtin_u32_arg(
 fn location_arg(
     function: &mut naga::Function,
     ty: naga::Handle<naga::Type>,
-    location: u32,
+    binding: naga::Binding,
     name: &str,
 ) -> naga::Handle<naga::Expression> {
     let index = function.arguments.len() as u32;
     function.arguments.push(naga::FunctionArgument {
         name: Some(name.to_string()),
         ty,
-        binding: Some(location_binding(location)),
+        binding: Some(binding),
     });
     append(function, naga::Expression::FunctionArgument(index))
 }
