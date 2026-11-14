@@ -199,6 +199,20 @@ pub fn depth_ramp(
     view
 }
 
+/// Map `buffer` for reading and return its bytes.
+///
+/// The no-callback form [`sized`](super::sized) and `ibl_split_sum` use: polling
+/// until the map completes keeps the readback to one shape across the crate.
+pub fn map_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll readback");
+    // Dropping the mapped range is what unmaps the buffer in wgpu 30.
+    slice.get_mapped_range().expect("mapped range").to_vec()
+}
+
 /// Count the pixels of two read-backs that differ by more than one 8-bit step.
 pub fn mismatched_pixels(reference: &[u8], candidate: &[u8]) -> usize {
     assert_eq!(reference.len(), candidate.len(), "read-back size");

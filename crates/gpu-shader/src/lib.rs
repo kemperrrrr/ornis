@@ -101,11 +101,11 @@ pub use builtin::{
 pub use elements::{AtomicU32, Vec4U32};
 pub use math::{
     abs, acos, atan2, clamp, cos, cross_lane, dot2, dot3, exp2, fract, homogeneous_divide, length3,
-    log2, mix, normalize_lane, pow, sign, sin, smoothstep,
+    log2, mix, normalize_lane, pow, sign, sin, smoothstep, sqrt,
 };
 pub use ornis_gpu_shader_macros::gpu_entry;
 pub use resource::Storage;
-pub use texture::{DepthTexture2d, Sampler, Texture2d};
+pub use texture::{DepthTexture2d, Sampler, Texture2d, Texture2dU32};
 pub use uniform::{GpuStruct, Uniform};
 pub use vec3::Vec3;
 pub use workgroup::{WorkgroupAtomicU32, WorkgroupU32, workgroup_barrier};

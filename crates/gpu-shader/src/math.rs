@@ -60,6 +60,24 @@ unary!(
     fract
 );
 
+/// `sqrt(value)` — one WGSL `sqrt`.
+///
+/// `no_std` has no `f32::sqrt`; a Newton series would not match the GPU
+/// instruction.
+#[inline(always)]
+#[must_use]
+pub fn sqrt(value: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::sqrt(value)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
+        crate::host_unavailable()
+    }
+}
+
 /// `smoothstep(low, high, x)` — one WGSL `smoothstep`.
 ///
 /// Expanding it by hand (`clamp((x - low) / (high - low))³`) rounds differently

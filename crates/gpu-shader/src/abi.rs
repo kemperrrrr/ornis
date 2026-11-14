@@ -58,6 +58,8 @@ unsafe extern "C" {
     fn gpu_atan2(y: f32, x: f32) -> f32;
     #[link_name = "gpu_smoothstep"]
     fn gpu_smoothstep(low: f32, high: f32, x: f32) -> f32;
+    #[link_name = "gpu_sqrt"]
+    fn gpu_sqrt(value: f32) -> f32;
     #[link_name = "uniform_field_vec4_plane_dot"]
     fn uniform_field_vec4_plane_dot(
         group: u32,
@@ -100,6 +102,8 @@ unsafe extern "C" {
     fn gpu_normalize3_lane(x: f32, y: f32, z: f32, lane: u32) -> f32;
     #[link_name = "texture_load_2d_f32"]
     fn texture_load_2d_f32(group: u32, binding: u32, x: u32, y: u32) -> f32;
+    #[link_name = "texture_load_2d_u32"]
+    fn texture_load_2d_u32(group: u32, binding: u32, x: u32, y: u32) -> u32;
     #[link_name = "texture_load_2d_f32x4"]
     fn texture_load_2d_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32;
     #[link_name = "texture_sample_level_2d_f32x4"]
@@ -233,6 +237,12 @@ pub(crate) fn vec4_component(
     call!(uniform_field_vec4_component_f32(
         group, binding, sid, field, component
     ))
+}
+
+/// `sqrt(value)` — one WGSL `sqrt`.
+#[inline(always)]
+pub(crate) fn sqrt(value: f32) -> f32 {
+    call!(gpu_sqrt(value))
 }
 
 /// `smoothstep(low, high, x)` — one WGSL `smoothstep`.
@@ -385,6 +395,12 @@ pub(crate) fn cross3_lane(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, 
 #[inline(always)]
 pub(crate) fn normalize3_lane(x: f32, y: f32, z: f32, lane: u32) -> f32 {
     call!(gpu_normalize3_lane(x, y, z, lane))
+}
+
+/// First lane of a `texture_2d<u32>` texel at mip 0.
+#[inline(always)]
+pub(crate) fn texture_load_u32(group: u32, binding: u32, x: u32, y: u32) -> u32 {
+    call!(texture_load_2d_u32(group, binding, x, y))
 }
 
 /// Scalar load of a depth texture at mip 0.

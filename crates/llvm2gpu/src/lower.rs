@@ -698,6 +698,9 @@ enum TextureKind {
     Depth,
     /// `texture_2d<f32>`. `textureLoad` returns `vec4<f32>`.
     Sampled,
+    /// `texture_2d<u32>`. `textureLoad` returns `vec4<u32>`; lane 0 is the
+    /// packed word a `R16Uint`-style target carries.
+    Unsigned,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -3543,6 +3546,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 let value = self.cast_signed(out, a, naga::ScalarKind::Float)?;
                 self.bind(dst, value, out);
             }
+            Instr::Fptosi { dst, a } => {
+                // A signed truncation: convert to `i32`, then keep the bits.
+                let value = self.cast(out, a, naga::ScalarKind::Sint)?;
+                let value = self.bitcast_uint(out, value);
+                self.bind(dst, value, out);
+            }
             Instr::Fptoui { dst, a } => {
                 let value = self.cast(out, a, naga::ScalarKind::Uint)?;
                 self.bind(dst, value, out);
@@ -3943,6 +3952,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if let Some(helper) = self.builders.helpers.get(callee).copied() {
             return self.call_helper(out, helper, args);
         }
+        if callee.contains("llvm.fptosi.sat") {
+            if args.len() != 1 {
+                return Err(TranslateError::Unsupported);
+            }
+            let value = self.cast(out, &args[0], naga::ScalarKind::Sint)?;
+            return Ok(self.bitcast_uint(out, value));
+        }
         if callee.contains("llvm.fptoui.sat") {
             if args.len() != 1 {
                 return Err(TranslateError::Unsupported);
@@ -4013,6 +4029,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if callee.contains("texture_sample_level_2d_f32x4") {
             return self.texture_sample_lane(out, args);
+        }
+        if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_U32) {
+            return self.texture_load_u32(out, args);
         }
         if callee.contains("texture_load_2d_f32x4") {
             return self.texture_load_lane(out, args);
@@ -4536,10 +4555,17 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         out: &mut naga::Block,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
-        let (group, binding, x, y) = texture_xy(args)?;
-        let image = self.builders.texture(group, binding, TextureKind::Depth)?;
-        let multisampled = self.builders.sampling.multisampled_at(group, binding);
-        self.image_load(out, image, multisampled, x, y)
+        self.image_load_args(out, args, TextureKind::Depth)
+    }
+
+    /// `texture_load_2d_u32(group, binding, x, y)`: the first lane of a
+    /// `texture_2d<u32>` texel.
+    fn texture_load_u32(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        self.texture_load_lane_of(out, args, TextureKind::Unsigned, 0)
     }
 
     /// `texture_sample_level_2d_f32x4(group, binding, sampler_group,
@@ -4615,12 +4641,31 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if lane >= VEC4_LANES {
             return Err(TranslateError::Unsupported);
         }
-        let (group, binding, x, y) = texture_xy(&args[..UNIFORM_PREFIX])?;
-        let image = self
-            .builders
-            .texture(group, binding, TextureKind::Sampled)?;
+        self.texture_load_lane_of(out, &args[..UNIFORM_PREFIX], TextureKind::Sampled, lane)
+    }
+
+    /// `textureLoad` of a `kind` image at mip 0, spelled by the arguments.
+    fn image_load_args(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+        kind: TextureKind,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let (group, binding, x, y) = texture_xy(args)?;
+        let image = self.builders.texture(group, binding, kind)?;
         let multisampled = self.builders.sampling.multisampled_at(group, binding);
-        let texel = self.image_load(out, image, multisampled, x, y)?;
+        self.image_load(out, image, multisampled, x, y)
+    }
+
+    /// `textureLoad` at mip 0, lane `lane` of the loaded texel.
+    fn texture_load_lane_of(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+        kind: TextureKind,
+        lane: u32,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let texel = self.image_load_args(out, args, kind)?;
         Ok(self.expr(
             out,
             naga::Expression::AccessIndex {
@@ -5331,6 +5376,10 @@ fn image_class(kind: TextureKind, multisampled: bool) -> naga::ImageClass {
             kind: naga::ScalarKind::Float,
             multi: multisampled,
         },
+        TextureKind::Unsigned => naga::ImageClass::Sampled {
+            kind: naga::ScalarKind::Uint,
+            multi: multisampled,
+        },
     }
 }
 
@@ -5366,7 +5415,8 @@ fn ternary_math(callee: &str, argc: usize) -> Option<naga::MathFunction> {
 fn unary_math(callee: &str) -> Option<naga::MathFunction> {
     // `acos` before `cos`, `log2` before `log`: the shorter name is a substring.
     const FNS: &[(&str, naga::MathFunction)] = &[
-        ("sqrt", naga::MathFunction::Sqrt),
+        (ornis_gpu_abi::symbols::GPU_SQRT, naga::MathFunction::Sqrt),
+        ("llvm.sqrt.f32", naga::MathFunction::Sqrt),
         ("fract", naga::MathFunction::Fract),
         ("acos", naga::MathFunction::Acos),
         ("sin", naga::MathFunction::Sin),

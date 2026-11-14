@@ -128,8 +128,8 @@ impl Renderer3D {
             &taa_module,
             &taa_layout,
             &[surface_format, HISTORY_FORMAT],
-            shaders::aa_taa_generated::vs_main::entry_point(),
-            shaders::aa_taa_generated::fs_main::entry_point(),
+            shaders::aa_taa_generated::VS_ENTRY,
+            shaders::aa_taa_generated::FS_ENTRY,
         );
         let edge = aa_pipeline(
             device,

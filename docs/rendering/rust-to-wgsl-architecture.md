@@ -501,10 +501,10 @@ naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gp
 | `#[spirv(uniform, descriptor_set, binding)]` | `#[gpu(uniform, group = G, binding = B)] Uniform<S: GpuStruct>` |
 | `spirv-std` resource methods | `Storage::load/store/len/is_empty`, `Uniform::field_f32/field_u32/vec4_lane/plane_distance`, `Vec3::dot/length` |
 | теги uniform-структур (руками) | `impl GpuStruct for S { const ID; const FIELD_TAGS }` — макрос читает их из типа и пишет в метаданные |
-| `spirv-std` math | `log2`, `exp2`, `abs`, `sign`, `clamp`, `mix`, `fract`, `sin`/`cos`/`acos`, `dot3`, `length3`, `cross_lane`, `normalize_lane` |
+| `spirv-std` math | `log2`, `exp2`, `sqrt`, `abs`, `sign`, `clamp`, `mix`, `fract`, `sin`/`cos`/`acos`, `pow`, `smoothstep`, `atan2`, `dot3`, `length3`, `cross_lane`, `normalize_lane` |
 | `#[spirv(vertex_index)]`, `#[spirv(instance_index)]` | `vertex_index()`, `instance_index()` — импорты, а не параметры entry: скомпилированная сигнатура остаётся `vs_main()` |
 | `#[spirv(location = N)]` входы/выходы | `vertex_input_lane::<LOC, LANES, LANE>()`, `vertex_store_2::<LOC>`/`vertex_store_4::<LOC>`, `fragment_input_lane::<LOC, LANES, LANE>()`, `fragment_store_at::<LOC>`; тело читает и пишет интерфейс через них, а объявляет его транслятор |
-| текстура / depth | `#[gpu(texture_2d)] Texture2d`, `#[gpu(depth_texture_2d)] DepthTexture2d`: `load` на mip 0, `width`/`height` |
+| текстура / depth / упакованная | `#[gpu(texture_2d)] Texture2d`, `#[gpu(depth_texture_2d)] DepthTexture2d`, `#[gpu(texture_2d_u32)] Texture2dU32`: `load` на mip 0, `width`/`height`; `u32`-текстура отдаёт слово лейна 0 |
 | workgroup и барьер | `WorkgroupU32`, `WorkgroupAtomicU32`, `workgroup_barrier` |
 | builtins | `global_invocation_lane::<AXIS>`, `local_invocation_index`, `fragment_uv::<LANE>`, `fragment_store` |
 | `spirv-builder` / `cargo-gpu` | `xtask build-shaders` (cargo rustc `--emit=llvm-ir` → llvm2gpu → WGSL/SPIR-V; `--check` в CI) |
@@ -580,8 +580,9 @@ fragment (пасс собирает их в один модуль), а `ornis-ll
    Односэмпловый проход берёт этот модуль из
    `gtao_generated.wgsl`; сам кернел — `#[gpu_entry(fragment)]` на SDK.
    Четырёхсэмпловый путь остаётся рукописным.
-7. `texture_load_2d_f32` читает `texture_depth_2d` скаляром, а
-   `texture_load_2d_f32x4` — одну компоненту `texture_2d<f32>` (mip 0).
+7. `texture_load_2d_f32` читает `texture_depth_2d` скаляром,
+   `texture_load_2d_f32x4` — одну компоненту `texture_2d<f32>`, а
+   `texture_load_2d_u32` — слово лейна 0 `texture_2d<u32>` (mip 0).
    Размеры той и другой — `textureDimensions`. `fs_main` пишет
    `fragment_store_f32x4` в `@location(0) vec4<f32>` и читает
    `@builtin(position)`. Compute держит `array<u32, 256>` и
@@ -599,7 +600,7 @@ fragment (пасс собирает их в один модуль), а `ornis-ll
    `adapt_generated.wgsl`. Оба кернела и марш GTAO идут через SDK, без
    собственного `extern "C"`.
 
-**Перевод пассов (этап 3).** Composite, HDR composite, fog, bloom и aa_edge переехали целиком:
+**Перевод пассов (этап 3).** Composite, HDR composite, fog, bloom, aa_edge и TAA переехали целиком:
 `crates/gpu-composite` — обычный `no_std`-крейт на SDK (`#[gpu_entry(vertex)]`
 рисует квад из двух констант модуля по `vertex_index`,
 `#[gpu_entry(fragment)]` семплирует два слоя, декодирует UI из sRGB и
@@ -624,6 +625,16 @@ Bloom (`crates/gpu-bloom`) — яркостный порог с `smoothstep`-к�
 импорт `gpu_smoothstep` (одна инструкция, не разложение в `clamp`-куб).
 aa_edge (`crates/gpu-aa-edge`) — первый пасс, который был написан не на DSL, а
 сырым WGSL: градиент яркости, выбор оси, два тапа и mode-слово (FXAA/SMAA).
+TAA (`crates/gpu-aa-taa`) — самый широкий по входам пасс: цвет, глубина,
+motion, упакованная прошлая глубина (`texture_2d<u32>`, новый
+`Texture2dU32`/`texture_load_2d_u32`, лейн 0 — слово `R16Uint`) и история, плюс
+два выхода (`@location(0)` — показанное, `@location(1)` — история для
+следующего кадра). Окрестностный clamp — индексированные циклы по радиусу с
+`sqrt` (импорт `gpu_sqrt`), YCoCg-кодирование/декодирование, отбраковка истории
+по разрыву глубины и `mix` по feedback. 4x-вариант снова отличается одной
+декларацией (`texture_depth_multisampled_2d`), поэтому у пасса два артефакта и
+паритет гоняется по трём наборам параметров (`crates/render/tests/
+aa_taa_parity.rs`), сравнивая оба цветовых аттачмента.
 Общая обвязка паритетных
 гейтов (генератор изображений, загрузка текстуры, рендер depth-рампы, подсчёт
 расхождений) — `crates/render/tests/common/parity.rs`. Так же переводятся

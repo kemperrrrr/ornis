@@ -5,7 +5,6 @@
 //! [`math`](crate::shaders::math)) into a fixed entry-point skeleton, so CPU tests exercise the
 //! exact BRDF code the GPU runs.
 
-mod aa_common;
 pub mod aa_edge_generated;
 pub mod aa_taa_generated;
 pub mod ao_generated;
@@ -266,24 +265,6 @@ pub fn resource_decl_for_samples(r: &Resource, sample_count: u32) -> String {
     resource_decl_with_ty(r, &r.kind.wgsl_ty_for_samples(sample_count))
 }
 
-/// WGSL declaration line for one [`Resource`] with an explicit
-/// multisampled decision: passes that keep extra layers per-sample (the AO
-/// raw pass keeps its normal, like lighting) select the multisampled
-/// spelling with their own predicate instead of
-/// [`resource_stays_multisampled`].
-pub fn resource_decl_where(r: &Resource, multisampled: bool) -> String {
-    resource_decl_with_ty(r, &selected_wgsl_ty(r, multisampled))
-}
-
-/// Multisampled or single-sample WGSL type for `r`, chosen by the caller.
-fn selected_wgsl_ty(r: &Resource, multisampled: bool) -> String {
-    if multisampled {
-        r.kind.wgsl_ty_multisampled()
-    } else {
-        r.kind.wgsl_ty_full()
-    }
-}
-
 /// One `@group`/`@binding` line spelling `ty` for `r`.
 fn resource_decl_with_ty(r: &Resource, ty: &str) -> String {
     format!(
@@ -357,42 +338,6 @@ impl ShaderModule {
     /// the pass layout builds its BGL from).
     pub fn resources(mut self, table: &[Resource], bindings: &[u32]) -> Self {
         self.resources.push(resource_decls(table, bindings));
-        self
-    }
-
-    /// Resource declarations from a [`Resource`] table subset at a sample
-    /// count: MSAA-aware spellings (see [`resource_decl_for_samples`]).
-    /// Identical to [`resources`](Self::resources) at 1x.
-    pub fn resources_for_samples(
-        mut self,
-        table: &[Resource],
-        bindings: &[u32],
-        sample_count: u32,
-    ) -> Self {
-        self = self.resources_where(table, bindings, |r| {
-            sample_count > 1 && resource_stays_multisampled(&r.kind)
-        });
-        self
-    }
-
-    /// Resource declarations from a [`Resource`] table subset with a
-    /// caller-provided multisampled decision per row (see
-    /// [`resource_decl_where`]): passes that keep extra layers per-sample
-    /// (the AO raw pass keeps its normal) spell those rows multisampled.
-    pub fn resources_where(
-        mut self,
-        table: &[Resource],
-        bindings: &[u32],
-        multisampled: impl Fn(&Resource) -> bool,
-    ) -> Self {
-        let mut out = String::new();
-        for b in bindings {
-            let Some(r) = table.iter().find(|r| r.binding == *b) else {
-                continue;
-            };
-            out.push_str(&resource_decl_where(r, multisampled(r)));
-        }
-        self.resources.push(out);
         self
     }
 

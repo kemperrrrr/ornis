@@ -252,19 +252,5 @@ pub fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Tex
         },
     );
     queue.submit(std::iter::once(encoder.finish()));
-    let slice = buffer.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = sender.send(r);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("poll readback");
-    receiver
-        .recv()
-        .expect("map callback")
-        .expect("map readback");
-    let data = slice.get_mapped_range().unwrap().to_vec();
-    buffer.unmap();
-    data
+    parity::map_readback(device, &buffer)
 }
