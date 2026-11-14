@@ -100,8 +100,8 @@ impl ResourceKind {
     }
 
     /// Multisampled WGSL type spelling of a texture resource (the AO raw
-    /// pass keeps its normal per-sample too, so it selects this spelling
-    /// with its own predicate via [`resource_decl_where`]).
+    /// pass keeps its normal per-sample too, so a pass that selects this
+    /// spelling does so through its own resource table).
     pub fn wgsl_ty_multisampled(&self) -> String {
         match self {
             Self::TextureFloat => "texture_multisampled_2d<f32>".to_string(),
