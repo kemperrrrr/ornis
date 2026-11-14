@@ -21,11 +21,14 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{RwLock, atomic::Ordering};
 
-use crossbeam_epoch::{Atomic, Guard, Owned, Shared, pin as epoch_pin};
+use crossbeam_epoch::{Atomic, Shared, pin as epoch_pin};
 
 use crate::cold_store::ColdComponentStore;
 use crate::component_store::ComponentStore;
 use crate::entity::{Entity, EntityAllocator};
+
+mod lock_free;
+use lock_free::LockFreeLaneInner;
 
 /// Shared read guard that recovers from a poisoned [`RwLock`].
 fn read_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
@@ -83,10 +86,6 @@ impl<T: 'static + Clone + Send + Sync> Lane for RwLock<ColdComponentStore<T>> {
     }
 }
 
-struct LockFreeLaneInner<T: Clone + Send + Sync> {
-    store: Atomic<ComponentStore<T>>,
-}
-
 /// Reclaim the live snapshot held in `store`, leaving null behind.
 ///
 /// `crossbeam_epoch::Atomic` frees nothing on drop, so lock-free lanes must
@@ -122,116 +121,6 @@ pub(crate) unsafe fn free_live_snapshot<T>(store: &mut Atomic<ComponentStore<T>>
         if !old.is_null() {
             drop(old.into_owned());
         }
-    }
-}
-
-impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
-    fn new() -> Self {
-        Self {
-            store: Atomic::new(ComponentStore::new()),
-        }
-    }
-
-    fn read<'g>(&'g self, guard: &'g Guard) -> &'g ComponentStore<T> {
-        let shared = self.store.load(Ordering::Acquire, guard);
-        // SAFETY: `shared` was loaded under `guard`, which the caller holds
-        // for `'g`; the epoch reclaimer cannot free the snapshot while pinned.
-        unsafe { shared.deref() }
-    }
-
-    fn write(&self, mut f: impl FnMut(&mut ComponentStore<T>)) {
-        // CAS publish loop: `load -> clone -> store` without a CAS lets two
-        // writers read the same snapshot and both `defer_destroy` it (double
-        // free, UB). Only the thread whose `compare_exchange` succeeds owns
-        // the replaced snapshot and may retire it; losers drop their private
-        // clone inline and retry on the fresh snapshot. Success ordering is
-        // AcqRel (acquire the latest snapshot, release the publish);
-        // failure ordering is Acquire (reload the current pointer).
-        loop {
-            let guard = epoch_pin();
-            let shared = self.store.load(Ordering::Acquire, &guard);
-            // SAFETY: `shared` is pinned by `guard` for this iteration.
-            let mut new_store = unsafe { (*shared.deref()).clone() };
-            f(&mut new_store);
-            match self.store.compare_exchange(
-                shared,
-                Owned::new(new_store),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-                &guard,
-            ) {
-                Ok(_) => {
-                    // SAFETY: this thread replaced `shared`; no other thread
-                    // can retire it because its CAS on the same `shared`
-                    // pointer now fails. Epoch reclamation frees it once
-                    // readers drain.
-                    unsafe { guard.defer_destroy(shared) };
-                    break;
-                }
-                Err(_) => {
-                    // CAS lost: our `Owned` clone is dropped with the error;
-                    // the loop retries against the winning snapshot.
-                }
-            }
-        }
-    }
-}
-
-impl<T: 'static + Clone + Send + Sync> Lane for LockFreeLaneInner<T> {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn remove_entity(&self, entity: Entity) {
-        self.write(|store| {
-            store.remove(entity);
-        });
-    }
-
-    fn is_lock_free(&self) -> bool {
-        true
-    }
-
-    fn clone_lane(&self) -> Box<dyn Lane> {
-        let guard = epoch_pin();
-        let snapshot = self.read(&guard).clone();
-        Box::new(LockFreeLaneInner {
-            store: Atomic::new(snapshot),
-        })
-    }
-}
-
-impl<T: Clone + Send + Sync> Drop for LockFreeLaneInner<T> {
-    // qual:allow(unsafe) reason: "Drop-only forwarder; the unsafe operations live in free_live_snapshot, which is the counted warning"
-    fn drop(&mut self) {
-        // SAFETY: `&mut self` proves exclusive access, and lock-free reads
-        // go through `with_lock_free_lane(&self, ..)`, whose snapshot cannot
-        // outlive the store — so no live reader of this snapshot exists and
-        // none can appear afterwards. `Drop` is the only caller allowed by
-        // `free_live_snapshot`.
-        unsafe { free_live_snapshot(&mut self.store) };
-    }
-}
-
-// Reserved: RAII read guard for lock-free lanes (experimental
-// "lock-free" feature). Holds an epoch guard alive while exposing the
-// snapshot of the store captured at read time.
-#[allow(dead_code)]
-pub struct LockFreeReadGuard<'g, T> {
-    store: &'g ComponentStore<T>,
-    _guard: Guard,
-}
-
-// Reserved: a lock-free read guard mirrored from `lock_free_store`.
-// Not wired into `SmartStore` yet (read_lane returns an RwLock guard);
-// kept for the experimental "lock-free" feature. Mutants are skipped:
-// nothing calls `deref` today, so a mutation here is untestable dead code.
-#[mutants::skip]
-impl<'g, T> std::ops::Deref for LockFreeReadGuard<'g, T> {
-    type Target = ComponentStore<T>;
-
-    fn deref(&self) -> &Self::Target {
-        self.store
     }
 }
 

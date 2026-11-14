@@ -1399,33 +1399,6 @@ impl<'a> FrameState<'a> {
         }
     }
 
-    /// Reconciles the gizmo with an authoritative mode change. Returning to
-    /// Edit (Stop) resets the drag/undo state: a drag committed in Paused
-    /// addresses the simulated world, so its one-step undo must not survive
-    /// into the Edit world the snapshot restores (an in-flight preview is
-    /// rolled back first). Any mode change also re-lays the handles in the
-    /// same frame — Play collapses them (chrome off), Edit/Paused shows the
-    /// active tool again.
-    // qual:allow(test_quality, untested) reason: "browser mode-edge wiring; the reset invariant is host-tested on GizmoRuntime"
-    fn sync_gizmo_mode(&mut self) {
-        let mode = editor_mode();
-        if mode == self.last_mode {
-            return;
-        }
-        self.last_mode = mode;
-        if mode.is_edit() {
-            if self.gizmo.is_dragging() {
-                self.rollback_gizmo_preview();
-            }
-            self.gizmo.reset();
-            self.set_gizmo_grab(false);
-        }
-        if let Some(store) = self.render_world.engine_mut().world_mut().store_mut() {
-            apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
-        }
-        self.upload_replica_instances();
-    }
-
     /// Turns press/move/release of the pointer into a gizmo drag preview and
     /// one `set_component` commit on release.
     // qual:allow(test_quality, untested) reason: "press/move/release edge wiring; the math it calls is host-tested"
@@ -1691,6 +1664,33 @@ impl<'a> FrameState<'a> {
     fn reconfigure(&mut self) {
         self.surface.configure(&self.device, &self.config);
     }
+}
+
+/// Reconciles the gizmo with an authoritative mode change. Returning to
+/// Edit (Stop) resets the drag/undo state: a drag committed in Paused
+/// addresses the simulated world, so its one-step undo must not survive
+/// into the Edit world the snapshot restores (an in-flight preview is
+/// rolled back first). Any mode change also re-lays the handles in the
+/// same frame — Play collapses them (chrome off), Edit/Paused shows the
+/// active tool again.
+// qual:allow(test_quality, untested) reason: "browser mode-edge wiring; the reset invariant is host-tested on GizmoRuntime"
+fn sync_gizmo_mode(frame: &mut FrameState<'_>) {
+    let mode = editor_mode();
+    if mode == frame.last_mode {
+        return;
+    }
+    frame.last_mode = mode;
+    if mode.is_edit() {
+        if frame.gizmo.is_dragging() {
+            frame.rollback_gizmo_preview();
+        }
+        frame.gizmo.reset();
+        frame.set_gizmo_grab(false);
+    }
+    if let Some(store) = frame.render_world.engine_mut().world_mut().store_mut() {
+        apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
+    }
+    frame.upload_replica_instances();
 }
 
 /// Log milestone frame counts: the very first frame and periodic heartbeats.
@@ -1961,7 +1961,7 @@ fn spawn_render_loop(
         // stays a browser-only console edge.
         let size = (frame.config.width, frame.config.height);
         sync_picking_camera(frame.render_world.engine_mut(), size);
-        frame.sync_gizmo_mode();
+        sync_gizmo_mode(&mut frame);
         frame.apply_gizmo_requests();
         frame.update_gizmo();
         frame.sync_selection();

@@ -656,7 +656,7 @@ impl EditorSession {
         };
         let entity = store.create_entity();
         self.alive.push(entity);
-        let name = name.unwrap_or_else(|| format!("Entity {}", entity.id()));
+        let name = name.unwrap_or_else(|| default_entity_name(entity));
         let Some(store) = self.store_mut() else {
             return entity;
         };
@@ -1039,12 +1039,17 @@ fn to_scene(world: &EditorSession) -> Scene {
     }
 }
 
+/// Fallback display name for an entity with no [`Name`] component.
+fn default_entity_name(entity: Entity) -> String {
+    format!("Entity {}", entity.id())
+}
+
 /// One alive entity as an [`EntityDesc`] for [`to_scene`].
 fn entity_desc(world: &EditorSession, entity: Entity) -> EntityDesc {
     match world.store() {
         Some(store) => entity_desc_from(store, entity),
         None => EntityDesc {
-            name: format!("Entity {}", entity.id()),
+            name: default_entity_name(entity),
             transform: default_transform(),
             mesh: default_mesh(),
             material: default_material(),
@@ -1060,7 +1065,7 @@ fn entity_desc_from(store: &SmartStore, entity: Entity) -> EntityDesc {
         name: store
             .read_lane::<Name>()
             .and_then(|lane| lane.get(entity).map(|name| name.0.clone()))
-            .unwrap_or_else(|| format!("Entity {}", entity.id())),
+            .unwrap_or_else(|| default_entity_name(entity)),
         transform: read_component(store, entity).unwrap_or_else(default_transform),
         mesh: read_component(store, entity).unwrap_or_else(default_mesh),
         material: read_component(store, entity).unwrap_or_else(default_material),

@@ -1250,7 +1250,7 @@ mod tests {
             .add_system(CaptureFixedTime(captured.clone()));
         engine
             .fixed_schedule_mut()
-            .set_schedule_condition(Arc::new(|r| *r.get::<bool>().unwrap()));
+            .set_schedule_condition(Some(Arc::new(|r| *r.get::<bool>().unwrap())));
 
         let delta = FixedTime::default().delta_seconds();
         for _ in 0..5 {
@@ -1296,7 +1296,7 @@ mod tests {
             .add_system(CaptureFixedTime(captured.clone()));
         engine
             .fixed_schedule_mut()
-            .set_schedule_condition(Arc::new(|r| *r.get::<bool>().unwrap()));
+            .set_schedule_condition(Some(Arc::new(|r| *r.get::<bool>().unwrap())));
 
         assert_eq!(engine.run_fixed_step(), Tick::new(0));
         assert!(captured.lock().expect("capture lock").is_empty());
@@ -1330,7 +1330,7 @@ mod tests {
             let _ = engine.world_mut().insert(false);
             engine
                 .fixed_schedule_mut()
-                .set_schedule_condition(Arc::new(|r| *r.get::<bool>().unwrap()));
+                .set_schedule_condition(Some(Arc::new(|r| *r.get::<bool>().unwrap())));
         }
         let delta = FixedTime::default().delta_seconds();
         for _ in 0..3 {

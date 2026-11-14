@@ -61,7 +61,7 @@ pub(crate) fn install_replica_chrome_gate(engine: &mut Engine) {
     });
     let _ = engine
         .schedule_mut()
-        .set_run_condition("editor_maintain", chrome);
+        .set_run_condition("editor_maintain", Some(chrome));
 }
 
 /// Refreshes the [`EditorMode`] resource from the JS-relayed thread-local so

@@ -75,15 +75,15 @@ pub fn install_editor_mode_gating(engine: &mut Engine) {
     });
     engine
         .fixed_schedule_mut()
-        .set_schedule_condition(simulation.clone());
+        .set_schedule_condition(Some(simulation.clone()));
     for name in SIMULATION_SYSTEMS {
         let _ = engine
             .schedule_mut()
-            .set_run_condition(name, simulation.clone());
+            .set_run_condition(name, Some(simulation.clone()));
     }
     for name in CHROME_SYSTEMS {
         let _ = engine
             .schedule_mut()
-            .set_run_condition(name, chrome.clone());
+            .set_run_condition(name, Some(chrome.clone()));
     }
 }

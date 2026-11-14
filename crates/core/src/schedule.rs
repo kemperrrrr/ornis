@@ -917,9 +917,11 @@ impl Schedule {
     }
 
     /// Gates system `name` behind `condition`: it runs only on frames where
-    /// the predicate returns `true` (see [`RunCondition`]). Replacing a
-    /// condition overwrites the previous one; the system's registration
-    /// index, accesses and ordering are untouched.
+    /// the predicate returns `true` (see [`RunCondition`]). `Some` replaces
+    /// any previous condition; `None` removes it, restoring unconditional
+    /// execution with no predicate call at all (unlike replacing it with
+    /// `|_| true`). The system's registration index, accesses and ordering
+    /// are untouched.
     ///
     /// This is the "system set" gate (PLAN §i, E4): a host applies one
     /// predicate to each member of a group (simulation vs. editor chrome)
@@ -928,11 +930,11 @@ impl Schedule {
     /// # Errors
     /// [`OrderError::UnknownNode`] when no system is registered under `name`
     /// — fail-fast so a renamed system breaks loudly at install time rather
-    /// than silently never gating.
+    /// than silently never gating. Applies to `None` as well as `Some`.
     pub fn set_run_condition(
         &mut self,
         name: impl Into<SystemName>,
-        condition: RunCondition,
+        condition: Option<RunCondition>,
     ) -> Result<&mut Self, OrderError> {
         let name = name.into();
         let index =
@@ -940,33 +942,14 @@ impl Schedule {
                 .ok_or_else(|| OrderError::UnknownNode {
                     name: name.as_str().to_owned(),
                 })?;
-        self.conditions[index] = Some(condition);
-        Ok(self)
-    }
-
-    /// Removes the run condition from system `name`, restoring unconditional
-    /// execution. Unlike replacing it with `|_| true`, this returns the slot
-    /// to `None`, so `Schedule::run_system` pays no predicate call at all.
-    ///
-    /// # Errors
-    /// [`OrderError::UnknownNode`] when no system is registered under `name`
-    /// — same fail-fast contract as [`Self::set_run_condition`].
-    pub fn clear_run_condition(
-        &mut self,
-        name: impl Into<SystemName>,
-    ) -> Result<&mut Self, OrderError> {
-        let name = name.into();
-        let index =
-            self.try_system_index(name.as_str())
-                .ok_or_else(|| OrderError::UnknownNode {
-                    name: name.as_str().to_owned(),
-                })?;
-        self.conditions[index] = None;
+        self.conditions[index] = condition;
         Ok(self)
     }
 
     /// Gates the whole schedule behind `condition`: when it returns `false`,
-    /// [`Schedule::run`] skips every system (see [`RunCondition`]).
+    /// [`Schedule::run`] skips every system (see [`RunCondition`]). `None`
+    /// removes the gate, restoring unconditional execution with no predicate
+    /// call at all (unlike replacing it with `|_| true`).
     ///
     /// For plans that are entirely one domain — the fixed simulation plan
     /// runs only in `Play` (PLAN §i, E4) — this is more robust than gating
@@ -976,16 +959,8 @@ impl Schedule {
     /// When this gates the fixed ([`crate::Stage::Gameplay`]) plan, the engine
     /// also freezes the simulation clock on closed frames — see
     /// [`crate::Engine::run_frame`] for the `FixedTime` contract.
-    pub fn set_schedule_condition(&mut self, condition: RunCondition) -> &mut Self {
-        self.schedule_condition = Some(condition);
-        self
-    }
-
-    /// Removes the whole-schedule condition, restoring unconditional
-    /// execution. Unlike replacing it with `|_| true`, this returns the gate
-    /// to `None`, so [`Schedule::run`] pays no predicate call at all.
-    pub fn clear_schedule_condition(&mut self) -> &mut Self {
-        self.schedule_condition = None;
+    pub fn set_schedule_condition(&mut self, condition: Option<RunCondition>) -> &mut Self {
+        self.schedule_condition = condition;
         self
     }
 
@@ -1303,7 +1278,7 @@ mod tests {
             target: "gated",
         });
         sched
-            .set_run_condition("gated", Arc::new(|r| *r.get::<bool>().unwrap()))
+            .set_run_condition("gated", Some(Arc::new(|r| *r.get::<bool>().unwrap())))
             .expect("system exists");
 
         // true → runs.
@@ -1338,7 +1313,7 @@ mod tests {
             target: "always",
         });
         sched
-            .set_run_condition("always", Arc::new(|_| false))
+            .set_run_condition("always", Some(Arc::new(|_| false)))
             .expect("system exists");
         // Prepend a second gated system in front of the first.
         sched.prepend_system(Bump {
@@ -1347,7 +1322,7 @@ mod tests {
             target: "front",
         });
         sched
-            .set_run_condition("front", Arc::new(|r| *r.get::<bool>().unwrap()))
+            .set_run_condition("front", Some(Arc::new(|r| *r.get::<bool>().unwrap())))
             .expect("prepended system exists");
 
         sched.run(&res);
@@ -1374,19 +1349,19 @@ mod tests {
             target: "s",
         });
         assert!(matches!(
-            sched.set_run_condition("ghost", Arc::new(|_| true)),
+            sched.set_run_condition("ghost", Some(Arc::new(|_| true))),
             Err(OrderError::UnknownNode { name }) if name == "ghost"
         ));
 
         sched
-            .set_run_condition("s", Arc::new(|_| false))
+            .set_run_condition("s", Some(Arc::new(|_| false)))
             .expect("system exists");
         sched.run(&res);
         assert!(res.get::<Log>().unwrap().lock().unwrap().is_empty());
 
         // Replace with an always-true condition: the system runs again.
         sched
-            .set_run_condition("s", Arc::new(|_| true))
+            .set_run_condition("s", Some(Arc::new(|_| true)))
             .expect("system exists");
         sched.run(&res);
         assert_eq!(*res.get::<Log>().unwrap().lock().unwrap(), vec!["s"]);
@@ -1411,7 +1386,7 @@ mod tests {
             access: SystemAccess::new().reads::<Log>(),
             target: "b",
         });
-        sched.set_schedule_condition(Arc::new(|r| *r.get::<bool>().unwrap()));
+        sched.set_schedule_condition(Some(Arc::new(|r| *r.get::<bool>().unwrap())));
 
         // Gate closed: nothing runs.
         sched.run(&res);
@@ -1424,7 +1399,7 @@ mod tests {
 
         // Gate open but a per-system condition closes one member.
         sched
-            .set_run_condition("b", Arc::new(|_| false))
+            .set_run_condition("b", Some(Arc::new(|_| false)))
             .expect("system exists");
         sched.run(&res);
         assert_eq!(
@@ -1433,9 +1408,9 @@ mod tests {
         );
     }
 
-    /// Clearing a condition returns the slot to `None` (unconditional, no
-    /// predicate call), and `schedule_permits` mirrors the gate without
-    /// running the plan. Clearing an unknown name fails fast.
+    /// Passing `None` returns the slot to unconditional (no predicate call),
+    /// and `schedule_permits` mirrors the gate without running the plan.
+    /// `None` on an unknown name still fails fast.
     #[test]
     fn clear_conditions_restore_unconditional_execution() {
         let mut res = Resources::new();
@@ -1447,9 +1422,9 @@ mod tests {
             access: SystemAccess::new().reads::<Log>(),
             target: "a",
         });
-        sched.set_schedule_condition(Arc::new(|_| false));
+        sched.set_schedule_condition(Some(Arc::new(|_| false)));
         sched
-            .set_run_condition("a", Arc::new(|_| false))
+            .set_run_condition("a", Some(Arc::new(|_| false)))
             .expect("system exists");
 
         // Both gates closed: nothing runs, and the query agrees.
@@ -1459,19 +1434,19 @@ mod tests {
 
         // Clearing the schedule gate opens the plan; the per-system gate
         // still holds until it is cleared too.
-        sched.clear_schedule_condition();
+        sched.set_schedule_condition(None);
         assert!(sched.schedule_permits(&res));
         sched.run(&res);
         assert!(res.get::<Log>().unwrap().lock().unwrap().is_empty());
 
-        sched.clear_run_condition("a").expect("system exists");
+        sched.set_run_condition("a", None).expect("system exists");
         sched.run(&res);
         assert_eq!(*res.get::<Log>().unwrap().lock().unwrap(), vec!["a"]);
 
         // A cleared schedule gate stays open with no condition installed.
         assert!(sched.schedule_permits(&res));
         assert!(matches!(
-            sched.clear_run_condition("ghost"),
+            sched.set_run_condition("ghost", None),
             Err(OrderError::UnknownNode { .. })
         ));
     }
