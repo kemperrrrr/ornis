@@ -6,6 +6,31 @@
 //! 0. A sampled texture returns one lane of `vec4<f32>`; a depth texture
 //! returns the scalar depth.
 
+/// Sampled `texture_2d<u32>` at `(G, B)`.
+///
+/// A packed integer target (motion validity plus previous depth in one word)
+/// is read as `u32`: the values are flags and fixed-point depth, not colour.
+pub struct Texture2dU32<const G: u32, const B: u32> {
+    _binding: core::marker::PhantomData<fn() -> u32>,
+}
+
+impl<const G: u32, const B: u32> Texture2dU32<G, B> {
+    /// First lane of the texel at `(x, y)`, mip 0.
+    #[inline(always)]
+    pub fn load(&self, x: u32, y: u32) -> u32 {
+        let _ = self;
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::texture_load_u32(G, B, x, y)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (x, y);
+            crate::host_unavailable()
+        }
+    }
+}
+
 /// Sampled `texture_2d<f32>` at `(G, B)`.
 pub struct Texture2d<const G: u32, const B: u32> {
     _binding: core::marker::PhantomData<fn() -> u32>,

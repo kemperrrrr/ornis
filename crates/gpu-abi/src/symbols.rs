@@ -97,6 +97,13 @@ pub const STORAGE_BARRIER: &str = "storage_barrier";
 /// Number of `u32` words in the translator's fixed workgroup scratch array.
 pub const WORKGROUP_WORDS: u32 = 256;
 
+/// `(param i32 i32 i32 i32) (result i32)` — one lane of a `texture_2d<u32>`
+/// texel at mip 0.
+///
+/// A packed `R16Uint`-style target carries motion validity and previous depth
+/// as one word, so the load returns `u32` rather than `f32`.
+pub const TEXTURE_LOAD_2D_U32: &str = "texture_load_2d_u32";
+
 /// `(param i32 i32) (result i32)` — width of a 2D texture.
 pub const TEXTURE_WIDTH_2D: &str = "texture_width_2d";
 
@@ -271,6 +278,12 @@ pub const FRAGMENT_POSITION_LANE: &str = "fragment_position_lane";
 /// Shorthand for [`FRAGMENT_STORE_LOCATION`] at location 0; a fragment with
 /// that one target returns a bare `vec4<f32>`.
 pub const FRAGMENT_STORE_F32X4: &str = "fragment_store_f32x4";
+
+/// `(param f32) (result f32)` — `sqrt(value)`, one WGSL `sqrt`.
+///
+/// `no_std` has no `f32::sqrt`, and a Newton series would not match the GPU
+/// instruction.
+pub const GPU_SQRT: &str = "gpu_sqrt";
 
 /// `(param f32 f32) (result f32)` — `pow(base, exponent)`, one WGSL `pow`.
 ///

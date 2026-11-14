@@ -26,6 +26,8 @@ pub(super) enum Kind {
     StorageBuffer,
     /// Sampled `texture_2d<f32>`.
     Texture2d,
+    /// Sampled `texture_2d<u32>`.
+    Texture2dU32,
     /// `texture_depth_2d`.
     DepthTexture2d,
     /// Filtering sampler (`sampler`).
@@ -39,6 +41,7 @@ impl Kind {
             Self::Uniform => "Uniform",
             Self::StorageBuffer => "Storage",
             Self::Texture2d => "Texture2d",
+            Self::Texture2dU32 => "Texture2dU32",
             Self::DepthTexture2d => "DepthTexture2d",
             Self::Sampler => "Sampler",
         }
@@ -46,7 +49,10 @@ impl Kind {
 
     /// Whether the binding carries only group and binding, no element type.
     fn is_binding_only(self) -> bool {
-        matches!(self, Self::Texture2d | Self::DepthTexture2d | Self::Sampler)
+        matches!(
+            self,
+            Self::Texture2d | Self::Texture2dU32 | Self::DepthTexture2d | Self::Sampler
+        )
     }
 }
 
@@ -91,6 +97,9 @@ pub(super) fn parse(attr: &Attribute, ty: &Type) -> syn::Result<Option<Param>> {
         if meta.path.is_ident("texture_2d") {
             return set_kind(&mut kind, Kind::Texture2d, &meta);
         }
+        if meta.path.is_ident("texture_2d_u32") {
+            return set_kind(&mut kind, Kind::Texture2dU32, &meta);
+        }
         if meta.path.is_ident("depth_texture_2d") {
             return set_kind(&mut kind, Kind::DepthTexture2d, &meta);
         }
@@ -110,15 +119,15 @@ pub(super) fn parse(attr: &Attribute, ty: &Type) -> syn::Result<Option<Param>> {
             return Ok(());
         }
         Err(meta.error(
-            "expected `uniform`, `storage_buffer`, `texture_2d`, `depth_texture_2d`, `sampler`, \
-             `read_only`, `group = N`, or `binding = N`",
+            "expected `uniform`, `storage_buffer`, `texture_2d`, `texture_2d_u32`, \
+             `depth_texture_2d`, `sampler`, `read_only`, `group = N`, or `binding = N`",
         ))
     })?;
     let kind = kind.ok_or_else(|| {
         syn::Error::new_spanned(
             attr,
-            "expected `uniform`, `storage_buffer`, `texture_2d`, `depth_texture_2d`, or \
-             `sampler` in the gpu attribute",
+            "expected `uniform`, `storage_buffer`, `texture_2d`, `texture_2d_u32`, \
+             `depth_texture_2d`, or `sampler` in the gpu attribute",
         )
     })?;
     if read_only && kind != Kind::StorageBuffer {
@@ -189,6 +198,7 @@ fn resolve(
                     Kind::Uniform => "uniform",
                     Kind::StorageBuffer => "storage_buffer",
                     Kind::Texture2d => "texture_2d",
+                    Kind::Texture2dU32 => "texture_2d_u32",
                     Kind::DepthTexture2d => "depth_texture_2d",
                     Kind::Sampler => "sampler",
                 },
@@ -223,7 +233,7 @@ fn resolve(
     let arguments = match kind {
         Kind::Uniform => syn::parse_quote!(<#element, #group, #binding>),
         Kind::StorageBuffer => syn::parse_quote!(<#element, #group, #binding, #access>),
-        Kind::Texture2d | Kind::DepthTexture2d | Kind::Sampler => {
+        Kind::Texture2d | Kind::Texture2dU32 | Kind::DepthTexture2d | Kind::Sampler => {
             return Err(syn::Error::new_spanned(
                 ty,
                 "a texture or sampler binding has no element type",
@@ -252,6 +262,7 @@ fn resolve_texture(ty: &Type, kind: Kind, group: u32, binding: u32) -> syn::Resu
                 "a `{}` parameter must be `{}`, not `{}`",
                 match kind {
                     Kind::Texture2d => "texture_2d",
+                    Kind::Texture2dU32 => "texture_2d_u32",
                     Kind::DepthTexture2d => "depth_texture_2d",
                     Kind::Sampler => "sampler",
                     Kind::Uniform | Kind::StorageBuffer => kind.type_name(),
