@@ -7,7 +7,7 @@
 //! it over the scene by its alpha. `xtask build-shaders --package
 //! ornis-gpu-composite --entry all` compiles that crate for
 //! `wasm32-unknown-unknown`, translates its LLVM IR, and writes the checked-in
-//! [`composite_generated.wgsl`] next to this file; `--check` in CI catches drift.
+//! `composite_generated.wgsl` next to this file; `--check` in CI catches drift.
 //!
 //! The resource table below is still the single source of truth for the bind
 //! group layout, and it matches the `#[gpu(...)]` attributes in the kernel.

@@ -4,7 +4,7 @@
 //! shared fullscreen quad, and `#[gpu_entry(fragment)]` keeps what is brighter
 //! than `threshold + BLOOM_SOFT_KNEE` with the `smoothstep` knee, so the cut
 //! does not band. `xtask build-shaders --package ornis-gpu-bloom --entry all`
-//! writes the checked-in [`bloom_generated.wgsl`]; `--check` in CI catches
+//! writes the checked-in `bloom_generated.wgsl`; `--check` in CI catches
 //! drift.
 
 use super::{Resource, ResourceKind};
