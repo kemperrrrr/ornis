@@ -6,7 +6,12 @@
 //! only answers "what transform does this ray mean?".
 //!
 //! Rotation handles are tangent bars; the drag never assumes a ring mesh,
-//! it sweeps the ray angle around the axis.
+//! it sweeps the ray angle around the axis. Recovering the angle an
+//! orientation means — absolute twist or swept increment — lives in `angle`.
+
+mod angle;
+
+use angle::{swept_angle, twist_angle};
 
 use crate::gizmo::{GizmoAxis, GizmoHandle, GizmoMode, axis_direction, plane_directions};
 use crate::picking::PickRay;
@@ -101,8 +106,15 @@ impl GizmoDrag {
     /// Quantizes only the active drag channel (E4): Move snaps the dragged
     /// coordinate to the absolute world grid along the handle axis (or the
     /// two in-plane axes), Scale snaps the dragged component, Rotate snaps
-    /// the swept angle around the handle axis. Every other channel is
-    /// returned bit-exact; snap off returns the preview unchanged.
+    /// the absolute angle around the handle axis to the angle grid. Every
+    /// other channel is returned bit-exact; snap off returns the preview
+    /// unchanged.
+    ///
+    /// Rotate's grid is anchored at the zero-twist orientation of the
+    /// selection's swing-twist decomposition about the handle axis, so a
+    /// selection already turned 7° about that axis lands on 15° rather than
+    /// on 7° plus a multiple of the step. An orientation with no twist at all
+    /// (a half-turn about a perpendicular axis) snaps its increment instead.
     // qual:allow(iosp) reason: "one dispatch over the handle axis/mode mirroring update; the channel leaves live in snap_axis_move/snap_plane_move/snap_rotate"
     #[must_use]
     pub fn apply_snap(&self, mut transform: TransformDesc, snap: &SnapSettings) -> TransformDesc {
@@ -154,22 +166,38 @@ impl GizmoDrag {
             + b * (snap.snap_offset(translation.dot(b)) - start.dot(b))
     }
 
-    /// Snaps the swept rotation angle around the handle axis relative to the
-    /// drag start, keeping the axis and the other channels untouched. The
-    /// angle is recovered from the preview's delta over `start.rotation`
-    /// (`2·atan2(sin θ/2, cos θ/2)` projected on the axis), so a pre-rotated
-    /// selection snaps its *increment*, not its absolute orientation.
-    // qual:allow(iosp) reason: "one rotation-snap step: delta-angle recovery, quantization and quaternion composition belong together (mirrors apply_rotate)"
+    /// Snaps the absolute angle around the handle axis to the rotate grid.
+    ///
+    /// # Reference orientation
+    ///
+    /// The angle is the twist of the orientation's swing-twist decomposition
+    /// about `axis`: `q = swing · twist`, where `twist` turns around `axis`
+    /// and `swing` carries `axis` to `q · axis`. The grid's zero is the
+    /// zero-twist orientation, so a selection already turned 7° about the
+    /// handle axis lands on 15° — not on 7° plus a multiple of the step. The
+    /// snapped preview is the drag evaluated at that grid angle, i.e. a world
+    /// rotation about `axis` over `start.rotation`, so the swing travels along
+    /// the drag path and the result never leaves the handle axis.
+    ///
+    /// The angle is canonicalized to `[-180°, 180°]`, so a step that does not
+    /// divide 360° has a seam at ±180°. A half-turn about an axis
+    /// perpendicular to `axis` has no twist at all; there the increment since
+    /// the press is quantized instead, so the drag still snaps.
+    // qual:allow(iosp) reason: "one rotation-snap step: absolute-angle recovery, quantization and quaternion composition belong together (mirrors apply_rotate)"
     fn snap_rotate(&self, rotation: UnitQuat, snap: &SnapSettings) -> UnitQuat {
         if snap.rotate_deg <= 0.0 {
             return rotation;
         }
-        let delta = rotation.get() * self.start.rotation.get().inverse();
-        let sine = Vec3::new(delta.x, delta.y, delta.z).dot(self.axis);
-        let angle = 2.0 * sine.atan2(delta.w);
-        let snapped = snap.snap_angle(angle);
-        UnitQuat::normalize(Quat::from_axis_angle(self.axis, snapped))
-            .and_then(|delta| UnitQuat::normalize(delta.get() * self.start.rotation.get()))
+        let start = self.start.rotation.get();
+        let angle = match (
+            twist_angle(rotation.get(), self.axis),
+            twist_angle(start, self.axis),
+        ) {
+            (Some(absolute), Some(from)) => snap.snap_angle(absolute) - from,
+            _ => snap.snap_angle(swept_angle(rotation.get(), start, self.axis)),
+        };
+        UnitQuat::normalize(Quat::from_axis_angle(self.axis, angle))
+            .and_then(|delta| UnitQuat::normalize(delta.get() * start))
             .unwrap_or(rotation)
     }
 
@@ -200,7 +228,7 @@ impl GizmoDrag {
         // `R * q(e_local, θ)` by conjugacy: the object turns around its own
         // axis, and the local axis itself stays where it was. Composing
         // `R * delta` instead would pre- and post-rotate by `R` and spin
-        // the object off its own axis.
+        // the object off its own axis. `snap_rotate` composes the same way.
         transform.rotation = UnitQuat::normalize(delta.get() * self.start.rotation.get())?;
         Some(())
     }

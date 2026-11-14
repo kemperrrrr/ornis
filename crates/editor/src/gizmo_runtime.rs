@@ -705,12 +705,12 @@ mod tests {
         }
     }
 
-    /// A Rotate drag with snap quantizes the swept angle around the handle
-    /// axis relative to the drag start (E4 review): an object pre-rotated
-    /// around X, dragged around Y by 38°, snaps to a 45° increment (a
-    /// multiple of the 15° step), leaving translation and scale bit-exact.
+    /// A Rotate drag with snap quantizes the absolute angle around the handle
+    /// axis (E4 review): an object pre-rotated around X has *zero* twist about
+    /// Y, so its absolute angle equals the swept one — 38° snaps to a 45°
+    /// multiple of the 15° step, leaving translation and scale bit-exact.
     #[test]
-    fn rotate_snap_quantizes_the_delta_around_the_handle_axis() {
+    fn rotate_snap_quantizes_a_swing_only_pre_rotation() {
         let start = TransformDesc {
             rotation: UnitQuat::normalize(Quat::from_rotation_x(0.3)).expect("unit"),
             ..TransformDesc::IDENTITY
@@ -740,9 +740,7 @@ mod tests {
         let preview = runtime.preview_transform(&release).expect("a preview");
         // The delta over the start orientation is a rotation around Y whose
         // angle is a multiple of the step.
-        let delta = preview.rotation.get() * start.rotation.get().inverse();
-        let sine = Vec3::new(delta.x, delta.y, delta.z).dot(Vec3::Y);
-        let degrees = (2.0 * sine.atan2(delta.w)).to_degrees();
+        let degrees = swept_degrees(&preview, &start, Vec3::Y);
         assert!(
             (degrees.abs() - 45.0).abs() < 1e-3,
             "38° must snap to 45°, got {degrees}"
@@ -756,5 +754,177 @@ mod tests {
             "translation must be bit-exact"
         );
         assert_eq!(preview.scale, start.scale, "scale must be bit-exact");
+    }
+
+    /// Absolute twist angle (degrees) of `rotation` about `axis`, recovered
+    /// from the normalized projected quaternion — a different formula from
+    /// the drag math's `atan2`, so the test does not restate the production
+    /// one. The quaternion sign is canonicalized the same way.
+    fn twist_degrees(rotation: UnitQuat, axis: Vec3) -> f32 {
+        let q = rotation.get();
+        let q = if q.w < 0.0 { -q } else { q };
+        let projection = axis * Vec3::new(q.x, q.y, q.z).dot(axis);
+        let twist = Quat::from_xyzw(projection.x, projection.y, projection.z, q.w).normalize();
+        let degrees = (2.0 * twist.w.clamp(-1.0, 1.0).acos()).to_degrees();
+        if Vec3::new(twist.x, twist.y, twist.z).dot(axis) < 0.0 {
+            -degrees
+        } else {
+            degrees
+        }
+    }
+
+    /// A ray hitting the world XZ plane at `angle` radians around Y from +X.
+    fn rotate_ray(angle: f32) -> PickRay {
+        PickRay::try_new(
+            Vec3::new(angle.cos(), 5.0, angle.sin()),
+            Vec3::new(0.0, -1.0, 0.0),
+        )
+        .expect("valid ray")
+    }
+
+    /// Snapped preview of a World-Y Rotate drag sweeping `swept_deg` from a
+    /// press at +X, with the default 15° rotate step.
+    fn rotate_snap_preview(start: &TransformDesc, swept_deg: f32) -> TransformDesc {
+        snapped_preview(
+            start,
+            GizmoHandle {
+                mode: GizmoMode::Rotate,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::Y,
+            },
+            rotate_ray(0.0),
+            rotate_ray(-swept_deg.to_radians()),
+            SnapSettings {
+                enabled: true,
+                rotate_deg: 15.0,
+                ..SnapSettings::default()
+            },
+        )
+    }
+
+    /// The rotate grid these tests snap to.
+    fn assert_on_grid(degrees: f32) {
+        let step = 15.0;
+        assert!(
+            ((degrees / step).round() * step - degrees).abs() < 1e-3,
+            "{degrees}° is not a multiple of {step}°"
+        );
+    }
+
+    /// The snapped preview stays on the drag path: its delta over the start
+    /// is a rotation about the handle axis and nothing else.
+    fn assert_turns_around(preview: &TransformDesc, start: &TransformDesc, axis: Vec3) {
+        let delta = preview.rotation.get() * start.rotation.get().inverse();
+        let vector = Vec3::new(delta.x, delta.y, delta.z);
+        assert!(
+            vector.cross(axis).length() < 1e-5,
+            "the snap left the handle axis: {vector:?} vs {axis:?}"
+        );
+    }
+
+    /// Angle (degrees) the preview swept from the start around `axis`.
+    fn swept_degrees(preview: &TransformDesc, start: &TransformDesc, axis: Vec3) -> f32 {
+        let delta = preview.rotation.get() * start.rotation.get().inverse();
+        let sine = Vec3::new(delta.x, delta.y, delta.z).dot(axis);
+        (2.0 * sine.atan2(delta.w)).to_degrees()
+    }
+
+    /// Case 1 of the E4 review: an object with no rotation at all. A 38°
+    /// sweep around Y lands on 45°, and the absolute twist of the result is
+    /// a multiple of the step.
+    #[test]
+    fn rotate_snap_binds_an_unrotated_object_to_the_angle_grid() {
+        let start = TransformDesc::IDENTITY;
+        let preview = rotate_snap_preview(&start, 38.0);
+        let degrees = twist_degrees(preview.rotation, Vec3::Y);
+        assert!(
+            (degrees - 45.0).abs() < 1e-3,
+            "38° must snap to 45°, got {degrees}"
+        );
+        assert_on_grid(degrees);
+        assert_turns_around(&preview, &start, Vec3::Y);
+        assert_eq!(preview.translation, start.translation);
+        assert_eq!(preview.scale, start.scale);
+    }
+
+    /// Case 2 of the E4 review: a pre-rotated object carrying both swing and
+    /// twist. `R_z(40°) · R_y(7°)` has a 7° twist about Y, so a 20° sweep
+    /// reaches 27° and must land on 30° — the *absolute* grid, not 7° plus a
+    /// snapped increment (which would give 22°). The swing rides along the
+    /// drag path: the result is the start turned by 30° − 7° around Y.
+    #[test]
+    fn rotate_snap_binds_a_pre_rotated_object_to_the_angle_grid() {
+        let start = TransformDesc {
+            rotation: UnitQuat::normalize(
+                Quat::from_rotation_z(40.0_f32.to_radians())
+                    * Quat::from_rotation_y(7.0_f32.to_radians()),
+            )
+            .expect("unit"),
+            ..TransformDesc::IDENTITY
+        };
+        let preview = rotate_snap_preview(&start, 20.0);
+        let degrees = twist_degrees(preview.rotation, Vec3::Y);
+        assert!(
+            (degrees - 30.0).abs() < 1e-3,
+            "7° + 20° = 27° must snap to 30°, got {degrees}"
+        );
+        assert_on_grid(degrees);
+        assert_turns_around(&preview, &start, Vec3::Y);
+        let expected = UnitQuat::normalize(
+            Quat::from_rotation_y(23.0_f32.to_radians()) * start.rotation.get(),
+        )
+        .expect("unit");
+        assert!(
+            (preview.rotation.get().dot(expected.get()).abs() - 1.0).abs() < 1e-5,
+            "the snap must be the drag evaluated at the grid angle"
+        );
+        assert_eq!(preview.translation, start.translation);
+        assert_eq!(preview.scale, start.scale);
+    }
+
+    /// Case 3 of the E4 review: the drag starts at an angle that is not on
+    /// the grid. A pure 7° twist about Y swept by only 3° reaches 10° and is
+    /// pulled to the nearest grid point, 15° — the press position does not
+    /// anchor the grid.
+    #[test]
+    fn rotate_snap_binds_a_drag_that_starts_off_the_grid() {
+        let start = TransformDesc {
+            rotation: UnitQuat::normalize(Quat::from_rotation_y(7.0_f32.to_radians()))
+                .expect("unit"),
+            ..TransformDesc::IDENTITY
+        };
+        let preview = rotate_snap_preview(&start, 3.0);
+        let degrees = twist_degrees(preview.rotation, Vec3::Y);
+        assert!(
+            (degrees - 15.0).abs() < 1e-3,
+            "7° + 3° = 10° must snap to 15°, got {degrees}"
+        );
+        assert_on_grid(degrees);
+        assert_turns_around(&preview, &start, Vec3::Y);
+        assert_eq!(preview.translation, start.translation);
+        assert_eq!(preview.scale, start.scale);
+    }
+
+    /// A half-turn about an axis perpendicular to the handle has no twist at
+    /// all (`R_z(180°)` about Y: both the projection and `w` vanish), so no
+    /// absolute angle exists. The drag still snaps — on the increment since
+    /// the press, the one quantity that stays defined there.
+    #[test]
+    fn rotate_snap_falls_back_to_the_increment_without_a_twist() {
+        let start = TransformDesc {
+            rotation: UnitQuat::normalize(Quat::from_rotation_z(180.0_f32.to_radians()))
+                .expect("unit"),
+            ..TransformDesc::IDENTITY
+        };
+        let preview = rotate_snap_preview(&start, 38.0);
+        let degrees = swept_degrees(&preview, &start, Vec3::Y);
+        assert!(
+            (degrees - 45.0).abs() < 1e-3,
+            "the increment must still snap to 45°, got {degrees}"
+        );
+        assert_on_grid(degrees);
+        assert_turns_around(&preview, &start, Vec3::Y);
+        assert_eq!(preview.translation, start.translation);
+        assert_eq!(preview.scale, start.scale);
     }
 }

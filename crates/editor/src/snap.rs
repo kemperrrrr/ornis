@@ -8,11 +8,12 @@
 //! or so tiny that dividing by it overflows — leaves that channel unquantized
 //! even when snap is on.
 //!
-//! Every entry point quantizes ONE scalar: the world coordinate along the
-//! dragged axis (or one in-plane axis) for Move, the dragged scale component
-//! for Scale, the swept angle for Rotate. The caller keeps every other
-//! component bit-exact, so a single-axis drag never moves the axes it did
-//! not grab.
+//! Every entry point quantizes ONE scalar to a grid anchored at zero, not at
+//! the drag's press point: the world coordinate along the dragged axis (or
+//! one in-plane axis) for Move, the dragged scale component for Scale, the
+//! absolute angle around the handle axis for Rotate. The caller keeps every
+//! other component bit-exact, so a single-axis drag never moves the axes it
+//! did not grab.
 
 /// Floor for a snapped scale component's magnitude (never zero), matching
 /// the drag math's `MIN_SCALE`.
@@ -70,7 +71,9 @@ impl SnapSettings {
         magnitude.max(MIN_SCALE).copysign(value)
     }
 
-    /// Rounds a swept angle (radians) to the rotate step (degrees). Snap off
+    /// Rounds an absolute angle (radians) around the dragged axis to the
+    /// rotate step (degrees). The grid is anchored at zero twist, not at the
+    /// press point, so the snapped angle is a multiple of the step. Snap off
     /// or an unusable step returns `angle` unchanged.
     #[must_use]
     pub fn snap_angle(&self, angle: f32) -> f32 {
