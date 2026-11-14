@@ -14,10 +14,6 @@ use crate::error::TranslateError;
 pub(super) type Name = String;
 
 /// A local name after inlining's renaming and parameter substitution.
-///
-/// The name is deliberately not `local`: the analyzer collects nested functions
-/// into the project scope by name, and a short generic name there would make
-/// unrelated call sites look like project calls.
 fn namespaced(
     name: &str,
     prefix: &str,
