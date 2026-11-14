@@ -7,6 +7,16 @@
 
 #![allow(dead_code)]
 
+/// Linear clamp sampler, the filter every gate binds.
+pub fn linear_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("parity sampler"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    })
+}
+
 /// A headless device and queue, or `None` when the host has no adapter.
 ///
 /// One line per gate: the gates differ in what they draw, not in how they open

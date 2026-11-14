@@ -90,6 +90,7 @@ paths = [
     "crates/gpu-fog/**",
     "crates/gpu-quad/**",
     "crates/gpu-bloom/**",
+    "crates/gpu-aa-edge/**",
     "crates/gpu-cluster/**",
     "crates/gpu-gtao/**",
     "crates/gpu-histogram/**",

@@ -8,7 +8,7 @@
 #[allow(dead_code)]
 mod common;
 
-use common::parity::{gradient, mismatched_pixels, upload_rgba8};
+use common::parity::{gradient, linear_sampler, mismatched_pixels, upload_rgba8};
 use common::sized::{FrameSpec, render_and_readback};
 
 /// The DSL fragment module this pass was assembled from.
@@ -150,12 +150,7 @@ fn render(
         .iter()
         .map(|pixels| upload_rgba8(device, queue, "hdr composite input", SIZE, pixels))
         .collect();
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("hdr composite parity"),
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
+    let sampler = linear_sampler(device);
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("hdr composite parity"),
         layout: &pipeline.get_bind_group_layout(0),
