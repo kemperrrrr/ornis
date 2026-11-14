@@ -42,6 +42,7 @@
         <button id="btn-pause" title="Pause" disabled>
           <svg viewBox="0 0 24 24"><use href="icons/pause.svg#icon" /></svg>
         </button>
+        <span id="mode-indicator" class="mode-indicator" data-mode="edit" title="Editor mode (F5 play/stop, Shift+F5 pause)">EDIT</span>
       </div>
       <label class="search palette" title="Command Palette (Ctrl/⌘+K)">
         <svg viewBox="0 0 24 24"><use href="icons/search.svg#icon" /></svg>
@@ -79,6 +80,12 @@
             <svg viewBox="0 0 24 24"><use href="icons/scale-gizmo.svg#icon" /></svg>
           </button>
           <button class="gizmo space" id="gizmo-space" title="World space (click for local)">W</button>
+          <span class="snap-controls" role="group" aria-label="Snap settings">
+            <button class="gizmo snap-toggle" id="snap-toggle" aria-pressed="false" title="Snap to step (click to enable)">⌗</button>
+            <input id="snap-translate" class="snap-step" type="number" min="0" step="0.1" value="0.5" title="Translate step (world units)" aria-label="Translate snap step" />
+            <input id="snap-rotate" class="snap-step" type="number" min="0" step="1" value="15" title="Rotate step (degrees)" aria-label="Rotate snap step" />
+            <input id="snap-scale" class="snap-step" type="number" min="0" step="0.05" value="0.25" title="Scale step (factor)" aria-label="Scale snap step" />
+          </span>
         </div>
       </div>
     </div>

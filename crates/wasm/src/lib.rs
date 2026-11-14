@@ -35,12 +35,17 @@ use ornis_render::{
 };
 
 mod scene_api;
+// Public so the `qual:api` marker on the `set_snap` wasm-bindgen export is
+// nameable from outside the crate (a private module makes it an
+// ORPHAN_SUPPRESSION finding).
+pub mod snap;
 // Public so the `qual:api` markers on the wasm-bindgen exports
 // (`set_viewport_mode`, `viewport_state_json`) are nameable from outside
 // the crate — a private module makes them ORPHAN_SUPPRESSION findings.
 pub mod viewport;
 
 use scene_api::{LiveEntityMeta, LiveScene};
+use snap::snap_settings;
 use viewport::{
     PENDING_MODE, VIEWPORT_MODE, apply_mode_request, apply_pending_gizmo, gizmo_mode, gizmo_space,
     refresh_viewport_state_json, sync_picking_camera, take_pending_undo,
@@ -1474,6 +1479,7 @@ impl<'a> FrameState<'a> {
         let Some(ray) = self.gizmo_ray(pointer) else {
             return;
         };
+        self.gizmo.set_snap(snap_settings());
         let Some(transform) = self.gizmo.preview_transform(&ray) else {
             return;
         };

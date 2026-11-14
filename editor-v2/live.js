@@ -610,6 +610,7 @@
         lastEntityCount = count;
         log("entities: " + count + " (v" + (status.version || "?") + ")");
       }
+      if (status && typeof status.mode === "string") setEditorMode(status.mode);
     }).catch(function () { /* engine offline — keep the last state */ });
   }
 
@@ -648,6 +649,9 @@
       } else if (custom.cmd_type === "scene") {
         // A new snapshot is ready (selection, edits, spawns): fetch it now
         // instead of waiting for the poll; polling stays the fallback.
+        refreshScene();
+      } else if (custom.cmd_type === "mode_changed") {
+        setEditorMode(data.mode);
         refreshScene();
       } else if (custom.cmd_type === "error") {
         log((data.command || "command") + ": " + (data.message || "error"), true);
@@ -757,31 +761,93 @@
     });
   }
 
+  // ── play/edit transport (E4) ───────────────────────────────────────
   var btnPlay = document.getElementById("btn-play");
   var btnPause = document.getElementById("btn-pause");
   var playIcon = document.getElementById("play-icon");
-  var playing = false;
-  if (btnPlay) {
-    btnPlay.addEventListener("click", function () {
-      playing = !playing;
+  var modeIndicator = document.getElementById("mode-indicator");
+  var editorMode = "edit";
+
+  function renderMode() {
+    var playing = editorMode !== "edit";
+    if (btnPlay) {
       btnPlay.classList.toggle("playing", playing);
-      btnPlay.title = playing ? "Stop" : "Play";
+      btnPlay.title = playing ? "Stop (F5)" : "Play (F5)";
       if (playIcon) playIcon.setAttribute("href", icon(playing ? "stop" : "play"));
-      if (btnPause) btnPause.disabled = !playing;
-      log(playing ? "play mode lands with E4" : "back to edit mode");
+    }
+    if (btnPause) {
+      btnPause.disabled = !playing;
+      btnPause.classList.toggle("active", editorMode === "paused");
+      btnPause.title = editorMode === "paused" ? "Resume (Shift+F5)" : "Pause (Shift+F5)";
+    }
+    if (modeIndicator) {
+      modeIndicator.textContent = editorMode.toUpperCase();
+      modeIndicator.dataset.mode = editorMode;
+    }
+  }
+
+  function setEditorMode(mode) {
+    editorMode = mode === "play" || mode === "paused" ? mode : "edit";
+    renderMode();
+  }
+
+  function play() { sendCommand("play").then(afterMutation).catch(function () {}); }
+  function pause() { sendCommand("pause").then(afterMutation).catch(function () {}); }
+  function stop() { sendCommand("stop").then(afterMutation).catch(function () {}); }
+
+  function togglePlay() {
+    if (editorMode === "edit") play(); else stop();
+  }
+  function togglePause() {
+    if (editorMode === "play") pause();
+    else if (editorMode === "paused") play();
+  }
+
+  if (btnPlay) btnPlay.addEventListener("click", togglePlay);
+  if (btnPause) btnPause.addEventListener("click", togglePause);
+  renderMode();
+
+  // ── snap controls (E4) ─────────────────────────────────────────────
+  var snapToggle = document.getElementById("snap-toggle");
+  var snapTranslate = document.getElementById("snap-translate");
+  var snapRotate = document.getElementById("snap-rotate");
+  var snapScale = document.getElementById("snap-scale");
+  var snapEnabled = false;
+
+  function pushSnap() {
+    var api = window.OrnisViewport;
+    if (api && api.setSnap) {
+      api.setSnap({
+        enabled: snapEnabled,
+        translate: snapTranslate ? snapTranslate.value : 0.5,
+        rotateDeg: snapRotate ? snapRotate.value : 15,
+        scale: snapScale ? snapScale.value : 0.25
+      });
+    }
+  }
+  if (snapToggle) {
+    snapToggle.addEventListener("click", function () {
+      snapEnabled = !snapEnabled;
+      snapToggle.classList.toggle("active", snapEnabled);
+      snapToggle.setAttribute("aria-pressed", String(snapEnabled));
+      pushSnap();
+      log("snap: " + (snapEnabled ? "on" : "off"));
     });
   }
-  if (btnPause) {
-    btnPause.addEventListener("click", function () {
-      if (playing) log("pause lands with E4");
-    });
-  }
+  [snapTranslate, snapRotate, snapScale].forEach(function (input) {
+    if (input) input.addEventListener("change", pushSnap);
+  });
 
   var commandPalette = document.getElementById("command-palette");
   if (commandPalette) {
     document.addEventListener("keydown", function (ev) {
       // The welcome surfaces own their own shortcuts while visible.
       if (document.querySelector(".wl-screen.wl-on")) return;
+      if (ev.key === "F5") {
+        ev.preventDefault();
+        if (ev.shiftKey) togglePause(); else togglePlay();
+        return;
+      }
       if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "k") {
         ev.preventDefault();
         commandPalette.focus();

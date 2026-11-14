@@ -10,6 +10,7 @@ import init, {
     set_viewport_mode,
     set_gizmo_mode,
     set_gizmo_space,
+    set_snap,
     undo_gizmo,
     viewport_state_json,
 } from './pkg/ornis_wasm.js';
@@ -48,6 +49,7 @@ const currentMode = () => {
 let booted = false;
 let gizmoMode = 'move';
 let gizmoSpace = 'world';
+let snap = { enabled: false, translate: 0.5, rotateDeg: 15, scale: 0.25 };
 
 if (btn3d) btn3d.addEventListener('click', () => applyMode('perspective3d'));
 if (btn2d) btn2d.addEventListener('click', () => applyMode('plane2d'));
@@ -70,6 +72,18 @@ function applyGizmoMode(mode) {
 function applyGizmoSpace(space) {
     gizmoSpace = space === 'local' ? 'local' : 'world';
     return booted ? set_gizmo_space(gizmoSpace) : false;
+}
+
+// Snap steps live in the same WASM thread-locals as the gizmo tool/space;
+// the controls keep a mirror and push the whole settings object on change.
+function applySnap(next) {
+    snap = {
+        enabled: !!next.enabled,
+        translate: Number(next.translate) > 0 ? Number(next.translate) : 0.5,
+        rotateDeg: Number(next.rotateDeg) > 0 ? Number(next.rotateDeg) : 15,
+        scale: Number(next.scale) > 0 ? Number(next.scale) : 0.25,
+    };
+    return booted ? set_snap(snap.enabled, snap.translate, snap.rotateDeg, snap.scale) : false;
 }
 
 function undoGizmoDrag() {
@@ -141,6 +155,7 @@ async function boot() {
     // the button shows Rotate while Move is actually active.
     set_gizmo_mode(gizmoMode);
     set_gizmo_space(gizmoSpace);
+    set_snap(snap.enabled, snap.translate, snap.rotateDeg, snap.scale);
     requestAnimationFrame(overlayLoop);
 }
 
@@ -166,6 +181,9 @@ window.OrnisViewport = {
     },
     setGizmoSpace(space) {
         return applyGizmoSpace(space);
+    },
+    setSnap(next) {
+        return applySnap(next || {});
     },
     undoGizmo() {
         return undoGizmoDrag();

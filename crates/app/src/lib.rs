@@ -25,6 +25,8 @@ pub use ornis_gameplay::{GameplayPlugin, Position, Velocity, install_gameplay};
 /// Pure `ornis-gltf` mirror → `ornis-animation` converters.
 pub mod anim_wiring;
 pub mod game_world;
+/// Play/edit system-set gating off [`ornis_editor::EditorMode`] (E4).
+pub mod mode_gating;
 /// Sequential-impulse/XPBD physics runtime over the unified world.
 pub mod physics_runtime;
 pub mod ragdoll_g5;

@@ -44,6 +44,9 @@ use ornis_core::{
 /// Viewport picking: rays, hits and store intersection (slices E1, K2).
 pub mod picking;
 
+/// Play/edit modes gating the simulation and editor-chrome system sets (E4).
+pub mod mode;
+
 /// Transform-gizmo handles: identity and layout (slice E3).
 pub mod gizmo;
 
@@ -53,6 +56,9 @@ pub mod gizmo_drag;
 /// Replica-side gizmo drag state machine: press → preview → commit, plus
 /// the one-step undo bookkeeping.
 pub mod gizmo_runtime;
+
+/// Gizmo snap steps: quantize a drag preview to translate/rotate/scale (E4).
+pub mod snap;
 
 /// Gizmo host wiring: the authoritative layout system and replica
 /// visibility (reads [`crate::gizmo`] and writes `TransformDesc`).
@@ -75,6 +81,7 @@ pub use gizmo_drag::GizmoDrag;
 pub use gizmo_host::{apply_gizmo_visibility, install_gizmo_authoring};
 pub use gizmo_runtime::{GizmoRuntime, GizmoTarget, PressEdge};
 pub use grid::{PlaneGrid, plane_grid};
+pub use mode::EditorMode;
 pub use picking::{
     ChromePolicy, PickEpsilon, PickError, PickHit, PickOutcome, PickProjection, PickRay,
     ViewportCamera, WorkPlane, pick_closest, pick_gizmo, pick_ray, pointer_on_plane,
@@ -82,6 +89,7 @@ pub use picking::{
 };
 pub use plane::{PlaneCamera, ViewportMode};
 pub use plane_input::{install_plane_camera, read_plane_camera};
+pub use snap::SnapSettings;
 
 /// Marks an entity as editor chrome (gizmo handle, grid, selection proxy).
 ///

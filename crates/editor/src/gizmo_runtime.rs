@@ -16,6 +16,7 @@
 
 use crate::gizmo_drag::GizmoDrag;
 use crate::picking::PickRay;
+use crate::snap::SnapSettings;
 use ornis_assets::scene::TransformDesc;
 use ornis_core::Entity;
 
@@ -66,6 +67,8 @@ pub struct GizmoRuntime {
     candidate: Option<GizmoTarget>,
     /// One-step undo payload of the last committed drag.
     undo: Option<GizmoTarget>,
+    /// Snap steps applied to every preview (E4); disabled by default.
+    snap: SnapSettings,
 }
 
 impl GizmoRuntime {
@@ -101,9 +104,14 @@ impl GizmoRuntime {
     /// the handle (a parallel ray, a degenerate rotation radius).
     pub fn preview_transform(&mut self, ray: &PickRay) -> Option<TransformDesc> {
         let drag = self.drag.clone()?;
-        let transform = drag.update(ray)?;
+        let transform = self.snap.snap_transform(drag.update(ray)?);
         self.preview(&transform);
         Some(transform)
+    }
+
+    /// Sets the snap steps applied to subsequent previews (E4).
+    pub fn set_snap(&mut self, snap: SnapSettings) {
+        self.snap = snap;
     }
 
     /// Finishes the drag.
@@ -295,5 +303,25 @@ mod tests {
         assert_eq!(undo.id, 7);
         assert_eq!(undo.generation, 1);
         assert_eq!(undo.transform, TransformDesc::IDENTITY);
+    }
+
+    /// With snap on, the preview translation lands on a multiple of the
+    /// step (E4): a 0.37-unit drag quantizes to 0.5.
+    #[test]
+    fn snap_quantizes_the_preview_translation() {
+        let mut runtime = armed();
+        runtime.set_snap(SnapSettings {
+            enabled: true,
+            translate: 0.5,
+            ..SnapSettings::default()
+        });
+        let release =
+            PickRay::try_new(Vec3::new(0.37, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0)).expect("ray");
+        let preview = runtime.preview_transform(&release).expect("a preview");
+        assert!(
+            (preview.translation - Vec3::new(0.5, 0.0, 0.0)).length() < 1e-6,
+            "got {:?}",
+            preview.translation
+        );
     }
 }
