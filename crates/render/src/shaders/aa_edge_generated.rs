@@ -5,7 +5,7 @@
 //! mode word in the uniform chooses how they are weighted (FXAA evenly, SMAA by
 //! luma similarity to the centre). `xtask build-shaders --package
 //! ornis-gpu-aa-edge --entry all` writes the checked-in
-//! [`aa_edge_generated.wgsl`]; `--check` in CI catches drift.
+//! `aa_edge_generated.wgsl`; `--check` in CI catches drift.
 
 use super::{Resource, ResourceKind};
 use crate::renderer::AaUniform;

@@ -5,7 +5,7 @@
 //! and forward layers by the bloom mode word, adds the bloom layer scaled by its
 //! intensity, applies the auto-exposure multiplier, and tone maps with the ACES
 //! fit. `xtask build-shaders --package ornis-gpu-hdr-composite --entry all`
-//! compiles the crate and writes the checked-in [`hdr_composite_generated.wgsl`]
+//! compiles the crate and writes the checked-in `hdr_composite_generated.wgsl`
 //! beside this file; `--check` in CI catches drift.
 //!
 //! The resource table below is still the single source of truth for the bind
