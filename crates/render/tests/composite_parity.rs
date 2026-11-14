@@ -9,7 +9,7 @@
 #[allow(dead_code)]
 mod common;
 
-use common::parity::{gradient, mismatched_pixels, upload_rgba8};
+use common::parity::{gradient, linear_sampler, mismatched_pixels, upload_rgba8};
 use common::sized::{FrameSpec, render_and_readback};
 
 /// The DSL shader this pass was assembled from before the migration.
@@ -85,12 +85,7 @@ fn render(
     });
     let pbr_view = upload_rgba8(device, queue, "pbr", SIZE, pbr);
     let ui_view = upload_rgba8(device, queue, "ui", SIZE, ui);
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("composite parity"),
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
+    let sampler = linear_sampler(device);
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("composite parity"),
         layout: &pipeline.get_bind_group_layout(0),

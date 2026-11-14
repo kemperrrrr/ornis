@@ -1,6 +1,10 @@
 //! Shared WGSL pieces of the anti-aliasing passes: the fullscreen-quad
 //! vertex entry and the colour-space helpers the resolve kernels work in.
 //!
+//! The edge filter moved to `crates/gpu-aa-edge` (translated from Rust); its
+//! luma weights live in that kernel, the temporal resolve here still needs the
+//! helpers below.
+//!
 //! The bodies are raw WGSL (not `#[stage]`): the temporal resolve needs
 //! indexed loops and the edge filters a per-mode branch, neither of which
 //! the DSL covers. The CPU reference of the same math lives in
@@ -12,16 +16,6 @@ pub const VERTEX_ENTRY: &str = r#"
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> QuadVertexOutput {
     return QuadVertexOutput(quad[vertex_index], uvs[vertex_index]);
-}
-"#;
-
-/// Rec. 601 luma of a colour: the brightness the edge filters measure.
-///
-/// Matches [`crate::antialias::fxaa_luma`] — the CPU reference of the
-/// same weights.
-pub const LUMA_HELPER: &str = r#"
-fn aa_luma(c: vec3<f32>) -> f32 {
-    return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
 }
 "#;
 

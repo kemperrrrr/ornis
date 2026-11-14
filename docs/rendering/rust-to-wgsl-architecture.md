@@ -599,7 +599,7 @@ fragment (пасс собирает их в один модуль), а `ornis-ll
    `adapt_generated.wgsl`. Оба кернела и марш GTAO идут через SDK, без
    собственного `extern "C"`.
 
-**Перевод пассов (этап 3).** Composite, HDR composite, fog и bloom переехали целиком:
+**Перевод пассов (этап 3).** Composite, HDR composite, fog, bloom и aa_edge переехали целиком:
 `crates/gpu-composite` — обычный `no_std`-крейт на SDK (`#[gpu_entry(vertex)]`
 рисует квад из двух констант модуля по `vertex_index`,
 `#[gpu_entry(fragment)]` семплирует два слоя, декодирует UI из sRGB и
@@ -622,6 +622,8 @@ ACES-кривая. 4x-вариант отличается **одной** дек�
 (`fog_generated.wgsl`, `fog_msaa_generated.wgsl`) проверяются оба.
 Bloom (`crates/gpu-bloom`) — яркостный порог с `smoothstep`-коленом: добавился
 импорт `gpu_smoothstep` (одна инструкция, не разложение в `clamp`-куб).
+aa_edge (`crates/gpu-aa-edge`) — первый пасс, который был написан не на DSL, а
+сырым WGSL: градиент яркости, выбор оси, два тапа и mode-слово (FXAA/SMAA).
 Общая обвязка паритетных
 гейтов (генератор изображений, загрузка текстуры, рендер depth-рампы, подсчёт
 расхождений) — `crates/render/tests/common/parity.rs`. Так же переводятся
