@@ -15,6 +15,7 @@
 //! those invariants host-testable.
 
 use crate::gizmo_drag::GizmoDrag;
+use crate::mode::EditorMode;
 use crate::picking::PickRay;
 use crate::snap::SnapSettings;
 use ornis_assets::scene::TransformDesc;
@@ -67,6 +68,9 @@ pub struct GizmoRuntime {
     candidate: Option<GizmoTarget>,
     /// One-step undo payload of the last committed drag.
     undo: Option<GizmoTarget>,
+    /// Mode that undo was committed in; only meaningful while `undo` is
+    /// `Some`. Decides whether Stop may keep it (see [`Self::reset`]).
+    undo_mode: EditorMode,
     /// Snap steps applied to the active channel of every preview (E4);
     /// disabled by default.
     snap: SnapSettings,
@@ -120,7 +124,11 @@ impl GizmoRuntime {
     /// A moved drag promotes its undo candidate to the one-step undo; a
     /// click without motion commits nothing and keeps the previous undo.
     /// Returns the promoted undo payload, if any.
-    pub fn commit(&mut self) -> Option<GizmoTarget> {
+    ///
+    /// `mode` is the authoritative mode the drag was committed in: it tags
+    /// the undo so [`Self::reset`] can tell an authored pose from a
+    /// simulated one.
+    pub fn commit(&mut self, mode: EditorMode) -> Option<GizmoTarget> {
         self.drag = None;
         self.selected = None;
         let moved = std::mem::take(&mut self.moved);
@@ -129,6 +137,7 @@ impl GizmoRuntime {
             return None;
         }
         self.undo = candidate.clone();
+        self.undo_mode = mode;
         candidate
     }
 
@@ -143,16 +152,20 @@ impl GizmoRuntime {
         self.candidate = None;
     }
 
-    /// Drops *all* drag state, including the one-step undo of the last
-    /// commit (unlike [`GizmoRuntime::cancel`], which keeps it).
+    /// Drops *all* drag state, plus the one-step undo of a drag committed
+    /// outside Edit (unlike [`GizmoRuntime::cancel`], which keeps the undo).
     ///
     /// Called when the authoritative mode returns to Edit (Stop): a drag
     /// committed in Paused addresses the simulated world, so its undo must
     /// not survive into the Edit world Stop restores — applying it would
-    /// write a simulated pose the snapshot never contained.
+    /// write a simulated pose the snapshot never contained. An undo
+    /// committed in Edit names a pose of that very snapshot, so Stop keeps
+    /// it and Ctrl+Z still works after a Play/Stop round trip.
     pub fn reset(&mut self) {
         self.cancel();
-        self.undo = None;
+        if !self.undo_mode.is_edit() {
+            self.undo = None;
+        }
     }
 
     /// The preview to roll back when the drag is abandoned: the dragged
@@ -165,6 +178,7 @@ impl GizmoRuntime {
     /// Takes the one-step undo payload (the pre-drag transform of the last
     /// committed drag).
     pub fn take_undo(&mut self) -> Option<GizmoTarget> {
+        self.undo_mode = EditorMode::Edit;
         self.undo.take()
     }
 
@@ -182,10 +196,33 @@ impl GizmoRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gizmo::{GizmoAxis, GizmoHandle, GizmoMode, GizmoSpace};
+    use crate::gizmo::{
+        GizmoAxis, GizmoHandle, GizmoMode, GizmoSpace, axis_direction, plane_directions,
+    };
     use crate::picking::PickRay;
     use glam::{Quat, Vec3};
     use ornis_core::units::UnitQuat;
+
+    /// A pointer ray from `origin` looking down -Z.
+    fn down_ray(origin: Vec3) -> PickRay {
+        PickRay::try_new(origin, Vec3::new(0.0, 0.0, -1.0)).expect("valid ray")
+    }
+
+    /// The snapped preview of one drag: `handle` pressed with `press` on
+    /// `start`, released with `release`.
+    fn snapped_preview(
+        start: &TransformDesc,
+        handle: GizmoHandle,
+        press: PickRay,
+        release: PickRay,
+        snap: SnapSettings,
+    ) -> TransformDesc {
+        let drag = GizmoDrag::begin(start, handle, &press).expect("drag starts");
+        let mut runtime = GizmoRuntime::default();
+        runtime.set_snap(snap);
+        runtime.begin(drag, Entity::new(1), None);
+        runtime.preview_transform(&release).expect("a preview")
+    }
 
     /// A press ray through the drag handle.
     fn ray() -> PickRay {
@@ -242,7 +279,7 @@ mod tests {
         let mut runtime = GizmoRuntime::default();
         runtime.begin(drag(), Entity::new(1), Some(target()));
         assert!(!runtime.preview(&TransformDesc::IDENTITY));
-        assert!(runtime.commit().is_none());
+        assert!(runtime.commit(EditorMode::Edit).is_none());
         assert!(
             runtime.take_undo().is_none(),
             "a click without motion must not create an undo"
@@ -255,7 +292,9 @@ mod tests {
     fn a_moved_drag_promotes_the_undo_candidate() {
         let mut runtime = armed();
         assert!(runtime.preview(&moved_x()));
-        let promoted = runtime.commit().expect("a moved drag commits");
+        let promoted = runtime
+            .commit(EditorMode::Edit)
+            .expect("a moved drag commits");
         assert_eq!(promoted.transform, TransformDesc::IDENTITY);
         let undo = runtime.take_undo().expect("the undo survives the commit");
         assert_eq!(undo.transform, TransformDesc::IDENTITY);
@@ -270,10 +309,10 @@ mod tests {
         runtime
             .preview_transform(&release_ray())
             .expect("a preview");
-        runtime.commit();
+        runtime.commit(EditorMode::Edit);
         runtime.begin(drag(), Entity::new(1), Some(target()));
         runtime.preview_transform(&ray()).expect("no motion");
-        runtime.commit();
+        runtime.commit(EditorMode::Edit);
         assert!(
             runtime.take_undo().is_some(),
             "the undo of the committed drag must survive a later click"
@@ -309,7 +348,7 @@ mod tests {
         runtime
             .preview_transform(&release_ray())
             .expect("a preview");
-        runtime.commit();
+        runtime.commit(EditorMode::Edit);
 
         // The replica is rebuilt: the drag state is dropped, the undo is not.
         runtime.cancel();
@@ -319,7 +358,7 @@ mod tests {
         assert_eq!(undo.transform, TransformDesc::IDENTITY);
     }
 
-    /// `reset` (Stop back to Edit) drops the promoted one-step undo, unlike
+    /// `reset` (Stop back to Edit) drops a *simulated* undo, unlike
     /// `cancel`: a drag committed in Paused addresses the simulated world, so
     /// its undo must not survive into the Edit world the snapshot restores.
     #[test]
@@ -328,13 +367,30 @@ mod tests {
         runtime
             .preview_transform(&release_ray())
             .expect("a preview");
-        runtime.commit();
+        runtime.commit(EditorMode::Paused);
         runtime.reset();
         assert!(!runtime.is_dragging());
         assert!(runtime.rollback().is_none());
         assert!(
             runtime.take_undo().is_none(),
             "reset must drop the undo so a Paused drag cannot write into Edit"
+        );
+    }
+
+    /// An undo committed in Edit names a pose of the very snapshot Stop
+    /// restores, so `reset` keeps it (E4 review): Play/Stop must not eat the
+    /// authoring undo. A later Paused commit still replaces it.
+    #[test]
+    fn reset_keeps_an_undo_committed_in_edit() {
+        let mut runtime = armed();
+        runtime
+            .preview_transform(&release_ray())
+            .expect("a preview");
+        runtime.commit(EditorMode::Edit);
+        runtime.reset();
+        assert_eq!(
+            runtime.take_undo().expect("the Edit undo survives Stop"),
+            target()
         );
     }
 
@@ -348,7 +404,10 @@ mod tests {
         runtime.reset();
         assert!(!runtime.is_dragging());
         assert!(runtime.rollback().is_none());
-        assert!(runtime.commit().is_none(), "no candidate survives reset");
+        assert!(
+            runtime.commit(EditorMode::Edit).is_none(),
+            "no candidate survives reset"
+        );
         assert!(runtime.take_undo().is_none());
     }
 
@@ -372,49 +431,186 @@ mod tests {
         );
     }
 
-    /// A Move drag with snap quantizes translation but leaves rotation and
-    /// scale bit-exact (E4 review): snapping must not touch inactive channels.
+    /// A Move drag with snap quantizes the offset swept along the handle
+    /// axis — not the absolute world coordinates — and leaves the other
+    /// translation components, rotation and scale bit-exact (E4 review):
+    /// an X drag must not shift Y/Z, and the step is measured from the press.
     #[test]
-    fn move_snap_leaves_rotation_and_scale_bit_exact() {
+    fn move_snap_quantizes_the_axis_offset_only() {
         let start = TransformDesc {
             translation: Vec3::new(0.37, 1.23, -2.71),
             rotation: UnitQuat::normalize(Quat::from_rotation_y(38.0_f32.to_radians()))
                 .expect("unit"),
             scale: Vec3::new(1.13, 0.87, 2.42),
         };
-        let press =
-            PickRay::try_new(Vec3::new(0.37, 1.23, 5.0), Vec3::new(0.0, 0.0, -1.0)).expect("ray");
-        let drag = GizmoDrag::begin(
+        let preview = snapped_preview(
             &start,
             GizmoHandle {
                 mode: GizmoMode::Move,
                 space: GizmoSpace::World,
                 axis: GizmoAxis::X,
             },
-            &press,
-        )
-        .expect("drag starts");
-        let mut runtime = GizmoRuntime::default();
-        runtime.set_snap(SnapSettings {
-            enabled: true,
-            translate: 0.5,
-            ..SnapSettings::default()
-        });
-        runtime.begin(drag, Entity::new(1), None);
-        let release =
-            PickRay::try_new(Vec3::new(2.37, 1.23, 5.0), Vec3::new(0.0, 0.0, -1.0)).expect("ray");
-        let preview = runtime.preview_transform(&release).expect("a preview");
-        for c in preview.translation.to_array() {
-            assert!(
-                ((c / 0.5).round() * 0.5 - c).abs() < 1e-6,
-                "{c} not a multiple of the step"
-            );
-        }
+            down_ray(Vec3::new(0.37, 1.23, 5.0)),
+            down_ray(Vec3::new(0.74, 1.23, 5.0)),
+            SnapSettings {
+                enabled: true,
+                translate: 0.5,
+                ..SnapSettings::default()
+            },
+        );
+        assert!(
+            (preview.translation.x - 0.87).abs() < 1e-6,
+            "the 0.37 offset must snap to 0.5 from the press, got {:?}",
+            preview.translation
+        );
+        assert_eq!(
+            preview.translation.y, start.translation.y,
+            "an X drag must not move Y"
+        );
+        assert_eq!(
+            preview.translation.z, start.translation.z,
+            "an X drag must not move Z"
+        );
         assert_eq!(
             preview.rotation, start.rotation,
             "rotation must be bit-exact"
         );
         assert_eq!(preview.scale, start.scale, "scale must be bit-exact");
+    }
+
+    /// A Local Move drag snaps along the *rotated* handle axis and stays on
+    /// it (E4 review): rounding world coordinates would slide the object off
+    /// its own axis. Rotation and scale stay bit-exact.
+    #[test]
+    fn local_move_snap_stays_on_the_rotated_axis() {
+        let start = TransformDesc {
+            translation: Vec3::new(0.37, 1.23, -2.71),
+            rotation: UnitQuat::normalize(Quat::from_rotation_y(0.3)).expect("unit"),
+            scale: Vec3::new(1.13, 0.87, 2.42),
+        };
+        let handle = GizmoHandle {
+            mode: GizmoMode::Move,
+            space: GizmoSpace::Local,
+            axis: GizmoAxis::X,
+        };
+        let axis = axis_direction(&start, handle);
+        let preview = snapped_preview(
+            &start,
+            handle,
+            down_ray(Vec3::new(0.37, 1.23, 5.0)),
+            down_ray(Vec3::new(0.37 + 0.37 * axis.x, 1.23, 5.0)),
+            SnapSettings {
+                enabled: true,
+                translate: 0.5,
+                ..SnapSettings::default()
+            },
+        );
+        let delta = preview.translation - start.translation;
+        assert!(
+            (delta.length() - 0.5).abs() < 1e-5,
+            "the 0.37 offset along the local axis must snap to 0.5, got {delta:?}"
+        );
+        assert!(
+            delta.cross(axis).length() < 1e-5,
+            "the drag left the local axis: {delta:?} vs {axis:?}"
+        );
+        assert_eq!(
+            preview.rotation, start.rotation,
+            "rotation must be bit-exact"
+        );
+        assert_eq!(preview.scale, start.scale, "scale must be bit-exact");
+    }
+
+    /// A plane Move drag snaps both in-plane offsets independently, in the
+    /// handle's own basis (World *and* Local), and never leaves the plane
+    /// (E4 review). Rotation and scale stay bit-exact.
+    #[test]
+    fn plane_snap_quantizes_both_in_plane_offsets() {
+        // A rotation around Z leaves the XY plane world-aligned but turns
+        // the Local in-plane basis, so the two spaces must differ.
+        let start = TransformDesc {
+            translation: Vec3::new(0.37, 1.23, -2.71),
+            rotation: UnitQuat::normalize(Quat::from_rotation_z(0.3)).expect("unit"),
+            scale: Vec3::new(1.13, 0.87, 2.42),
+        };
+        for space in [GizmoSpace::World, GizmoSpace::Local] {
+            let handle = GizmoHandle {
+                mode: GizmoMode::Move,
+                space,
+                axis: GizmoAxis::Xy,
+            };
+            let (a, b) = plane_directions(&start, handle);
+            let swept = start.translation + (a + b) * 0.37;
+            let preview = snapped_preview(
+                &start,
+                handle,
+                down_ray(Vec3::new(0.37, 1.23, 5.0)),
+                down_ray(Vec3::new(swept.x, swept.y, 5.0)),
+                SnapSettings {
+                    enabled: true,
+                    translate: 0.5,
+                    ..SnapSettings::default()
+                },
+            );
+            let expected = start.translation + (a + b) * 0.5;
+            assert!(
+                (preview.translation - expected).length() < 1e-5,
+                "{space:?}: both in-plane offsets must snap to 0.5, got {:?}",
+                preview.translation
+            );
+            let normal = axis_direction(&start, handle);
+            assert!(
+                (preview.translation - start.translation).dot(normal).abs() < 1e-5,
+                "{space:?}: the drag left the plane"
+            );
+            assert_eq!(preview.rotation, start.rotation, "{space:?}: rotation");
+            assert_eq!(preview.scale, start.scale, "{space:?}: scale");
+        }
+    }
+
+    /// A Scale drag snaps only the dragged component and keeps a mirrored
+    /// (negative) component mirrored (E4 review): a Y drag must not touch X
+    /// or Z, and the sign survives the magnitude floor.
+    #[test]
+    fn scale_snap_touches_only_the_dragged_component() {
+        let start = TransformDesc {
+            translation: Vec3::new(0.37, 1.23, -2.71),
+            scale: Vec3::new(-1.13, 0.87, 2.42),
+            ..TransformDesc::IDENTITY
+        };
+        let preview = snapped_preview(
+            &start,
+            GizmoHandle {
+                mode: GizmoMode::Scale,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::Y,
+            },
+            down_ray(Vec3::new(0.37, 2.23, 2.29)),
+            down_ray(Vec3::new(0.37, 2.53, 2.29)),
+            SnapSettings {
+                enabled: true,
+                scale: 0.25,
+                ..SnapSettings::default()
+            },
+        );
+        assert!(
+            (preview.scale.y - 1.25).abs() < 1e-6,
+            "0.87·1.3 must snap to 1.25, got {:?}",
+            preview.scale
+        );
+        assert_eq!(
+            preview.scale.x, -1.13,
+            "a Y drag must not touch the mirrored X"
+        );
+        assert_eq!(preview.scale.z, 2.42, "a Y drag must not touch Z");
+        assert_eq!(
+            preview.translation, start.translation,
+            "translation must be bit-exact"
+        );
+        assert_eq!(
+            preview.rotation, start.rotation,
+            "rotation must be bit-exact"
+        );
     }
 
     /// A Rotate drag with snap quantizes the swept angle around the handle

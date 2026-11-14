@@ -1558,7 +1558,7 @@ impl<'a> FrameState<'a> {
         let selected = self.gizmo.selected();
         // A click on a handle without motion commits nothing: the machine
         // promotes the undo candidate only for a drag that really moved.
-        let moved = self.gizmo.commit().is_some();
+        let moved = self.gizmo.commit(editor_mode()).is_some();
         let Some(selected) = selected else {
             self.set_gizmo_grab(false);
             return;
@@ -1667,11 +1667,12 @@ impl<'a> FrameState<'a> {
 }
 
 /// Reconciles the gizmo with an authoritative mode change. Returning to
-/// Edit (Stop) resets the drag/undo state: a drag committed in Paused
-/// addresses the simulated world, so its one-step undo must not survive
-/// into the Edit world the snapshot restores (an in-flight preview is
-/// rolled back first). Any mode change also re-lays the handles in the
-/// same frame — Play collapses them (chrome off), Edit/Paused shows the
+/// Edit (Stop) abandons the drag and drops a *simulated* undo: a drag
+/// committed in Paused addresses the simulated world, so its one-step undo
+/// must not survive into the Edit world the snapshot restores (an in-flight
+/// preview is rolled back first). An undo committed in Edit names a pose of
+/// that snapshot and survives. Any mode change also re-lays the handles in
+/// the same frame — Play collapses them (chrome off), Edit/Paused shows the
 /// active tool again.
 // qual:allow(test_quality, untested) reason: "browser mode-edge wiring; the reset invariant is host-tested on GizmoRuntime"
 fn sync_gizmo_mode(frame: &mut FrameState<'_>) {

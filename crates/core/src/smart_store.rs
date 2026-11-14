@@ -312,6 +312,15 @@ impl SmartStore {
         read_lock(&self.allocator).is_alive(entity)
     }
 
+    /// Advances this store's reusable entity generations past every handle
+    /// `live` issued, before `self` (an older snapshot) replaces it — see
+    /// [`EntityAllocator::advance_generations_past`]. Entities alive here
+    /// keep their handles; only ids this store may still hand out advance.
+    pub fn advance_generations_past(&self, live: &Self) {
+        let live_allocator = read_lock(&live.allocator).clone();
+        write_lock(&self.allocator).advance_generations_past(&live_allocator);
+    }
+
     /// Inserts or replaces the hot component `T` for `entity`, creating
     /// the lane on first use. Dispatches to the RwLock or lock-free
     /// implementation depending on how `T` was registered.

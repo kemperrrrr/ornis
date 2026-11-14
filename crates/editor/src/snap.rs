@@ -1,16 +1,19 @@
 //! Gizmo snap settings (PLAN §i, slice E4): quantize the active drag channel
 //! to a translate/rotate/scale step.
 //!
-//! Pure over `Vec3` and angles: the replica owns the settings (a UI
+//! Pure over scalars and angles: the replica owns the settings (a UI
 //! preference, not scene content — same footing as the gizmo mode/space) and
 //! applies them to the preview's active channel before it is written and
 //! committed. Disabled by default; a step that is not finite and positive —
 //! or so tiny that dividing by it overflows — leaves that channel unquantized
 //! even when snap is on.
+//!
+//! Every entry point quantizes ONE scalar: the offset along the dragged axis
+//! (or one in-plane axis) for Move, the dragged scale component for Scale,
+//! the swept angle for Rotate. The caller keeps every other component
+//! bit-exact, so a single-axis drag never moves the axes it did not grab.
 
-use glam::Vec3;
-
-/// Floor for a snapped scale component (never zero or negative), matching
+/// Floor for a snapped scale component's magnitude (never zero), matching
 /// the drag math's `MIN_SCALE`.
 const MIN_SCALE: f32 = 1e-3;
 
@@ -41,24 +44,28 @@ impl Default for SnapSettings {
 }
 
 impl SnapSettings {
-    /// Rounds a translation to the translate step (world units). Snap off or
-    /// an unusable step returns `v` unchanged.
+    /// Rounds a translation offset (world units) measured along the dragged
+    /// axis, or along one in-plane axis of a plane handle. Snap off or an
+    /// unusable step returns `offset` unchanged.
     #[must_use]
-    pub fn snap_translate(&self, v: Vec3) -> Vec3 {
+    pub fn snap_offset(&self, offset: f32) -> f32 {
         if !self.enabled || !usable_step(self.translate) {
-            return v;
+            return offset;
         }
-        snap_vec3(v, self.translate)
+        (offset / self.translate).round() * self.translate
     }
 
-    /// Rounds a scale to the scale step (factor) and floors it at
-    /// `MIN_SCALE`. Snap off or an unusable step returns `v` unchanged.
+    /// Rounds one dragged scale component to the scale step and floors its
+    /// magnitude at `MIN_SCALE`, preserving the sign: a mirrored (negative)
+    /// component stays mirrored instead of collapsing to the floor. Snap off
+    /// or an unusable step returns `value` unchanged.
     #[must_use]
-    pub fn snap_scale(&self, v: Vec3) -> Vec3 {
+    pub fn snap_scale_component(&self, value: f32) -> f32 {
         if !self.enabled || !usable_step(self.scale) {
-            return v;
+            return value;
         }
-        floor_scale(snap_vec3(v, self.scale))
+        let magnitude = (value.abs() / self.scale).round() * self.scale;
+        magnitude.max(MIN_SCALE).copysign(value)
     }
 
     /// Rounds a swept angle (radians) to the rotate step (degrees). Snap off
@@ -75,28 +82,10 @@ impl SnapSettings {
 
 /// Whether a snap step can quantize without overflow: finite, positive, and
 /// large enough that its reciprocal stays finite. A denormal step (e.g.
-/// `1e-45`) passes `> 0.0` but overflows `v / step` to infinity, so it is
+/// `1e-45`) passes `> 0.0` but overflows `value / step` to infinity, so it is
 /// rejected just like a non-finite or non-positive step.
 fn usable_step(step: f32) -> bool {
     step.is_finite() && step > 0.0 && (1.0 / step).is_finite()
-}
-
-/// Rounds each component to the nearest multiple of `step` (`step > 0`).
-fn snap_vec3(v: Vec3, step: f32) -> Vec3 {
-    Vec3::new(
-        (v.x / step).round() * step,
-        (v.y / step).round() * step,
-        (v.z / step).round() * step,
-    )
-}
-
-/// Floors each scale component at [`MIN_SCALE`].
-fn floor_scale(v: Vec3) -> Vec3 {
-    Vec3::new(
-        f32::max(v.x, MIN_SCALE),
-        f32::max(v.y, MIN_SCALE),
-        f32::max(v.z, MIN_SCALE),
-    )
 }
 
 #[cfg(test)]
@@ -113,24 +102,23 @@ mod tests {
     #[test]
     fn disabled_snap_is_identity() {
         let snap = SnapSettings::default();
-        let v = Vec3::new(0.37, 1.23, -2.71);
-        assert_eq!(snap.snap_translate(v), v);
-        assert_eq!(snap.snap_scale(v), v);
+        assert_eq!(snap.snap_offset(0.37), 0.37);
+        assert_eq!(snap.snap_scale_component(1.13), 1.13);
         assert_eq!(snap.snap_angle(0.38), 0.38);
     }
 
     #[test]
-    fn translation_lands_on_multiples_of_the_step() {
+    fn offset_lands_on_multiples_of_the_step() {
         let snap = SnapSettings {
             translate: 0.5,
             ..enabled()
         };
-        let t = snap.snap_translate(Vec3::new(0.37, 1.23, -2.71));
-        assert!((t - Vec3::new(0.5, 1.0, -2.5)).length() < 1e-6);
-        for c in t.to_array() {
+        for (offset, expected) in [(0.37, 0.5), (1.23, 1.0), (-2.71, -2.5)] {
+            let got = snap.snap_offset(offset);
+            assert!((got - expected).abs() < 1e-6, "{offset} -> {got}");
             assert!(
-                ((c / 0.5).round() * 0.5 - c).abs() < 1e-6,
-                "{c} not a multiple"
+                ((got / 0.5).round() * 0.5 - got).abs() < 1e-6,
+                "{got} not a multiple"
             );
         }
     }
@@ -141,8 +129,31 @@ mod tests {
             scale: 0.25,
             ..enabled()
         };
-        let s = snap.snap_scale(Vec3::new(1.13, 0.87, 0.0001));
-        assert!((s - Vec3::new(1.25, 0.75, MIN_SCALE)).length() < 1e-6);
+        for (value, expected) in [(1.13, 1.25), (0.87, 0.75), (0.0001, MIN_SCALE)] {
+            let got = snap.snap_scale_component(value);
+            assert!((got - expected).abs() < 1e-6, "{value} -> {got}");
+        }
+    }
+
+    /// A mirrored component is quantized by magnitude and keeps its sign:
+    /// the floor applies to the magnitude, so `-1` never becomes `+0.001`
+    /// (E4 review — a Scale-Y drag collapsed the mirrored X).
+    #[test]
+    fn scale_preserves_the_sign_of_a_mirrored_component() {
+        let snap = SnapSettings {
+            scale: 0.25,
+            ..enabled()
+        };
+        for (value, expected) in [
+            (-1.13, -1.25),
+            (-1.0, -1.0),
+            (-0.87, -0.75),
+            (-0.0001, -MIN_SCALE),
+        ] {
+            let got = snap.snap_scale_component(value);
+            assert!((got - expected).abs() < 1e-6, "{value} -> {got}");
+            assert!(got < 0.0, "{value} lost its sign: {got}");
+        }
     }
 
     #[test]
@@ -171,9 +182,8 @@ mod tests {
             rotate_deg: 0.0,
             scale: 0.0,
         };
-        let v = Vec3::new(0.37, 1.23, -2.71);
-        assert_eq!(snap.snap_translate(v), v);
-        assert_eq!(snap.snap_scale(v), v);
+        assert_eq!(snap.snap_offset(0.37), 0.37);
+        assert_eq!(snap.snap_scale_component(1.13), 1.13);
         assert_eq!(snap.snap_angle(0.38), 0.38);
     }
 
@@ -182,7 +192,6 @@ mod tests {
     /// poison the preview with NaN (E4 review).
     #[test]
     fn non_finite_step_skips_its_channel() {
-        let v = Vec3::new(0.37, 1.23, -2.71);
         for step in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             let snap = SnapSettings {
                 enabled: true,
@@ -190,8 +199,8 @@ mod tests {
                 rotate_deg: step,
                 scale: step,
             };
-            assert_eq!(snap.snap_translate(v), v, "translate step {step}");
-            assert_eq!(snap.snap_scale(v), v, "scale step {step}");
+            assert_eq!(snap.snap_offset(0.37), 0.37, "translate step {step}");
+            assert_eq!(snap.snap_scale_component(1.13), 1.13, "scale step {step}");
             assert_eq!(snap.snap_angle(0.38), 0.38, "rotate step {step}");
         }
     }
@@ -208,9 +217,8 @@ mod tests {
             rotate_deg: tiny,
             scale: tiny,
         };
-        let v = Vec3::new(0.37, 1.23, -2.71);
-        assert_eq!(snap.snap_translate(v), v);
-        assert_eq!(snap.snap_scale(v), v);
+        assert_eq!(snap.snap_offset(0.37), 0.37);
+        assert_eq!(snap.snap_scale_component(1.13), 1.13);
         assert_eq!(snap.snap_angle(0.38), 0.38);
     }
 }

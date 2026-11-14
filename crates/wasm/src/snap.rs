@@ -62,9 +62,8 @@ mod tests {
         assert_eq!(snap.translate, 0.0);
         assert_eq!(snap.rotate_deg, 0.0);
         assert_eq!(snap.scale, 0.0);
-        let v = glam::Vec3::new(0.37, 1.23, -2.71);
-        assert_eq!(snap.snap_translate(v), v);
-        assert_eq!(snap.snap_scale(v), v);
+        assert_eq!(snap.snap_offset(0.37), 0.37);
+        assert_eq!(snap.snap_scale_component(1.13), 1.13);
         assert_eq!(snap.snap_angle(0.38), 0.38);
         // Restore the default for the other tests on this thread.
         set_snap(false, 0.5, 15.0, 0.25);
@@ -76,12 +75,11 @@ mod tests {
     /// review).
     #[test]
     fn non_finite_steps_relay_through_and_disable_their_channel() {
-        let v = glam::Vec3::new(0.37, 1.23, -2.71);
         for step in [f32::NAN, f32::INFINITY, f32::from_bits(1)] {
             set_snap(true, step, step, step);
             let snap = snap_settings();
-            assert_eq!(snap.snap_translate(v), v, "translate step {step}");
-            assert_eq!(snap.snap_scale(v), v, "scale step {step}");
+            assert_eq!(snap.snap_offset(0.37), 0.37, "translate step {step}");
+            assert_eq!(snap.snap_scale_component(1.13), 1.13, "scale step {step}");
             assert_eq!(snap.snap_angle(0.38), 0.38, "rotate step {step}");
         }
         // Restore the default for the other tests on this thread.

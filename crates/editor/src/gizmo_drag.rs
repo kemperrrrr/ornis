@@ -8,7 +8,7 @@
 //! Rotation handles are tangent bars; the drag never assumes a ring mesh,
 //! it sweeps the ray angle around the axis.
 
-use crate::gizmo::{GizmoAxis, GizmoHandle, GizmoMode, axis_direction};
+use crate::gizmo::{GizmoAxis, GizmoHandle, GizmoMode, axis_direction, plane_directions};
 use crate::picking::PickRay;
 use crate::snap::SnapSettings;
 use glam::{Quat, Vec3};
@@ -97,11 +97,12 @@ impl GizmoDrag {
         Some(transform)
     }
 
-    /// Quantizes only the active drag channel (E4): Move snaps translation,
-    /// Scale snaps scale, Rotate snaps the swept angle around the handle
+    /// Quantizes only the active drag channel (E4): Move snaps the offset
+    /// swept along the handle axis (or the two in-plane axes), Scale snaps
+    /// the dragged component, Rotate snaps the swept angle around the handle
     /// axis. Every other channel is returned bit-exact; snap off returns the
     /// preview unchanged.
-    // qual:allow(iosp) reason: "one dispatch over the handle axis/mode mirroring update; the rotate leaf lives in snap_rotate"
+    // qual:allow(iosp) reason: "one dispatch over the handle axis/mode mirroring update; the channel leaves live in snap_axis_move/snap_plane_move/snap_rotate"
     #[must_use]
     pub fn apply_snap(&self, mut transform: TransformDesc, snap: &SnapSettings) -> TransformDesc {
         if !snap.enabled {
@@ -109,13 +110,16 @@ impl GizmoDrag {
         }
         match self.handle.axis {
             GizmoAxis::Xy | GizmoAxis::Yz | GizmoAxis::Xz => {
-                transform.translation = snap.snap_translate(transform.translation);
+                transform.translation = self.snap_plane_move(transform.translation, snap);
             }
             _ => match self.handle.mode {
                 GizmoMode::Move => {
-                    transform.translation = snap.snap_translate(transform.translation);
+                    transform.translation = self.snap_axis_move(transform.translation, snap);
                 }
-                GizmoMode::Scale => transform.scale = snap.snap_scale(transform.scale),
+                GizmoMode::Scale => {
+                    let index = axis_index(self.handle.axis);
+                    transform.scale[index] = snap.snap_scale_component(transform.scale[index]);
+                }
                 GizmoMode::Rotate => {
                     transform.rotation = self.snap_rotate(transform.rotation, snap);
                 }
@@ -123,6 +127,26 @@ impl GizmoDrag {
             },
         }
         transform
+    }
+
+    /// Snaps the offset swept along the handle axis since the press, keeping
+    /// the perpendicular components at their start values. `axis` is already
+    /// world-space in both spaces (`R·e` for Local), so the offset is
+    /// measured in the handle's own frame and a Local drag stays on its axis.
+    fn snap_axis_move(&self, translation: Vec3, snap: &SnapSettings) -> Vec3 {
+        let offset = (translation - self.start.translation).dot(self.axis);
+        self.start.translation + self.axis * snap.snap_offset(offset)
+    }
+
+    /// Snaps both in-plane offsets of a plane handle since the press,
+    /// independently and in the handle's own (World/Local) basis, keeping the
+    /// out-of-plane component at its start value.
+    fn snap_plane_move(&self, translation: Vec3, snap: &SnapSettings) -> Vec3 {
+        let (a, b) = plane_directions(&self.start, self.handle);
+        let delta = translation - self.start.translation;
+        self.start.translation
+            + a * snap.snap_offset(delta.dot(a))
+            + b * snap.snap_offset(delta.dot(b))
     }
 
     /// Snaps the swept rotation angle around the handle axis relative to the
@@ -192,13 +216,18 @@ impl GizmoDrag {
         if !factor.is_finite() || factor <= SCALE_FACTOR_EPS {
             return Some(());
         }
-        let index = match self.handle.axis {
-            GizmoAxis::X => 0,
-            GizmoAxis::Y => 1,
-            _ => 2,
-        };
+        let index = axis_index(self.handle.axis);
         transform.scale[index] = (self.start.scale[index] * factor).max(MIN_SCALE);
         Some(())
+    }
+}
+
+/// Index of the scale component an axis handle drives.
+fn axis_index(axis: GizmoAxis) -> usize {
+    match axis {
+        GizmoAxis::X => 0,
+        GizmoAxis::Y => 1,
+        _ => 2,
     }
 }
 

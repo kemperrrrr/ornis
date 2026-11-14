@@ -1100,8 +1100,10 @@ fn snapshot_to_scene(snapshot: &PlaySnapshot) -> Scene {
 /// the domain state that accumulated during Play — the physics solver (so
 /// the next Play re-binds bodies from the restored `RigidBody` lane instead
 /// of resuming fallen poses) and the pending mutation/structural queues (so
-/// Play-era writes never land on the restored world). The engine and its
-/// schedule are untouched; no file is read or written.
+/// Play-era writes never land on the restored world). The restored
+/// allocator is first advanced past every handle Play issued, so a recycled
+/// id can never name a different entity than it did during Play. The engine
+/// and its schedule are untouched; no file is read or written.
 fn restore_play_snapshot(world: &mut EditorSession, snapshot: PlaySnapshot) {
     let gravity = world
         .world()
@@ -1112,8 +1114,12 @@ fn restore_play_snapshot(world: &mut EditorSession, snapshot: PlaySnapshot) {
     if let Some(bus) = world.world().resources().get::<MutationBus>() {
         let _ = bus.drain();
     }
+    let restored = snapshot.store;
+    if let Some(live) = world.store() {
+        restored.advance_generations_past(live);
+    }
     let resources = world.world_mut().resources_mut();
-    let _ = resources.insert(snapshot.store);
+    let _ = resources.insert(restored);
     let _ = resources.insert(snapshot.environment);
     let _ = resources.insert(Mutex::new(PhysicsRuntime::new(gravity)));
     let _ = resources.insert(FixedStructuralQueue::new());
@@ -3880,6 +3886,50 @@ mod tests {
             collider_before,
             "the Edit Collider override survives Stop"
         );
+    }
+
+    /// Stop must not re-issue an entity handle Play already handed out (E4
+    /// review): the restored allocator predates the live one, so a recycled
+    /// id — or an id first created during Play — would otherwise come back
+    /// with the same generation and alias a stale browser handle.
+    #[test]
+    fn stop_never_reissues_a_play_era_entity_handle() {
+        let mut world = EditorSession::new();
+        let hero = world.spawn(Some("Hero".into()));
+        let doomed = world.spawn(Some("Doomed".into()));
+        world
+            .despawn(doomed.id(), doomed.generation())
+            .expect("despawned before Play");
+
+        world.play();
+        // Play recycles the freed id twice and creates an entity the
+        // snapshot never saw, then frees it again.
+        let mut issued = vec![hero, doomed];
+        let recycled = world.spawn(Some("Recycled".into()));
+        issued.push(recycled);
+        world
+            .despawn(recycled.id(), recycled.generation())
+            .expect("despawned during Play");
+        issued.push(world.spawn(Some("RecycledAgain".into())));
+        let created = world.spawn(Some("Created".into()));
+        issued.push(created);
+        world
+            .despawn(created.id(), created.generation())
+            .expect("despawned during Play");
+
+        world.stop();
+        assert!(
+            world.store().expect("store").is_alive(hero),
+            "Stop keeps the restored handles alive"
+        );
+        for _ in 0..4 {
+            let next = world.spawn(None);
+            assert!(
+                !issued.contains(&next),
+                "{next:?} already named a different entity during Play"
+            );
+            issued.push(next);
+        }
     }
 
     /// Stop restores the body config and resets the solver, so a second

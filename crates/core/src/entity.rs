@@ -247,6 +247,28 @@ impl EntityAllocator {
         }
         self.generations[idx] == entity.generation.as_u32()
     }
+
+    /// Advances the generations this allocator may still hand out past
+    /// every generation `live` issued for the same id, so restoring an
+    /// older allocator (E4 Stop) can never re-issue an `(id, generation)`
+    /// pair that already named a different entity.
+    ///
+    /// Slots alive here keep their generation — the restored handles must
+    /// stay valid. Only freed ids and ids `live` allocated beyond this
+    /// allocator's frontier advance; the latter are reserved so a fresh
+    /// allocate skips the generations `live` used instead of restarting
+    /// at 0.
+    pub fn advance_generations_past(&mut self, live: &Self) {
+        for &id in &self.free_list {
+            let idx = id as usize;
+            if let Some(&issued) = live.generations.get(idx) {
+                self.generations[idx] = self.generations[idx].max(issued.wrapping_add(1));
+            }
+        }
+        for idx in self.generations.len()..live.generations.len() {
+            self.generations.push(live.generations[idx].wrapping_add(1));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -300,5 +322,42 @@ mod tests {
         let e = alloc.allocate();
         assert_eq!(e.id(), a.id());
         assert_eq!(e.generation(), a.generation() + 2);
+    }
+
+    /// Restoring an older allocator must not re-issue a handle the newer
+    /// one already handed out (E4 Stop): freed ids advance past every
+    /// generation the live allocator used, and ids the live allocator
+    /// created are reserved above it instead of restarting at 0.
+    #[test]
+    fn advance_generations_past_never_reissues_a_live_handle() {
+        let mut snapshot = EntityAllocator::new();
+        let kept = snapshot.allocate();
+        let recycled = snapshot.allocate();
+        snapshot.deallocate(recycled);
+
+        // Play runs on a clone: it recycles the freed id twice and creates
+        // two entities the snapshot never saw.
+        let mut live = snapshot.clone();
+        let first = live.allocate();
+        live.deallocate(first);
+        let second = live.allocate();
+        let created = live.allocate();
+        let also_created = live.allocate();
+        live.deallocate(also_created);
+
+        snapshot.advance_generations_past(&live);
+        assert!(
+            snapshot.is_alive(kept),
+            "a restored live handle must stay valid"
+        );
+        let mut issued = vec![kept, recycled, first, second, created, also_created];
+        for _ in 0..4 {
+            let next = snapshot.allocate();
+            assert!(
+                !issued.contains(&next),
+                "{next:?} was already issued during Play"
+            );
+            issued.push(next);
+        }
     }
 }
