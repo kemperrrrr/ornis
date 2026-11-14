@@ -79,9 +79,17 @@ button { font: inherit; color: inherit; }
 }
 .transport button svg { width: 14px; height: 14px; }
 .transport button:hover { background: #45454b; }
-.transport button.paused, .transport button.paused:hover { fill: var(--accent); } /* only the icon turns blue */
+.transport button.active, .transport button.active:hover { fill: var(--accent); }
 .transport button:disabled { opacity: 0.4; cursor: default; }
 .transport button:disabled:hover { background: var(--panel-2); }
+.transport button.playing { fill: var(--accent); }
+.mode-indicator {
+  align-self: center; padding: 2px 8px; border-radius: 999px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  border: 1px solid var(--line); color: var(--muted); background: var(--panel-2);
+}
+.mode-indicator[data-mode="play"] { color: var(--accent); border-color: var(--accent); }
+.mode-indicator[data-mode="paused"] { color: var(--good); border-color: var(--good); }
 /* Layout: side panels span full height; center column stacks transport/viewport/browser */
 .layout {
   flex: 1; min-height: 0;
@@ -196,6 +204,16 @@ button { font: inherit; color: inherit; }
 .viewport-gizmos .gizmo.space.active { color: var(--accent); }
 .viewport-gizmos .gizmo[data-tool="select"] svg { fill: #fff; transform: rotate(-25deg); }
 .viewport-gizmos .gizmo.active[data-tool="select"] svg { fill: var(--accent); }
+.snap-controls { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; }
+.viewport-gizmos .gizmo.snap-toggle { font: 600 14px/1 inherit; color: var(--muted); }
+.viewport-gizmos .gizmo.snap-toggle:hover { color: var(--text); }
+.viewport-gizmos .gizmo.snap-toggle.active { color: var(--accent); }
+.snap-step {
+  width: 46px; padding: 3px 4px; font-size: 11px;
+  background: var(--field); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+}
+.snap-step:focus { outline: none; border-color: var(--accent); }
 .viewport-settings {
   position: absolute; top: 2px; right: 10px;
   width: 38px; height: 38px; padding: 0;

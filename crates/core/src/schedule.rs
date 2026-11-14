@@ -83,6 +83,7 @@
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use std::time::Duration;
 
@@ -572,10 +573,72 @@ fn assert_writer_matches_role(role: PlanRole, system: &'static str, access: &Sys
     }
 }
 
+/// Per-system run predicate: the system executes only when this returns
+/// `true` for the current frame's resources.
+///
+/// Conditions are the scheduler-level "system set" gate (PLAN §i, E4): a
+/// host installs one predicate over a group of systems (e.g. "simulation
+/// runs only in `Play`") without the systems themselves knowing about the
+/// mode. Evaluated before the access frame, so a condition may read any
+/// resource; it must be cheap and side-effect-free.
+///
+/// # Evaluated once per frame
+///
+/// [`Schedule::evaluate_gates`] evaluates every condition of a plan once
+/// and [`Schedule::run_with_gates`] reuses the result, so a frame runs each
+/// predicate exactly once no matter how many fixed ticks it slices into,
+/// and every system of that frame sees the same decision. A closed
+/// whole-plan gate short-circuits: the per-system predicates are not called
+/// at all. [`Schedule::run`] is the single-shot form — it evaluates and
+/// executes in one call.
+pub type RunCondition = Arc<dyn Fn(&Resources) -> bool + Send + Sync>;
+
+/// Bits per word of the per-system gate bitset.
+const GATE_WORD_BITS: usize = u64::BITS as usize;
+
+/// One frame's run-condition decisions for a [`Schedule`], produced by
+/// [`Schedule::evaluate_gates`] and consumed by
+/// [`Schedule::run_with_gates`].
+///
+/// Holding the decisions outside the schedule is what lets the engine read
+/// the gate at the frame boundary (to freeze the fixed clock) and then run
+/// several fixed ticks against that same reading, instead of re-asking the
+/// predicate per tick.
+pub struct ScheduleGates {
+    permits: bool,
+    /// One bit per system (set = may run), or `None` when the plan installs
+    /// no per-system condition — the ungated path allocates nothing.
+    systems: Option<Vec<u64>>,
+}
+
+impl ScheduleGates {
+    /// Whether the whole-plan gate permits running this frame.
+    #[must_use]
+    pub fn permits(&self) -> bool {
+        self.permits
+    }
+
+    fn permits_system(&self, index: usize) -> bool {
+        self.systems.as_ref().is_none_or(|bits| {
+            bits[index / GATE_WORD_BITS] & (1u64 << (index % GATE_WORD_BITS)) != 0
+        })
+    }
+}
+
 /// System schedule: registration order is the conflict tie-break.
 pub struct Schedule {
     systems: Vec<Box<dyn System>>,
     accesses: Vec<SystemAccess>,
+    /// Optional per-system run predicates (registration-indexed, parallel to
+    /// `systems`). `None` runs unconditionally; `Some` skips the system when
+    /// the predicate returns `false`. Evaluated once per frame by
+    /// [`Schedule::evaluate_gates`], before any access frame, so a condition
+    /// reads resources unrestricted.
+    conditions: Vec<Option<RunCondition>>,
+    /// Optional whole-schedule gate: when `Some` and it returns `false`,
+    /// [`Schedule::run`] skips every system. Used to gate a plan that is
+    /// entirely one domain (e.g. the fixed simulation plan, PLAN §i E4).
+    schedule_condition: Option<RunCondition>,
     /// S5c: explicit ordering edges (registration indices i < j) on top
     /// of inferred access edges — e.g., for hidden dependencies (shared
     /// queue buffers) invisible in access sets.
@@ -696,6 +759,8 @@ impl Schedule {
         Self {
             systems: Vec::new(),
             accesses: Vec::new(),
+            conditions: Vec::new(),
+            schedule_condition: None,
             ordering: Vec::new(),
             mode: ExecMode::Parallel,
             enforcement: Enforcement::from(cfg!(debug_assertions)),
@@ -778,6 +843,7 @@ impl Schedule {
         assert_writer_matches_role(self.role, system.name(), &system.access());
         self.accesses.push(system.access());
         self.systems.push(Box::new(system));
+        self.conditions.push(None);
         self.invalidate_plan();
         self
     }
@@ -792,6 +858,7 @@ impl Schedule {
         assert_writer_matches_role(self.role, system.name(), &system.access());
         self.accesses.insert(0, system.access());
         self.systems.insert(0, Box::new(system));
+        self.conditions.insert(0, None);
         self.ordering = self
             .ordering
             .iter()
@@ -877,6 +944,66 @@ impl Schedule {
     /// Typed lookup of a system index by [`SystemName`].
     pub fn system_index(&self, name: &SystemName) -> Option<usize> {
         self.try_system_index(name.as_str())
+    }
+
+    /// Gates system `name` behind `condition`: it runs only on frames where
+    /// the predicate returns `true` (see [`RunCondition`]). `Some` replaces
+    /// any previous condition; `None` removes it, restoring unconditional
+    /// execution with no predicate call at all (unlike replacing it with
+    /// `|_| true`). The system's registration index, accesses and ordering
+    /// are untouched.
+    ///
+    /// This is the "system set" gate (PLAN §i, E4): a host applies one
+    /// predicate to each member of a group (simulation vs. editor chrome)
+    /// without the systems knowing about the mode.
+    ///
+    /// # Errors
+    /// [`OrderError::UnknownNode`] when no system is registered under `name`
+    /// — fail-fast so a renamed system breaks loudly at install time rather
+    /// than silently never gating. Applies to `None` as well as `Some`.
+    pub fn set_run_condition(
+        &mut self,
+        name: impl Into<SystemName>,
+        condition: Option<RunCondition>,
+    ) -> Result<&mut Self, OrderError> {
+        let name = name.into();
+        let index =
+            self.try_system_index(name.as_str())
+                .ok_or_else(|| OrderError::UnknownNode {
+                    name: name.as_str().to_owned(),
+                })?;
+        self.conditions[index] = condition;
+        Ok(self)
+    }
+
+    /// Gates the whole schedule behind `condition`: when it returns `false`,
+    /// [`Schedule::run`] skips every system (see [`RunCondition`]). `None`
+    /// removes the gate, restoring unconditional execution with no predicate
+    /// call at all (unlike replacing it with `|_| true`).
+    ///
+    /// For plans that are entirely one domain — the fixed simulation plan
+    /// runs only in `Play` (PLAN §i, E4) — this is more robust than gating
+    /// each member: systems added later inherit the gate automatically.
+    /// Per-system conditions still apply on frames where this gate passes.
+    ///
+    /// When this gates the fixed ([`crate::Stage::Gameplay`]) plan, the engine
+    /// also freezes the simulation clock on closed frames — see
+    /// [`crate::Engine::run_frame`] for the `FixedTime` contract.
+    pub fn set_schedule_condition(&mut self, condition: Option<RunCondition>) -> &mut Self {
+        self.schedule_condition = condition;
+        self
+    }
+
+    /// Whether the whole-schedule condition currently permits running:
+    /// `true` when no condition is set, otherwise the predicate's result.
+    /// Reads resources exactly as [`Schedule::run`] does, so the engine can
+    /// query the gate once at the frame boundary (e.g. to freeze the fixed
+    /// clock) without running the plan.
+    #[must_use]
+    pub fn schedule_permits(&self, resources: &Resources) -> bool {
+        self.schedule_condition
+            .as_ref()
+            .is_none_or(|condition| condition(resources))
     }
 
     /// Parallel (default) or strictly sequential (bit-identical
@@ -972,8 +1099,54 @@ impl Schedule {
             .get_or_compute(|| bitset_level_plan(&reads, &writes, &self.ordering))
     }
 
+    /// Evaluates every run condition of this plan once for the coming frame.
+    ///
+    /// The engine calls this at the frame boundary and passes the result to
+    /// [`Schedule::run_with_gates`] for each fixed tick, so a predicate is
+    /// called once per frame rather than once per tick, and all systems of
+    /// the frame share one decision. A closed whole-plan gate short-circuits
+    /// before the per-system predicates. A plan with no per-system condition
+    /// allocates nothing.
+    #[must_use]
+    pub fn evaluate_gates(&self, resources: &Resources) -> ScheduleGates {
+        if !self.schedule_permits(resources) {
+            return ScheduleGates {
+                permits: false,
+                systems: None,
+            };
+        }
+        let systems = if self.conditions.iter().any(Option::is_some) {
+            let mut bits = vec![0u64; self.conditions.len().div_ceil(GATE_WORD_BITS)];
+            for (index, condition) in self.conditions.iter().enumerate() {
+                if condition
+                    .as_ref()
+                    .is_none_or(|condition| condition(resources))
+                {
+                    bits[index / GATE_WORD_BITS] |= 1u64 << (index % GATE_WORD_BITS);
+                }
+            }
+            Some(bits)
+        } else {
+            None
+        };
+        ScheduleGates {
+            permits: true,
+            systems,
+        }
+    }
+
     /// Executes the schedule over the world.
     pub fn run(&self, resources: &Resources) {
+        self.run_with_gates(resources, &self.evaluate_gates(resources));
+    }
+
+    /// Executes the schedule with the conditions already evaluated by
+    /// [`Schedule::evaluate_gates`], so several runs in one frame (the fixed
+    /// ticks) reuse a single reading of the gated resources.
+    pub fn run_with_gates(&self, resources: &Resources, gates: &ScheduleGates) {
+        if !gates.permits {
+            return;
+        }
         // Sequential mode does not compute the plan at all (as before).
         let levels = if self.mode.is_parallel() {
             self.cached_levels()
@@ -987,16 +1160,19 @@ impl Schedule {
                 self.systems.len(),
                 self.mode.is_parallel(),
                 timings,
-                |i| self.run_system(i, resources),
+                |i| self.run_system(i, resources, gates),
             );
             return;
         }
         run_levels(&levels, self.systems.len(), self.mode.is_parallel(), |i| {
-            self.run_system(i, resources);
+            self.run_system(i, resources, gates);
         });
     }
 
-    fn run_system(&self, i: usize, resources: &Resources) {
+    fn run_system(&self, i: usize, resources: &Resources, gates: &ScheduleGates) {
+        if !gates.permits_system(i) {
+            return;
+        }
         let system = &self.systems[i];
         if self.enforcement.is_enforced() {
             let _frame = AccessFrameGuard::push(system.name(), &self.accesses[i]);
@@ -1157,6 +1333,193 @@ mod tests {
         sched.run(&res);
         let log = res.get::<Log>().unwrap();
         assert_eq!(*log.lock().unwrap(), vec!["w", "r"]);
+    }
+
+    /// A run condition gates its system: `false` skips the body, `true`
+    /// runs it, and the predicate reads the live resource each frame.
+    #[test]
+    fn run_condition_gates_system_on_resource() {
+        let mut res = Resources::new();
+        res.insert(Log::default());
+        res.insert(true);
+        let mut sched = Schedule::new();
+        sched.add_system(Bump {
+            name: "gated",
+            access: SystemAccess::new().reads::<Log>(),
+            target: "gated",
+        });
+        sched
+            .set_run_condition("gated", Some(Arc::new(|r| *r.get::<bool>().unwrap())))
+            .expect("system exists");
+
+        // true → runs.
+        sched.run(&res);
+        assert_eq!(*res.get::<Log>().unwrap().lock().unwrap(), vec!["gated"]);
+
+        // false → skipped (no second entry).
+        *res.get_mut::<bool>().unwrap() = false;
+        sched.run(&res);
+        assert_eq!(*res.get::<Log>().unwrap().lock().unwrap(), vec!["gated"]);
+
+        // true again → runs again.
+        *res.get_mut::<bool>().unwrap() = true;
+        sched.run(&res);
+        assert_eq!(
+            *res.get::<Log>().unwrap().lock().unwrap(),
+            vec!["gated", "gated"]
+        );
+    }
+
+    /// An ungated system always runs; a condition on one system does not
+    /// affect its neighbours, and `prepend_system` keeps conditions aligned.
+    #[test]
+    fn run_condition_is_per_system_and_survives_prepend() {
+        let mut res = Resources::new();
+        res.insert(Log::default());
+        res.insert(false);
+        let mut sched = Schedule::new();
+        sched.add_system(Bump {
+            name: "always",
+            access: SystemAccess::new().reads::<Log>(),
+            target: "always",
+        });
+        sched
+            .set_run_condition("always", Some(Arc::new(|_| false)))
+            .expect("system exists");
+        // Prepend a second gated system in front of the first.
+        sched.prepend_system(Bump {
+            name: "front",
+            access: SystemAccess::new().reads::<Log>(),
+            target: "front",
+        });
+        sched
+            .set_run_condition("front", Some(Arc::new(|r| *r.get::<bool>().unwrap())))
+            .expect("prepended system exists");
+
+        sched.run(&res);
+        // Both gated off: nothing runs.
+        assert!(res.get::<Log>().unwrap().lock().unwrap().is_empty());
+
+        // Open the front gate only: the prepended system runs, the other
+        // stays gated (conditions stayed aligned across the prepend).
+        *res.get_mut::<bool>().unwrap() = true;
+        sched.run(&res);
+        assert_eq!(*res.get::<Log>().unwrap().lock().unwrap(), vec!["front"]);
+    }
+
+    /// `set_run_condition` fails fast on an unknown name and overwrites a
+    /// previously installed condition.
+    #[test]
+    fn run_condition_unknown_name_and_replace() {
+        let mut res = Resources::new();
+        res.insert(Log::default());
+        let mut sched = Schedule::new();
+        sched.add_system(Bump {
+            name: "s",
+            access: SystemAccess::new().reads::<Log>(),
+            target: "s",
+        });
+        assert!(matches!(
+            sched.set_run_condition("ghost", Some(Arc::new(|_| true))),
+            Err(OrderError::UnknownNode { name }) if name == "ghost"
+        ));
+
+        sched
+            .set_run_condition("s", Some(Arc::new(|_| false)))
+            .expect("system exists");
+        sched.run(&res);
+        assert!(res.get::<Log>().unwrap().lock().unwrap().is_empty());
+
+        // Replace with an always-true condition: the system runs again.
+        sched
+            .set_run_condition("s", Some(Arc::new(|_| true)))
+            .expect("system exists");
+        sched.run(&res);
+        assert_eq!(*res.get::<Log>().unwrap().lock().unwrap(), vec!["s"]);
+    }
+
+    /// A schedule-level gate skips every system when `false`, and passes
+    /// through to per-system conditions when `true`.
+    #[test]
+    fn schedule_condition_gates_whole_plan() {
+        let mut res = Resources::new();
+        res.insert(Log::default());
+        res.insert(false);
+        let mut sched = Schedule::new();
+        sched.set_parallel(false);
+        sched.add_system(Bump {
+            name: "a",
+            access: SystemAccess::new().reads::<Log>(),
+            target: "a",
+        });
+        sched.add_system(Bump {
+            name: "b",
+            access: SystemAccess::new().reads::<Log>(),
+            target: "b",
+        });
+        sched.set_schedule_condition(Some(Arc::new(|r| *r.get::<bool>().unwrap())));
+
+        // Gate closed: nothing runs.
+        sched.run(&res);
+        assert!(res.get::<Log>().unwrap().lock().unwrap().is_empty());
+
+        // Gate open: both run (registration order).
+        *res.get_mut::<bool>().unwrap() = true;
+        sched.run(&res);
+        assert_eq!(*res.get::<Log>().unwrap().lock().unwrap(), vec!["a", "b"]);
+
+        // Gate open but a per-system condition closes one member.
+        sched
+            .set_run_condition("b", Some(Arc::new(|_| false)))
+            .expect("system exists");
+        sched.run(&res);
+        assert_eq!(
+            *res.get::<Log>().unwrap().lock().unwrap(),
+            vec!["a", "b", "a"]
+        );
+    }
+
+    /// Passing `None` returns the slot to unconditional (no predicate call),
+    /// and `schedule_permits` mirrors the gate without running the plan.
+    /// `None` on an unknown name still fails fast.
+    #[test]
+    fn clear_conditions_restore_unconditional_execution() {
+        let mut res = Resources::new();
+        res.insert(Log::default());
+        let mut sched = Schedule::new();
+        sched.set_parallel(false);
+        sched.add_system(Bump {
+            name: "a",
+            access: SystemAccess::new().reads::<Log>(),
+            target: "a",
+        });
+        sched.set_schedule_condition(Some(Arc::new(|_| false)));
+        sched
+            .set_run_condition("a", Some(Arc::new(|_| false)))
+            .expect("system exists");
+
+        // Both gates closed: nothing runs, and the query agrees.
+        assert!(!sched.schedule_permits(&res));
+        sched.run(&res);
+        assert!(res.get::<Log>().unwrap().lock().unwrap().is_empty());
+
+        // Clearing the schedule gate opens the plan; the per-system gate
+        // still holds until it is cleared too.
+        sched.set_schedule_condition(None);
+        assert!(sched.schedule_permits(&res));
+        sched.run(&res);
+        assert!(res.get::<Log>().unwrap().lock().unwrap().is_empty());
+
+        sched.set_run_condition("a", None).expect("system exists");
+        sched.run(&res);
+        assert_eq!(*res.get::<Log>().unwrap().lock().unwrap(), vec!["a"]);
+
+        // A cleared schedule gate stays open with no condition installed.
+        assert!(sched.schedule_permits(&res));
+        assert!(matches!(
+            sched.set_run_condition("ghost", None),
+            Err(OrderError::UnknownNode { .. })
+        ));
     }
 
     /// Strong Confluence: a parallel run produces the same result as a

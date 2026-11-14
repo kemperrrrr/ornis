@@ -81,13 +81,17 @@ use glam::Vec3;
 use serde_json::Value;
 
 use ornis_animation::{Animator, JointPose, SkelClip, SkelPlayer, Skeleton, SkinnedMesh};
-use ornis_core::mutation::{Mutation, MutationBus, MutationPlugin, apply_mutations};
+use ornis_core::mutation::{
+    FixedStructuralQueue, FrameStructuralQueue, Mutation, MutationBus, MutationPlugin,
+    apply_mutations,
+};
 use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{
-    ComponentMeta, ComponentRegistry, Entity, InputState, SceneVersion, Seconds, SmartStore, World,
+    ComponentMeta, ComponentRegistry, Entity, FixedTime, InputState, SceneVersion, Seconds,
+    SmartStore, Time, World,
 };
 use ornis_editor::{
-    EditorMarks, EditorOnly, GizmoAxis, GizmoHandle, Selected, install_editor,
+    EditorMarks, EditorMode, EditorOnly, GizmoAxis, GizmoHandle, Selected, install_editor,
     install_gizmo_authoring, is_editor_only, set_selection,
 };
 use ornis_gameplay::{Position, Velocity, install_gameplay};
@@ -278,6 +282,31 @@ impl Default for SceneEnvironment {
     }
 }
 
+/// Authoritative world state captured when Play starts (PLAN §i, E4).
+///
+/// Stop restores it in place — same engine, same entity handles — so every
+/// simulation mutation made during Play is discarded without the lossy
+/// `Scene` round-trip: the full [`SmartStore`] clone keeps animation wiring
+/// (skeleton roots, clip playlists, players), `RigidBody` configs and the
+/// allocator's generations, none of which a `Scene`/`EntityDesc` carries.
+/// The frame and simulation clocks are captured too, so Stop rewinds them
+/// to their pre-Play readings instead of leaving them at the end of Play.
+/// Never written to disk.
+struct PlaySnapshot {
+    /// Deep copy of every component lane and the entity allocator.
+    store: SmartStore,
+    /// Protocol entity list at Play start (roots + playlists included).
+    alive: Vec<Entity>,
+    /// Scene label at Play start.
+    scene_name: String,
+    /// Lights/camera/ambient at Play start.
+    environment: SceneEnvironment,
+    /// Frame clock at Play start.
+    time: Time,
+    /// Simulation clock at Play start (tick, elapsed and accumulator).
+    fixed_time: FixedTime,
+}
+
 /// Live renderable scene: the single [`GameWorld`] plus editor-side
 /// bookkeeping (protocol entity list, environment resource, SI physics
 /// bindings, the scene label and a mutation version counter).
@@ -306,6 +335,10 @@ pub struct EditorSession {
     /// Scene-file sandbox roots for `save_scene`/`load_scene`: production
     /// code uses the workspace defaults, tests inject a temp dir.
     scene_roots: SceneRoots,
+    /// Authoritative world state captured when Play starts (PLAN §i, E4).
+    /// Stop restores it in place so simulation mutations never leak back
+    /// into Edit. `None` while in Edit; never written to disk.
+    play_snapshot: Option<PlaySnapshot>,
 }
 
 /// Earth-surface gravity magnitude along −Y (m/s²).
@@ -359,6 +392,10 @@ impl Default for EditorSession {
         if let Some(store) = engine.world_mut().store_mut() {
             ensure_anim_lanes(store);
         }
+        // Play/edit mode (PLAN §i, E4): simulation systems run only in
+        // Play; editor chrome (selection/gizmo) runs only outside Play.
+        // Installed last so every registered system exists to be gated.
+        crate::mode_gating::install_editor_mode_gating(engine);
         Self {
             world,
             alive: Vec::new(),
@@ -366,6 +403,7 @@ impl Default for EditorSession {
             version: SceneVersion::ZERO,
             last_saved: None,
             scene_roots: SceneRoots::workspace_defaults(),
+            play_snapshot: None,
         }
     }
 }
@@ -408,6 +446,75 @@ impl EditorSession {
     /// plain JSON number.
     pub fn version(&self) -> SceneVersion {
         self.version
+    }
+
+    /// Current play/edit mode (PLAN §i, E4). The session starts in Edit:
+    /// simulation is frozen and editor chrome (selection/gizmo/grid) runs.
+    /// The schedule run-conditions installed at construction read this
+    /// resource each frame, so flipping it gates whole system sets.
+    #[must_use]
+    pub fn mode(&self) -> EditorMode {
+        self.world()
+            .resources()
+            .get::<EditorMode>()
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Writes the mode resource the run-conditions read.
+    fn set_mode_resource(&mut self, mode: EditorMode) {
+        self.world_mut().resources_mut().insert(mode);
+    }
+
+    /// Enter Play, or resume from Paused. On the Edit→Play edge the
+    /// authoritative world is captured in memory (never on disk) so
+    /// [`Self::stop`] can restore it; simulation systems start ticking.
+    /// A no-op in Play (no version bump, no spurious snapshot publish).
+    pub fn play(&mut self) {
+        if self.mode().is_play() {
+            return;
+        }
+        if self.mode().is_edit()
+            && let Some(store) = self.store()
+        {
+            let resources = self.world().resources();
+            self.play_snapshot = Some(PlaySnapshot {
+                store: store.clone(),
+                alive: self.alive.clone(),
+                scene_name: self.scene_name.clone(),
+                environment: self.environment().cloned().unwrap_or_default(),
+                time: resources.get::<Time>().copied().unwrap_or_default(),
+                fixed_time: resources.get::<FixedTime>().copied().unwrap_or_default(),
+            });
+        }
+        self.set_mode_resource(EditorMode::Play);
+        self.version.bump();
+    }
+
+    /// Freeze simulation while keeping selection/inspector live
+    /// (Play→Paused). A no-op outside Play.
+    pub fn pause(&mut self) {
+        if self.mode().is_play() {
+            self.set_mode_resource(EditorMode::Paused);
+            self.version.bump();
+        }
+    }
+
+    /// Stop: restore the world captured at Play start and return to Edit,
+    /// discarding every simulation mutation made during Play. A no-op in
+    /// Edit. The restore swaps the snapshot back in place — entity handles
+    /// survive and no file is touched. `Time` and `FixedTime` rewind to their
+    /// Play-start readings, so the next Play starts on the same clocks as
+    /// the first one.
+    pub fn stop(&mut self) {
+        if self.mode().is_edit() {
+            return;
+        }
+        if let Some(snapshot) = self.play_snapshot.take() {
+            restore_play_snapshot(self, snapshot);
+        }
+        self.set_mode_resource(EditorMode::Edit);
+        self.version.bump();
     }
 
     /// Advances the editor's domain schedule by one deterministic step.
@@ -561,7 +668,7 @@ impl EditorSession {
         };
         let entity = store.create_entity();
         self.alive.push(entity);
-        let name = name.unwrap_or_else(|| format!("Entity {}", entity.id()));
+        let name = name.unwrap_or_else(|| default_entity_name(entity));
         let Some(store) = self.store_mut() else {
             return entity;
         };
@@ -745,6 +852,11 @@ impl EditorSession {
     /// (sibling `*.tmp` file + rename): a crash or I/O error mid-write can
     /// never leave a truncated scene file behind. The world is not mutated.
     ///
+    /// In Play/Paused the live world is simulating, so this persists the
+    /// authoritative scene captured at Play start (the same snapshot Stop
+    /// restores), never the fallen simulation state. In Edit it saves the
+    /// live world.
+    ///
     /// On success the file's `(mtime, size)` fingerprint is remembered in
     /// `last_saved`: the next hot-reload poll compares the watched file
     /// against it and swallows the save's own mtime bump instead of
@@ -764,8 +876,11 @@ impl EditorSession {
     /// backend and `EditorSession::scene_path` resolve user input into it).
     pub fn save_scene_file(&mut self, path: &ScenePath) -> Result<(), SceneFileError> {
         let resolved = path.as_path();
-        let ron = self
-            .to_scene()
+        let scene = match self.play_snapshot.as_ref() {
+            Some(snapshot) if !self.mode().is_edit() => snapshot_to_scene(snapshot),
+            _ => self.to_scene(),
+        };
+        let ron = scene
             .to_ron()
             .map_err(|e| SceneFileError::Serialize(e.to_string()))?;
         atomic_write(resolved, &ron)?;
@@ -936,25 +1051,97 @@ fn to_scene(world: &EditorSession) -> Scene {
     }
 }
 
+/// Fallback display name for an entity with no [`Name`] component.
+fn default_entity_name(entity: Entity) -> String {
+    format!("Entity {}", entity.id())
+}
+
 /// One alive entity as an [`EntityDesc`] for [`to_scene`].
 fn entity_desc(world: &EditorSession, entity: Entity) -> EntityDesc {
-    EntityDesc {
-        name: world
-            .name_of(entity)
-            .unwrap_or_else(|| format!("Entity {}", entity.id())),
-        transform: world
-            .store()
-            .and_then(|store| read_component(store, entity))
-            .unwrap_or_else(default_transform),
-        mesh: world
-            .store()
-            .and_then(|store| read_component(store, entity))
-            .unwrap_or_else(default_mesh),
-        material: world
-            .store()
-            .and_then(|store| read_component(store, entity))
-            .unwrap_or_else(default_material),
+    match world.store() {
+        Some(store) => entity_desc_from(store, entity),
+        None => EntityDesc {
+            name: default_entity_name(entity),
+            transform: default_transform(),
+            mesh: default_mesh(),
+            material: default_material(),
+        },
     }
+}
+
+/// One alive entity as an [`EntityDesc`], read straight from `store` (the
+/// live world or the Play-start snapshot). Missing components fall back to
+/// the spawn defaults; editor chrome is filtered out by the caller.
+fn entity_desc_from(store: &SmartStore, entity: Entity) -> EntityDesc {
+    EntityDesc {
+        name: store
+            .read_lane::<Name>()
+            .and_then(|lane| lane.get(entity).map(|name| name.0.clone()))
+            .unwrap_or_else(|| default_entity_name(entity)),
+        transform: read_component(store, entity).unwrap_or_else(default_transform),
+        mesh: read_component(store, entity).unwrap_or_else(default_mesh),
+        material: read_component(store, entity).unwrap_or_else(default_material),
+    }
+}
+
+/// The authoritative scene captured at Play start (E4 review): saving while
+/// the live world simulates (Play/Paused) persists this pre-Play scene, not
+/// the fallen simulation state — the same invariant [`restore_play_snapshot`]
+/// restores on Stop.
+fn snapshot_to_scene(snapshot: &PlaySnapshot) -> Scene {
+    let store = &snapshot.store;
+    let entities = snapshot
+        .alive
+        .iter()
+        .filter(|entity| !is_editor_only(store, **entity))
+        .map(|&e| entity_desc_from(store, e))
+        .collect();
+    let env = snapshot.environment.clone();
+    Scene {
+        name: snapshot.scene_name.clone(),
+        entities,
+        lights: env.lights,
+        camera: env.camera,
+        ambient: env.ambient,
+    }
+}
+
+/// Restores the Play-start snapshot in place (E4 Stop): swaps the cloned
+/// [`SmartStore`] back over the live one (entity handles and generations
+/// survive), puts back the protocol list, label and environment, and resets
+/// the domain state that accumulated during Play — the physics solver (so
+/// the next Play re-binds bodies from the restored `RigidBody` lane instead
+/// of resuming fallen poses) and the pending mutation/structural queues (so
+/// Play-era writes never land on the restored world). The frame and
+/// simulation clocks go back to their Play-start readings, so gameplay does
+/// not see the time Play burned. The restored allocator is first advanced
+/// past every handle Play issued, so a recycled id can never name a
+/// different entity than it did during Play. The engine
+/// and its schedule are untouched; no file is read or written.
+fn restore_play_snapshot(world: &mut EditorSession, snapshot: PlaySnapshot) {
+    let gravity = world
+        .world()
+        .resources()
+        .get::<Mutex<PhysicsRuntime>>()
+        .map(|runtime| runtime.lock().unwrap_or_else(|e| e.into_inner()).gravity())
+        .unwrap_or(Vec3::new(0.0, DEFAULT_GRAVITY_Y, 0.0));
+    if let Some(bus) = world.world().resources().get::<MutationBus>() {
+        let _ = bus.drain();
+    }
+    let restored = snapshot.store;
+    if let Some(live) = world.store() {
+        restored.advance_generations_past(live);
+    }
+    let resources = world.world_mut().resources_mut();
+    let _ = resources.insert(restored);
+    let _ = resources.insert(snapshot.environment);
+    let _ = resources.insert(Mutex::new(PhysicsRuntime::new(gravity)));
+    let _ = resources.insert(FixedStructuralQueue::new());
+    let _ = resources.insert(FrameStructuralQueue::new());
+    let _ = resources.insert(snapshot.time);
+    let _ = resources.insert(snapshot.fixed_time);
+    world.alive = snapshot.alive;
+    world.scene_name = snapshot.scene_name;
 }
 
 /// JSON snapshot for `GET /api/scene` (see the module docs for the contract).
@@ -984,6 +1171,7 @@ fn status_json(world: &EditorSession) -> String {
         "entity_count": world.entity_count(),
         "name": "Ornis Engine",
         "version": world.version(),
+        "mode": world.mode(),
     })
     .to_string()
 }
@@ -993,6 +1181,28 @@ fn status_json(world: &EditorSession) -> String {
 fn publish_state(world: &EditorSession, ev_tx: &Sender<GameEvent>) {
     emit(ev_tx, "status", world.status_json());
     emit(ev_tx, "scene", world.scene_json());
+}
+
+/// Announces a play/edit mode transition (E4): a dedicated `mode_changed`
+/// event for instant UI feedback plus fresh `status`/`scene` snapshots.
+fn publish_mode(world: &EditorSession, ev_tx: &Sender<GameEvent>) {
+    emit(
+        ev_tx,
+        "mode_changed",
+        serde_json::json!({ "mode": world.mode() }).to_string(),
+    );
+    publish_state(world, ev_tx);
+}
+
+/// Publishes after a frame tick: an asset reload that interrupted
+/// Play/Paused resets the mode to Edit, so announce that transition;
+/// otherwise the mode is unchanged and only fresh state is published.
+fn publish_after_tick(world: &EditorSession, mode_before: EditorMode, ev_tx: &Sender<GameEvent>) {
+    if world.mode() == mode_before {
+        publish_state(world, ev_tx);
+    } else {
+        publish_mode(world, ev_tx);
+    }
 }
 
 fn emit(ev_tx: &Sender<GameEvent>, cmd_type: &str, payload: String) {
@@ -1273,8 +1483,37 @@ fn set_component(
             resync_collider_body(store, entity);
         }
     }
+    if type_name == "Transform" {
+        teleport_edited_body(world, entity);
+    }
     world.version.bump();
     Ok(value)
+}
+
+/// Carries an explicit transform edit into the solver (E4 review).
+///
+/// `sync_in` treats a dynamic body as solver-authoritative, so a gizmo drag
+/// committed in Paused would be overwritten by the solver on resume: the
+/// edit reaches the [`TransformDesc`] lane but never the body. Teleporting
+/// the bound body makes the edit stick. Unbound bodies (the usual case in
+/// Edit) need nothing — `sync_in` binds them at the edited pose.
+fn teleport_edited_body(world: &EditorSession, entity: Entity) {
+    let Some(store) = world.store() else {
+        return;
+    };
+    let Some(transform) = store
+        .read_lane::<TransformDesc>()
+        .and_then(|lane| lane.get(entity).cloned())
+    else {
+        return;
+    };
+    let Some(runtime) = world.world().resources().get::<Mutex<PhysicsRuntime>>() else {
+        return;
+    };
+    let mut runtime = runtime.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(handle) = runtime.handle_of(entity) {
+        runtime.drive_pose(handle, transform.translation, transform.rotation.get());
+    }
 }
 
 fn handle_custom(
@@ -1355,6 +1594,10 @@ fn handle_custom(
                     return CommandOutcome::failure(message);
                 }
             };
+            // A load rebuilds the world in Edit; when it interrupts
+            // Play/Paused the mode reset must be announced, not left for
+            // the UI to discover by polling `/api/status`.
+            let was_active = !world.mode().is_edit();
             match world.load_scene_file(&path) {
                 Ok(count) => {
                     emit(
@@ -1367,7 +1610,11 @@ fn handle_custom(
                         })
                         .to_string(),
                     );
-                    publish_state(world, ev_tx);
+                    if was_active {
+                        publish_mode(world, ev_tx);
+                    } else {
+                        publish_state(world, ev_tx);
+                    }
                     CommandOutcome::success()
                 }
                 Err(e) => {
@@ -1375,6 +1622,21 @@ fn handle_custom(
                     CommandOutcome::failure(e.to_string())
                 }
             }
+        }
+        "play" => {
+            world.play();
+            publish_mode(world, ev_tx);
+            CommandOutcome::success()
+        }
+        "pause" => {
+            world.pause();
+            publish_mode(world, ev_tx);
+            CommandOutcome::success()
+        }
+        "stop" => {
+            world.stop();
+            publish_mode(world, ev_tx);
+            CommandOutcome::success()
         }
         other => {
             emit_error(ev_tx, other, "unknown command");
@@ -1793,9 +2055,16 @@ fn reload_watched_scene(
         world.last_saved = None;
         return ReloadDecision::SkippedSelfSave;
     }
+    let was_active = !world.mode().is_edit();
     match world.load_scene_file(path) {
         Ok(count) => {
-            publish_state(world, ev_tx);
+            // Hot-reload rebuilds the world in Edit; announce the mode reset
+            // when it interrupts Play/Paused so the UI does not stay stale.
+            if was_active {
+                publish_mode(world, ev_tx);
+            } else {
+                publish_state(world, ev_tx);
+            }
             eprintln!(
                 "ornis: hot-reloaded {} ({} entities)",
                 resolved.display(),
@@ -1889,11 +2158,14 @@ fn editor_world_loop(cmd_rx: Receiver<UiCommand>, ev_tx: Sender<GameEvent>) {
                 Err(e) => eprintln!("ornis: scene hot-reload skipped: {e}"),
             }
         }
+        // An asset reload drained inside the tick rebuilds the world in
+        // Edit; if it interrupted Play/Paused, announce the mode reset too.
+        let mode_before = world.mode();
         if world
             .tick_secs(clamp_frame_dt(last_tick.elapsed()))
             .changed()
         {
-            publish_state(&world, &ev_tx);
+            publish_after_tick(&world, mode_before, &ev_tx);
         }
         last_tick = Instant::now();
         if disconnected {
@@ -2029,6 +2301,7 @@ mod tests {
             .store_mut()
             .expect("world store")
             .insert(entity, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        world.play();
 
         assert!(world.tick(1.0 / 60.0));
 
@@ -2061,6 +2334,7 @@ mod tests {
             .store_mut()
             .expect("world store")
             .insert(entity, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        world.play();
 
         // Same channel as `POST /api/input` and the WS input frames.
         handle_command(
@@ -2188,6 +2462,7 @@ mod tests {
             .store_mut()
             .expect("world store")
             .insert(entity, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        world.play();
         assert_eq!(
             world.tick_secs(Seconds::new(1.0 / 60.0)),
             TickOutcome::Changed
@@ -3264,6 +3539,80 @@ mod tests {
         );
     }
 
+    /// Every gated system name resolves in the editor schedule (E4 review):
+    /// `install_editor_mode_gating` swallows `set_run_condition`'s `Err`, so a
+    /// renamed system would silently never gate. Only the optional `audio_*`
+    /// members may be absent (a host without an audio device skips them).
+    #[test]
+    fn every_gated_system_name_resolves() {
+        use crate::mode_gating::{CHROME_SYSTEMS, SIMULATION_SYSTEMS};
+        let world = EditorSession::new();
+        let schedule = world.world.engine().schedule();
+        for name in SIMULATION_SYSTEMS.iter().chain(CHROME_SYSTEMS.iter()) {
+            let resolves = schedule
+                .system_index(&ornis_core::SystemName::from(*name))
+                .is_some();
+            assert!(
+                resolves || name.starts_with("audio_"),
+                "gated system `{name}` must resolve, or it never gates"
+            );
+        }
+    }
+
+    /// Editor chrome is gated off in Play (E4 review): `gizmo_maintain` lays
+    /// handles around the selection in Edit, but a Play tick must not
+    /// re-layout them when the selection moves — the chrome run condition is
+    /// false in Play.
+    #[test]
+    fn chrome_does_not_run_in_play() {
+        let (mut world, ev_tx, _ev_rx) = world_and_events();
+        world.handle_command(&UiCommand::CreateEntity, &ev_tx);
+        world.handle_command(&select(Some(0), Some(0)), &ev_tx);
+
+        // The first gizmo handle's laid-out translation tracks the selection.
+        let handle_pose = |world: &EditorSession| -> Vec3 {
+            let store = world.store().expect("store");
+            let handle = store.read_lane::<GizmoHandle>().expect("handles").entities[0];
+            read_component::<TransformDesc>(store, handle)
+                .expect("handle transform")
+                .translation
+        };
+        let move_hero = |world: &mut EditorSession, x: f32| {
+            let mut transform = default_transform();
+            transform.translation = Vec3::new(x, 0.0, 0.0);
+            world.handle_command(
+                &set_component(
+                    0,
+                    Some(0),
+                    "Transform",
+                    &serde_json::to_string(&transform).unwrap(),
+                ),
+                &ev_tx,
+            );
+        };
+
+        // Edit: chrome runs — moving the selection re-lays the handles.
+        world.tick(1.0 / 60.0);
+        let at_origin = handle_pose(&world);
+        move_hero(&mut world, 5.0);
+        world.tick(1.0 / 60.0);
+        let followed = handle_pose(&world);
+        assert!(
+            (followed - at_origin).length() > 1.0,
+            "Edit chrome must follow the selection"
+        );
+
+        // Play: chrome is gated off — the same move must NOT re-layout them.
+        world.play();
+        move_hero(&mut world, 10.0);
+        world.tick(1.0 / 60.0);
+        assert_eq!(
+            handle_pose(&world),
+            followed,
+            "Play must not run gizmo chrome"
+        );
+    }
+
     /// Editor chrome replicates through the snapshot (with marks) but never
     /// persists: save/load round-trips contain only scene entities, while
     /// `scene_json` labels both. Handles stay stable throughout.
@@ -3360,6 +3709,7 @@ mod tests {
             store.insert(gizmo, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
         }
         world.alive.push(gizmo);
+        world.play();
 
         world.tick(1.0 / 60.0);
         let lane = |world: &EditorSession| {
@@ -3394,6 +3744,680 @@ mod tests {
             lane(&world).translation[1],
             frozen,
             "evicted body no longer simulates"
+        );
+    }
+
+    // ── E4 play/edit modes (PLAN §i) ─────────────────────────────────────
+
+    /// Y of an entity's [`TransformDesc`] — the pose the editor snapshots.
+    fn pose_y(world: &EditorSession, entity: Entity) -> f32 {
+        world
+            .store()
+            .and_then(|store| read_component::<TransformDesc>(store, entity))
+            .expect("transform")
+            .translation[1]
+    }
+
+    /// The published frame and simulation clocks.
+    fn clocks(world: &EditorSession) -> (Time, FixedTime) {
+        let resources = world.world().resources();
+        (
+            *resources.get::<Time>().expect("frame clock"),
+            *resources.get::<FixedTime>().expect("simulation clock"),
+        )
+    }
+
+    /// Edit freezes simulation; Play runs it. A dynamic body holds its pose
+    /// across Edit ticks and falls once Play starts.
+    #[test]
+    fn edit_freezes_simulation_play_runs_it() {
+        let mut world = EditorSession::new();
+        let entity = world.spawn(None);
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(entity, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+
+        assert_eq!(world.mode(), EditorMode::Edit);
+        for _ in 0..10 {
+            world.tick(1.0 / 60.0);
+        }
+        assert_eq!(pose_y(&world, entity), 0.0, "Edit must not simulate");
+
+        world.play();
+        assert_eq!(world.mode(), EditorMode::Play);
+        for _ in 0..10 {
+            world.tick(1.0 / 60.0);
+        }
+        assert!(pose_y(&world, entity) < 0.0, "Play must simulate gravity");
+    }
+
+    /// Paused freezes the simulation mid-Play; resuming continues it.
+    #[test]
+    fn pause_freezes_and_resume_continues() {
+        let mut world = EditorSession::new();
+        let entity = world.spawn(None);
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(entity, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+
+        world.play();
+        for _ in 0..5 {
+            world.tick(1.0 / 60.0);
+        }
+        let falling = pose_y(&world, entity);
+        assert!(falling < 0.0);
+
+        world.pause();
+        assert_eq!(world.mode(), EditorMode::Paused);
+        for _ in 0..5 {
+            world.tick(1.0 / 60.0);
+        }
+        assert_eq!(pose_y(&world, entity), falling, "Paused freezes the pose");
+
+        world.play();
+        assert_eq!(world.mode(), EditorMode::Play);
+        for _ in 0..5 {
+            world.tick(1.0 / 60.0);
+        }
+        assert!(
+            pose_y(&world, entity) < falling,
+            "resume continues the fall"
+        );
+    }
+
+    /// Stop restores the in-memory scene captured at Play start: simulation
+    /// motion and edits made during Play never leak back into Edit.
+    #[test]
+    fn stop_restores_scene_captured_at_play() {
+        let mut world = EditorSession::new();
+        let entity = world.spawn(Some("Hero".into()));
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(entity, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        let original = world.to_scene().to_ron().expect("serialize original");
+
+        world.play();
+        for _ in 0..30 {
+            world.tick(1.0 / 60.0);
+        }
+        world.spawn(Some("Temporary".into()));
+        assert_ne!(
+            world.to_scene().to_ron().expect("serialize during play"),
+            original,
+            "Play must diverge from the captured scene"
+        );
+
+        world.stop();
+        assert_eq!(world.mode(), EditorMode::Edit);
+        assert_eq!(
+            world.to_scene().to_ron().expect("serialize restored"),
+            original,
+            "Stop restores the pre-Play scene exactly"
+        );
+    }
+
+    /// Stop restores the components authored in Edit through `set_component`
+    /// (Collider/Velocity/Position), not just the lossy `Scene` fields, and
+    /// does not renumber entities: the full `SmartStore` snapshot swaps back
+    /// in place, so a Play-era stray entity and overwritten intent vanish
+    /// while the Edit overrides and the original handle survive (E4 review).
+    #[test]
+    fn stop_restores_components_set_in_edit() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        let hero = world.spawn(Some("Hero".into()));
+        let (id, generation) = (hero.id(), hero.generation());
+        world.handle_command(
+            &set_component(id, Some(generation), "Velocity", "[3,0,4]"),
+            &ev_tx,
+        );
+        world.handle_command(
+            &set_component(id, Some(generation), "Position", "[1,2,3]"),
+            &ev_tx,
+        );
+        world.handle_command(
+            &set_component(
+                id,
+                Some(generation),
+                "Collider",
+                r#"{"Sphere":{"radius":0.75}}"#,
+            ),
+            &ev_tx,
+        );
+        drain_all(&ev_rx);
+
+        let alive_before = world.alive.clone();
+        let (velocity_before, position_before, collider_before) = {
+            let store = world.store().expect("store");
+            (
+                read_component::<Velocity>(store, hero).expect("Velocity set"),
+                read_component::<Position>(store, hero).expect("Position set"),
+                read_component::<ColliderDesc>(store, hero).expect("Collider set"),
+            )
+        };
+
+        world.play();
+        // A dynamic body falls, a stray entity perturbs numbering, and
+        // gameplay overwrites the Edit intent during Play.
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(hero, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        for _ in 0..30 {
+            world.tick(1.0 / 60.0);
+        }
+        world.spawn(Some("Temporary".into()));
+        {
+            let store = world.world_mut().store_mut().expect("store");
+            store.insert(hero, Velocity(Vec3::new(9.0, 9.0, 9.0)));
+            store.insert(hero, Position(Vec3::new(9.0, 9.0, 9.0)));
+        }
+        drain_all(&ev_rx);
+
+        world.stop();
+        assert_eq!(world.mode(), EditorMode::Edit);
+        assert_eq!(world.alive, alive_before, "Stop must not renumber entities");
+        assert_eq!(world.entity_count(), 1, "the Play-era entity is gone");
+        let store = world.store().expect("store");
+        assert_eq!(
+            read_component::<Velocity>(store, hero).expect("Velocity restored"),
+            velocity_before,
+            "the Edit Velocity override survives Stop"
+        );
+        assert_eq!(
+            read_component::<Position>(store, hero).expect("Position restored"),
+            position_before,
+            "the Edit Position override survives Stop"
+        );
+        assert_eq!(
+            read_component::<ColliderDesc>(store, hero).expect("Collider restored"),
+            collider_before,
+            "the Edit Collider override survives Stop"
+        );
+    }
+
+    /// Stop must not re-issue an entity handle Play already handed out (E4
+    /// review): the restored allocator predates the live one, so a recycled
+    /// id — or an id first created during Play — would otherwise come back
+    /// with the same generation and alias a stale browser handle.
+    #[test]
+    fn stop_never_reissues_a_play_era_entity_handle() {
+        let mut world = EditorSession::new();
+        let hero = world.spawn(Some("Hero".into()));
+        let doomed = world.spawn(Some("Doomed".into()));
+        world
+            .despawn(doomed.id(), doomed.generation())
+            .expect("despawned before Play");
+
+        world.play();
+        // Play recycles the freed id twice and creates an entity the
+        // snapshot never saw, then frees it again.
+        let mut issued = vec![hero, doomed];
+        let recycled = world.spawn(Some("Recycled".into()));
+        issued.push(recycled);
+        world
+            .despawn(recycled.id(), recycled.generation())
+            .expect("despawned during Play");
+        issued.push(world.spawn(Some("RecycledAgain".into())));
+        let created = world.spawn(Some("Created".into()));
+        issued.push(created);
+        world
+            .despawn(created.id(), created.generation())
+            .expect("despawned during Play");
+
+        world.stop();
+        assert!(
+            world.store().expect("store").is_alive(hero),
+            "Stop keeps the restored handles alive"
+        );
+        for _ in 0..4 {
+            let next = world.spawn(None);
+            assert!(
+                !issued.contains(&next),
+                "{next:?} already named a different entity during Play"
+            );
+            issued.push(next);
+        }
+    }
+
+    /// Stop rewinds both clocks to their Play-start readings (E4 review):
+    /// gameplay must not see the time Play burned, so the next Play starts
+    /// on the same frame and tick as the first one.
+    #[test]
+    fn stop_rewinds_the_clocks_to_the_play_start() {
+        let mut world = EditorSession::new();
+        world.spawn(Some("Hero".into()));
+        for _ in 0..5 {
+            world.tick(1.0 / 60.0);
+        }
+        let (time_before, fixed_before) = clocks(&world);
+        assert!(time_before.frame() > 0, "Edit frames advance the clock");
+
+        world.play();
+        for _ in 0..30 {
+            world.tick(1.0 / 60.0);
+        }
+        let (time_during, fixed_during) = clocks(&world);
+        assert!(time_during.frame() > time_before.frame());
+        assert!(
+            fixed_during.tick() > fixed_before.tick(),
+            "Play must advance the simulation clock"
+        );
+
+        world.stop();
+        assert_eq!(clocks(&world), (time_before, fixed_before));
+    }
+
+    /// Play pressed before the first frame captures the untouched clocks, so
+    /// Stop returns them to zero rather than to the end of Play.
+    #[test]
+    fn stop_after_a_play_before_the_first_frame_rewinds_to_zero() {
+        let mut world = EditorSession::new();
+        world.spawn(None);
+        let before = clocks(&world);
+        assert_eq!(before.0.frame(), 0);
+        assert_eq!(before.1.tick(), 0);
+
+        world.play();
+        for _ in 0..3 {
+            world.tick(1.0 / 60.0);
+        }
+        assert!(clocks(&world).1.tick() > 0);
+
+        world.stop();
+        assert_eq!(clocks(&world), before);
+    }
+
+    /// A transform edit committed in Paused survives the resume (E4 review):
+    /// `sync_in` is solver-authoritative for a dynamic body, so the edit must
+    /// teleport the bound body — writing only the lane let the solver snap
+    /// the pose back to where it had fallen.
+    #[test]
+    fn a_transform_edit_in_paused_survives_the_resume() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        let hero = world.spawn(Some("Hero".into()));
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(hero, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+
+        world.play();
+        for _ in 0..10 {
+            world.tick(1.0 / 60.0);
+        }
+        world.pause();
+        let fallen = pose_y(&world, hero);
+        assert!(fallen < 0.0, "Play must have simulated gravity");
+
+        world.handle_command(
+            &set_component(
+                hero.id(),
+                Some(hero.generation()),
+                "Transform",
+                r#"{"translation":[5,3,-2],"rotation":[0,0,0,1],"scale":[1,1,1]}"#,
+            ),
+            &ev_tx,
+        );
+        drain_all(&ev_rx);
+        assert_eq!(pose_y(&world, hero), 3.0, "the edit reaches the lane");
+
+        world.play();
+        world.tick(1.0 / 60.0);
+        let resumed = world
+            .store()
+            .and_then(|store| read_component::<TransformDesc>(store, hero))
+            .expect("transform")
+            .translation;
+        assert!(
+            (resumed - Vec3::new(5.0, 3.0, -2.0)).length() < 0.05,
+            "resume must continue from the edited pose ({resumed:?}), not the fallen one ({fallen})"
+        );
+    }
+
+    /// Stop restores the body config and resets the solver, so a second
+    /// Play falls exactly like the first (the lossy `Scene` round-trip used
+    /// to replace the dynamic body with a zero-mass default and resume the
+    /// fallen pose).
+    #[test]
+    fn stop_then_play_resimulates_identically() {
+        let mut world = EditorSession::new();
+        let entity = world.spawn(Some("Hero".into()));
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(entity, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+
+        world.play();
+        for _ in 0..10 {
+            world.tick(1.0 / 60.0);
+        }
+        let first_fall = pose_y(&world, entity);
+        assert!(first_fall < 0.0, "first Play must simulate gravity");
+
+        world.stop();
+        assert_eq!(world.mode(), EditorMode::Edit);
+        assert_eq!(pose_y(&world, entity), 0.0, "Stop restores the rest pose");
+        assert_eq!(world.entity_count(), 1, "no extra entities after Stop");
+        let mass = world
+            .store()
+            .and_then(|store| read_component::<RigidBody>(store, entity))
+            .expect("body preserved")
+            .mass;
+        assert_eq!(mass, 1.0, "Stop keeps the dynamic mass, not a default body");
+
+        world.play();
+        for _ in 0..10 {
+            world.tick(1.0 / 60.0);
+        }
+        let second_fall = pose_y(&world, entity);
+        assert!(second_fall < 0.0, "second Play must fall again");
+        assert!(
+            (second_fall - first_fall).abs() < 1e-3,
+            "second Play ({second_fall}) must match the first ({first_fall})"
+        );
+    }
+
+    /// Stop preserves glTF animation wiring in place: the starter pack keeps
+    /// its entity count, handles, animator catalog and skeletal cursors, and
+    /// gains no stray meshes (the `Scene` round-trip used to turn skeleton
+    /// roots and clip playlists into default spheres and drop the wiring).
+    #[test]
+    fn stop_preserves_gltf_wiring() {
+        let mut session = EditorSession::new();
+        let path = session
+            .scene_path("assets/starter/ual1_standard.glb")
+            .unwrap();
+        session.load_scene_file(&path).unwrap();
+
+        let hero = session.alive[0];
+        let alive_before = session.alive.clone();
+        let count_before = session.entity_count();
+        {
+            let store = session.store_mut().expect("store");
+            try_animator(store, hero)
+                .expect("animator on the first mesh")
+                .play("Walk_Loop")
+                .expect("Walk_Loop");
+        }
+        let (players_before, animators_before, meshes_before) = {
+            let store = session.store().expect("store");
+            (
+                store.read_lane::<SkelPlayer>().unwrap().entities.clone(),
+                store.read_lane::<Animator>().unwrap().entities.clone(),
+                store.read_lane::<MeshDesc>().unwrap().entities.clone(),
+            )
+        };
+
+        session.play();
+        for _ in 0..30 {
+            session.tick_secs(Seconds::new(1.0 / 60.0));
+        }
+        session.stop();
+
+        assert_eq!(session.mode(), EditorMode::Edit);
+        assert_eq!(
+            session.entity_count(),
+            count_before,
+            "entity count survives"
+        );
+        assert_eq!(session.alive, alive_before, "entity handles survive");
+        {
+            let store = session.store().expect("store");
+            assert_eq!(
+                store.read_lane::<Animator>().unwrap().entities,
+                animators_before,
+                "animator catalog survives"
+            );
+            assert_eq!(
+                store.read_lane::<SkelPlayer>().unwrap().entities,
+                players_before,
+                "skeletal cursors survive"
+            );
+            assert_eq!(
+                store.read_lane::<MeshDesc>().unwrap().entities,
+                meshes_before,
+                "no stray meshes on roots/playlists"
+            );
+        }
+        try_animator(session.store_mut().expect("store"), hero)
+            .expect("animator still wired")
+            .play("Walk_Loop")
+            .expect("Walk_Loop still plays after Stop");
+    }
+
+    /// Ctrl+S in Play/Paused persists the authoritative scene captured at
+    /// Play start, not the simulated state (E4 review): a body that fell
+    /// during Play is saved at its rest pose, in both Play and Paused.
+    #[test]
+    fn save_in_play_persists_the_pre_play_snapshot() {
+        let (mut world, dir) = sandboxed_session("save-play");
+        let path = world.scene_path("editor/scene.ron").expect("sandboxed");
+        let entity = world.spawn(Some("Hero".into()));
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(entity, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        let original = world.to_scene().to_ron().expect("serialize original");
+
+        world.play();
+        for _ in 0..30 {
+            world.tick(1.0 / 60.0);
+        }
+        assert!(pose_y(&world, entity) < 0.0, "Play must simulate gravity");
+        assert_ne!(
+            world.to_scene().to_ron().expect("serialize live"),
+            original,
+            "the live world diverged during Play"
+        );
+
+        // Saving in Play writes the pre-Play scene, not the fallen one.
+        world.save_scene_file(&path).expect("save in Play");
+        let on_disk =
+            Scene::from_ron(&fs::read_to_string(path.as_path()).unwrap()).expect("valid RON");
+        assert_eq!(
+            on_disk.to_ron().expect("reserialize"),
+            original,
+            "Play save must persist the snapshot, not the live world"
+        );
+        assert_eq!(on_disk.entities.len(), 1);
+        assert!(
+            on_disk.entities[0].transform.translation[1].abs() < 1e-6,
+            "saved at the rest pose, not fallen"
+        );
+
+        // Paused saves the same authoritative snapshot.
+        world.pause();
+        assert_eq!(world.mode(), EditorMode::Paused);
+        world.save_scene_file(&path).expect("save in Paused");
+        let paused =
+            Scene::from_ron(&fs::read_to_string(path.as_path()).unwrap()).expect("valid RON");
+        assert_eq!(
+            paused.to_ron().expect("reserialize"),
+            original,
+            "Paused save must persist the snapshot too"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Mode transitions are guarded: pause/stop only act outside Edit, play
+    /// is idempotent, and the Edit→Play edge captures exactly one snapshot.
+    #[test]
+    fn mode_transitions_are_guarded() {
+        let mut world = EditorSession::new();
+        assert_eq!(world.mode(), EditorMode::Edit);
+        world.pause();
+        assert_eq!(world.mode(), EditorMode::Edit, "pause is a no-op in Edit");
+        world.stop();
+        assert_eq!(world.mode(), EditorMode::Edit, "stop is a no-op in Edit");
+        assert_eq!(world.version, 0, "no-op transitions must not bump");
+        world.play();
+        assert_eq!(world.mode(), EditorMode::Play);
+        let play_version = world.version;
+        world.play();
+        assert_eq!(world.mode(), EditorMode::Play, "play is idempotent");
+        assert_eq!(world.version, play_version, "play in Play must not bump");
+        world.pause();
+        assert_eq!(world.mode(), EditorMode::Paused);
+        let pause_version = world.version;
+        world.pause();
+        assert_eq!(world.mode(), EditorMode::Paused, "pause is idempotent");
+        assert_eq!(
+            world.version, pause_version,
+            "pause in Paused must not bump"
+        );
+        world.stop();
+        assert_eq!(world.mode(), EditorMode::Edit);
+    }
+
+    /// The transport `play`/`pause`/`stop` commands drive the session and
+    /// emit a `mode_changed` event the UI can react to without polling.
+    #[test]
+    fn transport_mode_commands_drive_the_session() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        world.spawn(Some("Hero".into()));
+        drain_all(&ev_rx);
+
+        world.handle_command(&custom("play", ""), &ev_tx);
+        assert_eq!(world.mode(), EditorMode::Play);
+        let events = drain_all(&ev_rx);
+        assert!(
+            custom_events(&events, "mode_changed")
+                .iter()
+                .any(|payload| payload.contains("\"play\"")),
+            "play must announce the new mode"
+        );
+
+        world.handle_command(&custom("pause", ""), &ev_tx);
+        assert_eq!(world.mode(), EditorMode::Paused);
+        drain_all(&ev_rx);
+
+        world.handle_command(&custom("stop", ""), &ev_tx);
+        assert_eq!(world.mode(), EditorMode::Edit);
+        let events = drain_all(&ev_rx);
+        assert!(
+            custom_events(&events, "mode_changed")
+                .iter()
+                .any(|payload| payload.contains("\"edit\"")),
+            "stop must announce the return to Edit"
+        );
+    }
+
+    /// A `load_scene` command during Play rebuilds the world in Edit and
+    /// announces the reset (E4 review): the UI learns Play ended from the
+    /// `mode_changed` event rather than by polling, and the play snapshot
+    /// is dropped (there is nothing to Stop back to).
+    #[test]
+    fn load_command_in_play_announces_mode_reset() {
+        let (mut world, dir) = sandboxed_session("load-play");
+        let (ev_tx, ev_rx) = unbounded();
+        let path = world.scene_path("editor/scene.ron").expect("sandboxed");
+        world.spawn(Some("Hero".into()));
+        fs::write(
+            path.as_path(),
+            world.to_scene().to_ron().expect("serialize scene"),
+        )
+        .expect("write scene");
+        world.play();
+        assert_eq!(world.mode(), EditorMode::Play);
+        drain_all(&ev_rx);
+
+        world.handle_command(&custom("load_scene", ""), &ev_tx);
+        assert_eq!(world.mode(), EditorMode::Edit, "load returns to Edit");
+        assert!(
+            world.play_snapshot.is_none(),
+            "load drops the play snapshot"
+        );
+        let events = drain_all(&ev_rx);
+        assert!(
+            custom_events(&events, "mode_changed")
+                .iter()
+                .any(|payload| payload.contains("\"edit\"")),
+            "load in Play must announce the return to Edit"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// File-watcher hot-reload during Play likewise rebuilds in Edit and
+    /// announces the reset (E4 review): `reload_watched_scene` emits
+    /// `mode_changed` so the UI does not stay stuck showing Play.
+    #[test]
+    fn hot_reload_in_play_announces_mode_reset() {
+        let (mut world, dir) = sandboxed_session("reload-play");
+        let (ev_tx, ev_rx) = unbounded();
+        let path = world.scene_path("editor/scene.ron").expect("sandboxed");
+        world.spawn(Some("Hero".into()));
+        fs::write(
+            path.as_path(),
+            world.to_scene().to_ron().expect("serialize scene"),
+        )
+        .expect("write scene");
+        world.play();
+        assert_eq!(world.mode(), EditorMode::Play);
+        drain_all(&ev_rx);
+
+        let decision = reload_watched_scene(&mut world, &path, &ev_tx);
+        assert_eq!(decision, ReloadDecision::Reloaded);
+        assert_eq!(world.mode(), EditorMode::Edit, "hot-reload returns to Edit");
+        assert!(
+            world.play_snapshot.is_none(),
+            "hot-reload drops the snapshot"
+        );
+        let events = drain_all(&ev_rx);
+        assert!(
+            custom_events(&events, "mode_changed")
+                .iter()
+                .any(|payload| payload.contains("\"edit\"")),
+            "hot-reload in Play must announce the return to Edit"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An asset reload drained inside the tick during Play rebuilds the
+    /// world in Edit and the loop announces the reset (E4 review):
+    /// `drain_assets` itself only rebuilds, so `publish_after_tick` compares
+    /// the mode against the pre-tick value and emits `mode_changed`.
+    #[test]
+    fn drain_assets_in_play_announces_mode_reset() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        let a = world
+            .world
+            .assets_mut()
+            .load_scene_ron("Scene(name: \"a\", entities: [], lights: [], camera: (position: (0.0, 2.5, 9.0), target: (0.0, 0.0, 0.0), up: (0.0, 1.0, 0.0), fov: 60.0, near: 0.1, far: 100.0), ambient: (0.1, 0.1, 0.1))")
+            .expect("scene a loads");
+        world.play();
+        assert_eq!(world.mode(), EditorMode::Play);
+        assert!(world.world.assets_mut().request_reload(a));
+        drain_all(&ev_rx);
+
+        let mode_before = world.mode();
+        assert!(world.tick_secs(Seconds::new(1.0 / 60.0)).changed());
+        assert_eq!(
+            world.mode(),
+            EditorMode::Edit,
+            "drain_assets returns to Edit"
+        );
+        assert!(
+            world.play_snapshot.is_none(),
+            "drain_assets drops the snapshot"
+        );
+
+        publish_after_tick(&world, mode_before, &ev_tx);
+        let events = drain_all(&ev_rx);
+        assert!(
+            custom_events(&events, "mode_changed")
+                .iter()
+                .any(|payload| payload.contains("\"edit\"")),
+            "drain_assets in Play must announce the return to Edit"
         );
     }
 
@@ -3721,6 +4745,7 @@ mod tests {
             })
             .expect("joint pose");
         drop(players);
+        session.play();
 
         for _ in 0..30 {
             session.tick_secs(Seconds::new(1.0 / 60.0));

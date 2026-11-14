@@ -10,6 +10,8 @@ import init, {
     set_viewport_mode,
     set_gizmo_mode,
     set_gizmo_space,
+    set_snap,
+    set_editor_mode,
     undo_gizmo,
     viewport_state_json,
 } from './pkg/ornis_wasm.js';
@@ -48,6 +50,8 @@ const currentMode = () => {
 let booted = false;
 let gizmoMode = 'move';
 let gizmoSpace = 'world';
+let editorMode = 'edit';
+let snap = { enabled: false, translate: 0.5, rotateDeg: 15, scale: 0.25 };
 
 if (btn3d) btn3d.addEventListener('click', () => applyMode('perspective3d'));
 if (btn2d) btn2d.addEventListener('click', () => applyMode('plane2d'));
@@ -70,6 +74,34 @@ function applyGizmoMode(mode) {
 function applyGizmoSpace(space) {
     gizmoSpace = space === 'local' ? 'local' : 'world';
     return booted ? set_gizmo_space(gizmoSpace) : false;
+}
+
+// The replica mirrors the authoritative play/edit mode so it can gate
+// picking and gizmo drag off in Play (E4). JS relays every mode_changed
+// here; the mirror is re-applied on boot if it changed before WASM ready.
+function applyEditorMode(mode) {
+    editorMode = mode === 'play' || mode === 'paused' ? mode : 'edit';
+    return booted ? set_editor_mode(editorMode) : false;
+}
+
+// Snap steps live in the same WASM thread-locals as the gizmo tool/space;
+// the controls keep a mirror and push the whole settings object on change.
+// A step of 0 (or negative) is meaningful — the replica leaves that channel
+// unquantized — so pass finite values through verbatim and only fall back
+// when the entry is not a number.
+function snapStep(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+}
+
+function applySnap(next) {
+    snap = {
+        enabled: !!next.enabled,
+        translate: snapStep(next.translate, 0.5),
+        rotateDeg: snapStep(next.rotateDeg, 15),
+        scale: snapStep(next.scale, 0.25),
+    };
+    return booted ? set_snap(snap.enabled, snap.translate, snap.rotateDeg, snap.scale) : false;
 }
 
 function undoGizmoDrag() {
@@ -141,6 +173,8 @@ async function boot() {
     // the button shows Rotate while Move is actually active.
     set_gizmo_mode(gizmoMode);
     set_gizmo_space(gizmoSpace);
+    set_snap(snap.enabled, snap.translate, snap.rotateDeg, snap.scale);
+    set_editor_mode(editorMode);
     requestAnimationFrame(overlayLoop);
 }
 
@@ -166,6 +200,12 @@ window.OrnisViewport = {
     },
     setGizmoSpace(space) {
         return applyGizmoSpace(space);
+    },
+    setEditorMode(mode) {
+        return applyEditorMode(mode);
+    },
+    setSnap(next) {
+        return applySnap(next || {});
     },
     undoGizmo() {
         return undoGizmoDrag();

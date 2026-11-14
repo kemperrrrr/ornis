@@ -6,10 +6,16 @@
 //! only answers "what transform does this ray mean?".
 //!
 //! Rotation handles are tangent bars; the drag never assumes a ring mesh,
-//! it sweeps the ray angle around the axis.
+//! it sweeps the ray angle around the axis. Recovering the angle an
+//! orientation means — absolute twist or swept increment — lives in `angle`.
 
-use crate::gizmo::{GizmoAxis, GizmoHandle, GizmoMode, axis_direction};
+mod angle;
+
+use angle::{swept_angle, twist_angle};
+
+use crate::gizmo::{GizmoAxis, GizmoHandle, GizmoMode, axis_direction, plane_directions};
 use crate::picking::PickRay;
+use crate::snap::SnapSettings;
 use glam::{Quat, Vec3};
 use ornis_assets::scene::TransformDesc;
 use ornis_core::units::UnitQuat;
@@ -20,7 +26,8 @@ const RADIAL_EPS: f32 = 1e-8;
 const ROTATION_EPS: f32 = 1e-7;
 /// Scale factors at or below this are ignored (press too close to centre).
 const SCALE_FACTOR_EPS: f32 = 1e-4;
-/// Floor applied to a dragged component scale (never zero or negative).
+/// Floor applied to the magnitude of a dragged component scale (never zero;
+/// a mirrored component keeps its sign).
 const MIN_SCALE: f32 = 1e-3;
 /// Ray/plane and ray/axis parallel tolerance.
 const PARALLEL_EPS: f32 = 1e-6;
@@ -79,7 +86,7 @@ impl GizmoDrag {
     /// Preview transform for the current pointer ray.
     // qual:allow(iosp) reason: "one dispatch over the handle axis/mode; the per-mode work lives in the apply_* helpers"
     #[must_use]
-    pub fn update(self, ray: &PickRay) -> Option<TransformDesc> {
+    pub fn update(&self, ray: &PickRay) -> Option<TransformDesc> {
         let mut transform = self.start.clone();
         match self.handle.axis {
             GizmoAxis::Xy | GizmoAxis::Yz | GizmoAxis::Xz => {
@@ -94,6 +101,104 @@ impl GizmoDrag {
             },
         }
         Some(transform)
+    }
+
+    /// Quantizes only the active drag channel (E4): Move snaps the dragged
+    /// coordinate to the absolute world grid along the handle axis (or the
+    /// two in-plane axes), Scale snaps the dragged component, Rotate snaps
+    /// the absolute angle around the handle axis to the angle grid. Every
+    /// other channel is returned bit-exact; snap off returns the preview
+    /// unchanged.
+    ///
+    /// Rotate's grid is anchored at the zero-twist orientation of the
+    /// selection's swing-twist decomposition about the handle axis, so a
+    /// selection already turned 7° about that axis lands on 15° rather than
+    /// on 7° plus a multiple of the step. An orientation with no twist at all
+    /// (a half-turn about a perpendicular axis) snaps its increment instead.
+    // qual:allow(iosp) reason: "one dispatch over the handle axis/mode mirroring update; the channel leaves live in snap_axis_move/snap_plane_move/snap_rotate"
+    #[must_use]
+    pub fn apply_snap(&self, mut transform: TransformDesc, snap: &SnapSettings) -> TransformDesc {
+        if !snap.enabled {
+            return transform;
+        }
+        match self.handle.axis {
+            GizmoAxis::Xy | GizmoAxis::Yz | GizmoAxis::Xz => {
+                transform.translation = self.snap_plane_move(transform.translation, snap);
+            }
+            _ => match self.handle.mode {
+                GizmoMode::Move => {
+                    transform.translation = self.snap_axis_move(transform.translation, snap);
+                }
+                GizmoMode::Scale => {
+                    let index = axis_index(self.handle.axis);
+                    transform.scale[index] = snap.snap_scale_component(transform.scale[index]);
+                }
+                GizmoMode::Rotate => {
+                    transform.rotation = self.snap_rotate(transform.rotation, snap);
+                }
+                GizmoMode::Off => {}
+            },
+        }
+        transform
+    }
+
+    /// Snaps the dragged coordinate to the absolute world grid along the
+    /// handle axis, keeping the perpendicular components at their start
+    /// values. `axis` is already world-space in both spaces (`R·e` for
+    /// Local), so the grid is measured in the handle's own frame and a Local
+    /// drag stays on its axis. The grid is anchored at the world origin, not
+    /// at the press point: an object at `x = 0.1` dragged by `1.0` with step
+    /// `0.5` lands on `1.0`, not `1.1`.
+    fn snap_axis_move(&self, translation: Vec3, snap: &SnapSettings) -> Vec3 {
+        let start = self.start.translation;
+        let snapped = snap.snap_offset(translation.dot(self.axis));
+        start + self.axis * (snapped - start.dot(self.axis))
+    }
+
+    /// Snaps both in-plane coordinates of a plane handle to the absolute
+    /// world grid, independently and in the handle's own (World/Local)
+    /// basis, keeping the out-of-plane component at its start value.
+    fn snap_plane_move(&self, translation: Vec3, snap: &SnapSettings) -> Vec3 {
+        let (a, b) = plane_directions(&self.start, self.handle);
+        let start = self.start.translation;
+        start
+            + a * (snap.snap_offset(translation.dot(a)) - start.dot(a))
+            + b * (snap.snap_offset(translation.dot(b)) - start.dot(b))
+    }
+
+    /// Snaps the absolute angle around the handle axis to the rotate grid.
+    ///
+    /// # Reference orientation
+    ///
+    /// The angle is the twist of the orientation's swing-twist decomposition
+    /// about `axis`: `q = swing · twist`, where `twist` turns around `axis`
+    /// and `swing` carries `axis` to `q · axis`. The grid's zero is the
+    /// zero-twist orientation, so a selection already turned 7° about the
+    /// handle axis lands on 15° — not on 7° plus a multiple of the step. The
+    /// snapped preview is the drag evaluated at that grid angle, i.e. a world
+    /// rotation about `axis` over `start.rotation`, so the swing travels along
+    /// the drag path and the result never leaves the handle axis.
+    ///
+    /// The angle is canonicalized to `[-180°, 180°]`, so a step that does not
+    /// divide 360° has a seam at ±180°. A half-turn about an axis
+    /// perpendicular to `axis` has no twist at all; there the increment since
+    /// the press is quantized instead, so the drag still snaps.
+    // qual:allow(iosp) reason: "one rotation-snap step: absolute-angle recovery, quantization and quaternion composition belong together (mirrors apply_rotate)"
+    fn snap_rotate(&self, rotation: UnitQuat, snap: &SnapSettings) -> UnitQuat {
+        if snap.rotate_deg <= 0.0 {
+            return rotation;
+        }
+        let start = self.start.rotation.get();
+        let angle = match (
+            twist_angle(rotation.get(), self.axis),
+            twist_angle(start, self.axis),
+        ) {
+            (Some(absolute), Some(from)) => snap.snap_angle(absolute) - from,
+            _ => snap.snap_angle(swept_angle(rotation.get(), start, self.axis)),
+        };
+        UnitQuat::normalize(Quat::from_axis_angle(self.axis, angle))
+            .and_then(|delta| UnitQuat::normalize(delta.get() * start))
+            .unwrap_or(rotation)
     }
 
     /// Axis translation: offset along `axis` since the press.
@@ -123,7 +228,7 @@ impl GizmoDrag {
         // `R * q(e_local, θ)` by conjugacy: the object turns around its own
         // axis, and the local axis itself stays where it was. Composing
         // `R * delta` instead would pre- and post-rotate by `R` and spin
-        // the object off its own axis.
+        // the object off its own axis. `snap_rotate` composes the same way.
         transform.rotation = UnitQuat::normalize(delta.get() * self.start.rotation.get())?;
         Some(())
     }
@@ -144,13 +249,19 @@ impl GizmoDrag {
         if !factor.is_finite() || factor <= SCALE_FACTOR_EPS {
             return Some(());
         }
-        let index = match self.handle.axis {
-            GizmoAxis::X => 0,
-            GizmoAxis::Y => 1,
-            _ => 2,
-        };
-        transform.scale[index] = (self.start.scale[index] * factor).max(MIN_SCALE);
+        let index = axis_index(self.handle.axis);
+        let scaled = self.start.scale[index] * factor;
+        transform.scale[index] = scaled.abs().max(MIN_SCALE).copysign(scaled);
         Some(())
+    }
+}
+
+/// Index of the scale component an axis handle drives.
+fn axis_index(axis: GizmoAxis) -> usize {
+    match axis {
+        GizmoAxis::X => 0,
+        GizmoAxis::Y => 1,
+        _ => 2,
     }
 }
 
@@ -499,6 +610,48 @@ mod tests {
             (scaled.scale - Vec3::new(2.0, 1.0, 1.0)).length() < TEST_EPS,
             "world scale multiplies the local component, got {:?}",
             scaled.scale
+        );
+    }
+
+    /// A mirrored axis keeps its sign under a Scale drag (E4 review): the
+    /// floor applies to the magnitude, so dragging X of `scale.x = -1`
+    /// towards the centre lands on `-MIN_SCALE` instead of collapsing to
+    /// `+MIN_SCALE`, and dragging it out grows the mirror.
+    #[test]
+    fn scale_drag_preserves_the_sign_of_a_mirrored_axis() {
+        let mirrored = TransformDesc {
+            scale: Vec3::new(-1.0, 1.0, 1.0),
+            ..identity()
+        };
+        let handle = GizmoHandle {
+            mode: GizmoMode::Scale,
+            space: GizmoSpace::World,
+            axis: GizmoAxis::X,
+        };
+        let press = ray_from(Vec3::new(1.0, 0.0, 5.0), Vec3::new(1.0, 0.0, 0.0));
+
+        let shrunk = drag_preview(
+            &mirrored,
+            handle,
+            press,
+            ray_from(Vec3::new(0.0005, 0.0, 5.0), Vec3::new(0.0005, 0.0, 0.0)),
+        );
+        assert!(
+            (shrunk.scale - Vec3::new(-MIN_SCALE, 1.0, 1.0)).length() < TEST_EPS,
+            "the floor must keep the mirror, got {:?}",
+            shrunk.scale
+        );
+
+        let grown = drag_preview(
+            &mirrored,
+            handle,
+            press,
+            ray_from(Vec3::new(2.0, 0.0, 5.0), Vec3::new(2.0, 0.0, 0.0)),
+        );
+        assert!(
+            (grown.scale - Vec3::new(-2.0, 1.0, 1.0)).length() < TEST_EPS,
+            "dragging out must grow the mirror, got {:?}",
+            grown.scale
         );
     }
 }
