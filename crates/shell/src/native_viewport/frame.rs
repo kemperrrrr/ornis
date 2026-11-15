@@ -291,34 +291,6 @@ fn outline_flags(world: &ReplicaGameWorld, upload: &FrameUpload) -> Vec<u32> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    // GPU-only surface: these assertions run on macOS, where the surface and
-    // the Metal device exist (CI is Linux, so the module is compiled out
-    // there). They pin the policies this file owns rather than pixels — pixel
-    // parity is the render crate's own gate.
-    use super::*;
-
-    #[test]
-    fn pointer_scale_rejects_degenerate_ratios() {
-        // The value only has to be a sane divisor for pointer deltas; a bad
-        // ratio must not scale the camera by infinity.
-        for bad in [f32::NAN, f32::INFINITY, 0.0, -1.0] {
-            assert_eq!(sanitize_pointer_scale(bad), 1.0, "scale {bad}");
-        }
-        assert_eq!(sanitize_pointer_scale(2.0), 2.0);
-    }
-
-    #[test]
-    fn outline_flags_follow_selection_then_hover() {
-        // Selected wins over hovered: the outline is one flag per instance.
-        assert_eq!(outline_flag(true, true), OUTLINE_SELECTED);
-        assert_eq!(outline_flag(true, false), OUTLINE_SELECTED);
-        assert_eq!(outline_flag(false, true), OUTLINE_HOVERED);
-        assert_eq!(outline_flag(false, false), 0);
-    }
-}
-
 /// Mirrors the snapshot's editor marks onto the freshly rebuilt replica.
 ///
 /// `replace_scene` destroys and recreates every scene entity, so marks cannot
@@ -347,5 +319,33 @@ fn mirror_marks(world: &mut ReplicaGameWorld, meta: &[SnapshotEntityMeta]) {
         if meta.editor.hovered {
             store.insert(entity, Hovered);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // GPU-only surface: these assertions run on macOS, where the surface and
+    // the Metal device exist (CI is Linux, so the module is compiled out
+    // there). They pin the policies this file owns rather than pixels — pixel
+    // parity is the render crate's own gate.
+    use super::*;
+
+    #[test]
+    fn pointer_scale_rejects_degenerate_ratios() {
+        // The value only has to be a sane divisor for pointer deltas; a bad
+        // ratio must not scale the camera by infinity.
+        for bad in [f32::NAN, f32::INFINITY, 0.0, -1.0] {
+            assert_eq!(sanitize_pointer_scale(bad), 1.0, "scale {bad}");
+        }
+        assert_eq!(sanitize_pointer_scale(2.0), 2.0);
+    }
+
+    #[test]
+    fn outline_flags_follow_selection_then_hover() {
+        // Selected wins over hovered: the outline is one flag per instance.
+        assert_eq!(outline_flag(true, true), OUTLINE_SELECTED);
+        assert_eq!(outline_flag(true, false), OUTLINE_SELECTED);
+        assert_eq!(outline_flag(false, true), OUTLINE_HOVERED);
+        assert_eq!(outline_flag(false, false), 0);
     }
 }

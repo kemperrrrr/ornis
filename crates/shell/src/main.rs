@@ -226,7 +226,7 @@ impl ShellApp {
     fn content_height(&self) -> f64 {
         self.window.as_ref().map_or(0.0, |window| {
             let size = window.inner_size();
-            f64::from(size.height) / f64::from(window.scale_factor())
+            f64::from(size.height) / window.scale_factor()
         })
     }
 

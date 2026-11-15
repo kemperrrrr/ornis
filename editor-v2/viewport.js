@@ -393,13 +393,18 @@ async function boot() {
 boot().catch((err) => {
     console.error('[ornis-editor] failed to start:', err);
     const message = (err && err.message) || String(err);
+    if (webgpuMissing()) {
+        // A WebGPU-less webview is an environment fact, not an editor bug: the
+        // written fallback beats a red canvas nobody can act on.
+        showNotice(message);
+        return;
+    }
+    // WebGPU exists and still failed: that is a real defect worth a loud red
+    // canvas and a title, so the environment case above must not swallow it.
     if (canvasEl) {
         canvasEl.classList.add('failed');
         canvasEl.title = 'WebGPU init failed: ' + message;
     }
-    // A WebGPU-less webview is an environment fact, not an editor bug: the
-    // written fallback is still better than a red canvas on top of it.
-    showNotice('WebGPU init failed: ' + message);
 });
 
 // The welcome flow switches modes through the same module (no direct import

@@ -41,6 +41,21 @@ export const viewport_state_json = () =>
   JSON.stringify({ mode: 'perspective3d', dpr: 1, grid: null });
 `;
 
+// A WebGPU-capable host whose adapter/device refuses: the renderer exists but
+// cannot start. That is a real defect and must stay a loud red canvas.
+const WASM_STUB_REFUSING = `
+export default async () => { throw new Error('WebGPU adapter unavailable'); };
+export const start_renderer = async () => {};
+export const set_viewport_mode = () => true;
+export const set_gizmo_mode = () => true;
+export const set_gizmo_space = () => true;
+export const set_snap = () => true;
+export const set_editor_mode = () => true;
+export const undo_gizmo = () => true;
+export const snap_effective_rotate_deg = () => 15;
+export const viewport_state_json = () => JSON.stringify({ mode: 'perspective3d', dpr: 1 });
+`;
+
 let copyCounter = 0;
 
 // Minimal element: the viewport only reads boxes, toggles classes/attributes
@@ -91,10 +106,13 @@ function element({ width = 640, height = 480, left = 100, top = 60, hidden = fal
 // Boots a fresh copy of `viewport.js` next to the stub WASM package with the
 // DOM/window stubs installed as globals (the module reads them as globals,
 // exactly like in a browser).
-async function bootPage({ shell, gpu = true }) {
+async function bootPage({ shell, gpu = true, failInit = false }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ornis-viewport-'));
   fs.mkdirSync(path.join(dir, 'pkg'));
-  fs.writeFileSync(path.join(dir, 'pkg', 'ornis_wasm.js'), WASM_STUB);
+  fs.writeFileSync(
+    path.join(dir, 'pkg', 'ornis_wasm.js'),
+    failInit ? WASM_STUB_REFUSING : WASM_STUB,
+  );
   copyCounter += 1;
   const entry = path.join(dir, `viewport-${copyCounter}.mjs`);
   fs.writeFileSync(entry, SOURCE);
@@ -305,6 +323,34 @@ test('shell with a native viewport reports bounds and forwards input', async () 
     const blurred = page.posted.at(-1);
     assert.deepStrictEqual(blurred.data.pressed_mouse_buttons, []);
     assert.deepStrictEqual(blurred.data.pointer_delta, [0, 0]);
+  } finally {
+    page.restore();
+  }
+});
+
+test('a real init failure stays a loud red canvas, not the environment notice', async () => {
+  // WebGPU is present and the adapter still refuses: an actionable bug, so the
+  // `failed` marker and the title must survive. Only a *missing* navigator.gpu
+  // is the environment case the written notice replaces.
+  const page = await bootPage({
+    shell: { nativeViewport: false, webgpuNotice: 'environment notice' },
+    gpu: true,
+    failInit: true,
+  });
+  try {
+    assert.ok(
+      page.dom.canvas.classes.has('failed'),
+      'the canvas must be marked failed for a real init error',
+    );
+    assert.ok(
+      page.dom.canvas.title.startsWith('WebGPU init failed:'),
+      `title reports the cause, got ${page.dom.canvas.title}`,
+    );
+    assert.strictEqual(
+      page.dom['viewport-notice'].hidden,
+      true,
+      'the environment notice must not hide a real defect',
+    );
   } finally {
     page.restore();
   }

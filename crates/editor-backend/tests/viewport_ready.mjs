@@ -68,7 +68,16 @@ function makeEl() {
         height: 0,
         hidden: false,
         added: [],
-        classList: { add: (c) => el.added.push(c), toggle: () => {} },
+        // A real `classList` supports removal too; the viewport drops the
+        // `failed` mark when it shows the written fallback instead.
+        classList: {
+            add: (c) => el.added.push(c),
+            remove: (c) => {
+                const at = el.added.indexOf(c);
+                if (at >= 0) el.added.splice(at, 1);
+            },
+            toggle: () => {},
+        },
         getBoundingClientRect: () => ({ width: 800, height: 600 }),
         addEventListener: () => {},
         setAttribute: () => {},
@@ -99,6 +108,15 @@ async function sandbox(failInit) {
         },
     };
     globalThis.window = { devicePixelRatio: 1 };
+    // The harness models a WebGPU-capable browser: the viewport only boots the
+    // wasm module when `navigator.gpu` exists (a WKWebView without it gets the
+    // written fallback, covered by editor-v2/tests/viewport_host.test.js).
+    // Node's own `navigator` is getter-only, hence `defineProperty`.
+    Object.defineProperty(globalThis, 'navigator', {
+        value: { gpu: {} },
+        configurable: true,
+        writable: true,
+    });
     globalThis.requestAnimationFrame = () => 0;
     const wasm = await import(pathToFileURL(join(dir, 'pkg', 'ornis_wasm.js')).href);
     await import(pathToFileURL(join(dir, 'viewport.js')).href);
