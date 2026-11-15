@@ -98,6 +98,10 @@ unsafe extern "C" {
     fn gpu_acos(value: f32) -> f32;
     #[link_name = "gpu_tan"]
     fn gpu_tan(value: f32) -> f32;
+    #[link_name = "gpu_dpdx"]
+    fn gpu_dpdx(value: f32) -> f32;
+    #[link_name = "gpu_dpdy"]
+    fn gpu_dpdy(value: f32) -> f32;
     #[link_name = "gpu_ln"]
     fn gpu_ln(value: f32) -> f32;
     #[link_name = "gpu_cross3_lane"]
@@ -402,6 +406,18 @@ pub(crate) fn acos(value: f32) -> f32 {
 #[inline(always)]
 pub(crate) fn tan(value: f32) -> f32 {
     call!(gpu_tan(value))
+}
+
+/// Screen-space derivative along x.
+#[inline(always)]
+pub(crate) fn dpdx(value: f32) -> f32 {
+    call!(gpu_dpdx(value))
+}
+
+/// Screen-space derivative along y.
+#[inline(always)]
+pub(crate) fn dpdy(value: f32) -> f32 {
+    call!(gpu_dpdy(value))
 }
 
 /// Natural logarithm.

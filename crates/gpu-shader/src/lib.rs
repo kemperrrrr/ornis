@@ -101,8 +101,9 @@ pub use builtin::{
 };
 pub use elements::{AtomicU32, Vec4U32};
 pub use math::{
-    abs, acos, atan2, clamp, cos, cross_lane, dot2, dot3, exp, exp2, fract, homogeneous_divide,
-    length3, ln, log2, mix, normalize_lane, pow, sign, sin, smoothstep, sqrt, tan,
+    abs, acos, atan2, clamp, cos, cross_lane, dot2, dot3, dpdx, dpdy, exp, exp2, fract,
+    homogeneous_divide, length3, ln, log2, mix, normalize_lane, pow, sign, sin, smoothstep, sqrt,
+    tan,
 };
 pub use ornis_gpu_shader_macros::gpu_entry;
 pub use resource::Storage;

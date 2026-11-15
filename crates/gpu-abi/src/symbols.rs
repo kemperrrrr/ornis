@@ -332,6 +332,17 @@ pub const GPU_ATAN2: &str = "gpu_atan2";
 /// from the instruction the DSL path used, so the operation is an import.
 pub const GPU_SMOOTHSTEP: &str = "gpu_smoothstep";
 
+/// `(param f32) (result f32)` — `dpdx(value)`, the screen-space derivative
+/// along x.
+///
+/// WGSL only allows a derivative in uniform control flow, so a kernel that
+/// takes one has to call it before any `discard` or divergent branch.
+pub const GPU_DPDX: &str = "gpu_dpdx";
+
+/// `(param f32) (result f32)` — `dpdy(value)`, the screen-space derivative
+/// along y.
+pub const GPU_DPDY: &str = "gpu_dpdy";
+
 /// `(param f32) (result f32)` — `tan(value)`, one WGSL `tan`.
 pub const GPU_TAN: &str = "gpu_tan";
 

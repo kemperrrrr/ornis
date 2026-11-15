@@ -4314,6 +4314,17 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             );
             return Ok(result);
         }
+        if let Some(axis) = derivative_axis(callee) {
+            let expr = self.operand(out, &args[0])?;
+            return Ok(self.expr(
+                out,
+                naga::Expression::Derivative {
+                    axis,
+                    ctrl: naga::DerivativeControl::None,
+                    expr,
+                },
+            ));
+        }
         if callee.contains("cross3") {
             return self.cross3_lane(out, args);
         }
@@ -5583,6 +5594,21 @@ fn image_class(kind: TextureKind, multisampled: bool) -> naga::ImageClass {
 }
 
 /// Two-operand math builtins the shader SDK imports.
+/// Derivative axis of a screen-space derivative import.
+///
+/// WGSL allows a derivative only in uniform control flow, so the translator
+/// passes the axis through and lets naga reject a divergent call rather than
+/// papering over it.
+fn derivative_axis(callee: &str) -> Option<naga::DerivativeAxis> {
+    if callee.contains(ornis_gpu_abi::symbols::GPU_DPDX) {
+        Some(naga::DerivativeAxis::X)
+    } else if callee.contains(ornis_gpu_abi::symbols::GPU_DPDY) {
+        Some(naga::DerivativeAxis::Y)
+    } else {
+        None
+    }
+}
+
 fn binary_math(callee: &str, argc: usize) -> Option<naga::MathFunction> {
     if argc != VEC2_LANES as usize {
         return None;
@@ -5889,6 +5915,51 @@ mod tests {
         assert_eq!(unary_math("gpu_exp2"), Some(naga::MathFunction::Exp2));
         assert_eq!(unary_math("gpu_log2"), Some(naga::MathFunction::Log2));
         assert_eq!(unary_math("llvm.sqrt.f32"), Some(naga::MathFunction::Sqrt));
+    }
+
+    #[test]
+    fn derivative_imports_lower_to_naga_derivatives() {
+        use ornis_gpu_abi::symbols::{GPU_DPDX, GPU_DPDY};
+        assert_eq!(derivative_axis(GPU_DPDX), Some(naga::DerivativeAxis::X));
+        assert_eq!(derivative_axis(GPU_DPDY), Some(naga::DerivativeAxis::Y));
+        assert_eq!(derivative_axis("gpu_sqrt"), None);
+        // A derivative needs the fragment stage: `dpdx` exists only there, so
+        // the check runs on a fragment entry writing the derivative out.
+        let ir = format!(
+            r#"
+declare float @{dx}(float)
+declare void @fragment_store_f32x4(float, float, float, float)
+define void @fs_main() {{
+start:
+  %v = call float @{dx}(float 1.000000e+00)
+  call void @fragment_store_f32x4(float %v, float %v, float %v, float %v)
+  ret void
+}}
+"#,
+            dx = GPU_DPDX
+        );
+        let func = crate::parse::parse_module(&ir)
+            .expect("parse")
+            .funcs
+            .into_iter()
+            .find(|func| func.name == "fs_main")
+            .expect("entry");
+        let mut lowering = Lowering::new(&[], crate::TextureSampling::SingleSample);
+        lowering
+            .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
+            .expect("lower");
+        let module = lowering.finish();
+        let has_derivative = module.entry_points.iter().any(|entry| {
+            entry
+                .function
+                .expressions
+                .iter()
+                .any(|(_, expr)| matches!(expr, naga::Expression::Derivative { .. }))
+        });
+        assert!(
+            has_derivative,
+            "dpdx lowers to naga::Expression::Derivative"
+        );
     }
 
     #[test]
