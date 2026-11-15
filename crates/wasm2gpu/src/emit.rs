@@ -147,7 +147,9 @@ fn spirv(
     };
     let words = naga::back::spv::write_vec(module, info, &options, Some(&pipeline))
         .map_err(|err| TranslateError::Naga(err.to_string()))?;
-    Ok(words)
+    // Naga puts ArrayStride on every array and Offset on every struct member.
+    // Vulkan rejects those decorations on Workgroup variables.
+    crate::spirv_layout::legalize(words)
 }
 
 fn naga_chain(err: &impl std::error::Error) -> String {

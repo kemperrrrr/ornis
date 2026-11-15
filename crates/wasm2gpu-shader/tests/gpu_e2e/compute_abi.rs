@@ -159,7 +159,7 @@ fn wasm_compute_abi_imports_execute_on_gpu() {
     assert_eq!(atomic.as_slice(), ATOMIC_OUTPUT.as_slice());
 }
 
-fn validate_compute_spirv(words: &[u32]) {
+pub(super) fn validate_compute_spirv(words: &[u32]) {
     let required = super::env_flag_enabled("ORNIS_REQUIRE_SPIRV_VAL");
     let probe = Command::new("spirv-val").arg("--version").output();
     let Ok(probe) = probe else {

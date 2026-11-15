@@ -56,6 +56,7 @@ mod lower;
 mod ops;
 mod parse;
 mod ret;
+mod spirv_layout;
 mod storage;
 mod struct_members;
 mod structure;
@@ -74,7 +75,9 @@ pub use error::TranslateError;
 ///
 /// The result has already been validated by naga, reprinted as WGSL, parsed
 /// back, and round-tripped through SPIR-V. Bindless `binding_array` types are
-/// rejected.
+/// rejected. Storage, uniform, and push-constant types keep explicit layout
+/// decorations. Workgroup types, and `Function` or `Private` types when the
+/// module is SPIR-V 1.5 or newer, do not.
 pub fn translate(wasm: &[u8]) -> Result<Translated, TranslateError> {
     let module = parse::parse(wasm)?;
     let lowered = lower::lower(&module)?;
