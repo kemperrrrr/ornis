@@ -137,8 +137,21 @@ function hideNotice() {
 // failed `request_adapter` to exactly this text (`crates/wasm/src/lib.rs`,
 // `map_err(|_| JsValue::from_str("adapter not found"))`). Kept as an exact
 // comparison rather than a regex/`includes` so new renderer messages cannot
-// drift into this branch by sharing a word.
+// drift into this branch by sharing a word — `device: adapter not found in
+// cache` is a real defect, not an environment limit.
+//
+// The Rust side pins the other half of this agreement:
+// `crates/wasm/src/lib.rs` has a test asserting that an unavailable adapter
+// produces exactly this string, so the two constants cannot drift apart
+// silently.
 const ADAPTER_NOT_FOUND = 'adapter not found';
+
+// Adapter options the pre-flight check and the renderer must agree on: the
+// check is only meaningful if it asks for the same adapter the renderer will
+// use. `ornis-wasm` requests `PowerPreference::HighPerformance`
+// (`crates/wasm/src/lib.rs`), so the probe asks for that too — a cheap extra
+// adapter query is worth not checking one GPU and rendering on another.
+const ADAPTER_OPTIONS = { powerPreference: 'high-performance' };
 
 function webgpuMissing() {
     return !(typeof navigator !== 'undefined' && 'gpu' in navigator);
@@ -150,7 +163,7 @@ function webgpuMissing() {
 async function hasWebgpuAdapter() {
     if (webgpuMissing()) return false;
     try {
-        const adapter = await navigator.gpu.requestAdapter();
+        const adapter = await navigator.gpu.requestAdapter(ADAPTER_OPTIONS);
         return !!adapter;
     } catch (e) {
         return false;

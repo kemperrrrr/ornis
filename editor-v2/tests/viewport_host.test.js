@@ -71,11 +71,17 @@ export const viewport_state_json = () => JSON.stringify({ mode: 'perspective3d',
 // Renderer defects whose text *looks* like an environment problem. All of them
 // must keep the loud red canvas: matching on words is exactly the bug the
 // pre-flight check exists to avoid.
+//
+// The last entry is deliberately a *superset* of `ADAPTER_NOT_FOUND`: it would
+// match an `includes()` comparison, so it pins the check as an exact equality.
 const DEFECT_MESSAGES = [
   'WebGPU: device lost',
   'Texture format Rgba16Float not supported for storage',
   'WebGPU validation error: shader module invalid',
   'device lost (adapter limits exceeded)',
+  'device: adapter not found in cache',
+  'adapter not found: retrying after device loss',
+  'adapter not found (device was destroyed)',
 ];
 
 // A genuine defect after a working adapter: shader compilation failed. This is
@@ -242,8 +248,11 @@ async function bootPage({ shell, gpu = true, adapter = true, stub = WASM_STUB })
   // defined again on restore for the same reason.
   // `adapter` answers the page's pre-flight `requestAdapter()`: `true` gives an
   // adapter object, `false` gives `null` (the "no usable GPU" case), `'throw'`
-  // rejects like an implementation that reports failure by throwing.
-  const requestAdapter = async () => {
+  // rejects like an implementation that reports failure by throwing. The
+  // options are recorded so a test can pin what the probe asked for.
+  const adapterCalls = [];
+  const requestAdapter = async (options) => {
+    adapterCalls.push(options);
     if (adapter === 'throw') throw new Error('adapter request failed');
     return adapter ? { name: 'stub adapter' } : null;
   };
@@ -321,6 +330,7 @@ async function bootPage({ shell, gpu = true, adapter = true, stub = WASM_STUB })
     posted,
     calls,
     frames,
+    adapterCalls,
     bodyClasses,
     consoleMessages,
     dispatchWindow: (type, event) => {
@@ -758,6 +768,70 @@ test('only the exact "adapter not found" message is an environment limit', async
       `${ADAPTER_NOT_FOUND} is an environment limit`,
     );
     assert.ok(!page.dom.canvas.classes.has('failed'));
+  } finally {
+    page.restore();
+  }
+});
+
+test('a message merely containing "adapter not found" is a defect', async () => {
+  // Pins the comparison as `===` rather than `includes`: if the check ever
+  // loosens, these three pass the substring test and must still be red. This is
+  // the mutation a reviewer applied by hand; here it fails a named test.
+  const lookalikes = [
+    'device: adapter not found in cache',
+    'adapter not found: retrying after device loss',
+    'adapter not found (device was destroyed)',
+  ];
+  for (const message of lookalikes) {
+    assert.notStrictEqual(
+      message,
+      ADAPTER_NOT_FOUND,
+      'the lookalikes must differ from the exact string',
+    );
+    assert.ok(
+      message.includes(ADAPTER_NOT_FOUND),
+      `"${message}" must contain the exact string, or it does not test \`includes\``,
+    );
+    const page = await bootPage({
+      shell: { nativeViewport: false, webgpuNotice: 'environment notice' },
+      gpu: true,
+      stub: `
+export default async () => {
+  throw new Error(${JSON.stringify(message)});
+};`,
+    });
+    try {
+      assert.ok(
+        page.dom.canvas.classes.has('failed'),
+        `an \`includes\` match must not soften this defect: ${message}`,
+      );
+      assert.strictEqual(
+        page.dom['viewport-notice'].hidden,
+        true,
+        `the notice must not appear for a lookalike: ${message}`,
+      );
+    } finally {
+      page.restore();
+    }
+  }
+});
+
+test('the adapter pre-flight asks for the same adapter the renderer uses', async () => {
+  // A check that queries a different adapter than the renderer proves nothing.
+  // `ornis-wasm` requests `PowerPreference::HighPerformance`, so the probe must
+  // pass the matching options — otherwise it could validate the integrated GPU
+  // and render on the discrete one (or vice versa).
+  const page = await bootPage({
+    shell: { nativeViewport: false, webgpuNotice: 'unused' },
+    gpu: true,
+  });
+  try {
+    assert.ok(page.adapterCalls.length >= 1, 'the pre-flight must query an adapter');
+    assert.deepStrictEqual(
+      page.adapterCalls[0],
+      { powerPreference: 'high-performance' },
+      'the probe must request the high-performance adapter, like ornis-wasm',
+    );
   } finally {
     page.restore();
   }

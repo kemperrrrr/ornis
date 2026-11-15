@@ -975,6 +975,19 @@ fn make_instance() -> wgpu::Instance {
     })
 }
 
+/// Why initialization failed when no adapter could be obtained.
+///
+/// This is a **contract with the page**: `editor-v2/viewport.js` treats exactly
+/// this message (and nothing else) as "this environment has no WebGPU", showing
+/// the written fallback instead of a red failure canvas. Any other error — a
+/// lost device, a validation failure, an unsupported format — must stay a loud
+/// defect, which is why the page compares the string with `===` rather than a
+/// substring or regex.
+///
+/// `the_page_recognises_exactly_this_adapter_message` pins the JS constant
+/// against this one, so the two cannot drift apart silently.
+pub const ADAPTER_NOT_FOUND: &str = "adapter not found";
+
 /// Everything the render loop needs from WebGPU initialization.
 struct GpuContext {
     // SAFETY invariant: the phantom window lifetime is pinned to `'static`;
@@ -1008,7 +1021,7 @@ async fn init_webgpu(
             ..Default::default()
         })
         .await
-        .map_err(|_| JsValue::from_str("adapter not found"))?;
+        .map_err(|_| JsValue::from_str(ADAPTER_NOT_FOUND))?;
 
     // WebGPU spec defaults: max_storage_buffers_per_shader_stage = 8, which is
     // what Renderer3D's bind groups need (camera + per-object + materials +
@@ -2060,6 +2073,55 @@ mod integration_tests {
     /// JSON → lanes → `frame_upload` chain is pinned against the same bytes
     /// both crates assert on.
     const FULL_CONTRACT: &str = include_str!("../../app/tests/fixtures/api_scene.json");
+
+    /// The adapter-failure message is a contract with the page, and the page
+    /// keeps its own copy of the string. This reads `editor-v2/viewport.js`
+    /// and asserts it declares `ADAPTER_NOT_FOUND = 'adapter not found'` — so a
+    /// rename on either side breaks a test instead of silently turning every
+    /// "no adapter" into a red canvas (or, worse, every adapter mention into a
+    /// help blurb).
+    #[test]
+    fn the_page_recognises_exactly_this_adapter_message() {
+        let viewport = concat!(env!("CARGO_MANIFEST_DIR"), "/../../editor-v2/viewport.js");
+        let source = std::fs::read_to_string(viewport).expect("editor-v2/viewport.js must exist");
+        let declaration = format!("const ADAPTER_NOT_FOUND = '{}';", ADAPTER_NOT_FOUND);
+        assert!(
+            source.contains(&declaration),
+            "viewport.js must declare {declaration:?} — the page matches this exact \
+             string to detect an environment without WebGPU"
+        );
+        // And it must compare exactly, not by substring: `includes`/regex would
+        // swallow real defects that merely mention an adapter.
+        assert!(
+            source.contains("=== ADAPTER_NOT_FOUND"),
+            "viewport.js must compare the adapter message with === (not includes/regex)"
+        );
+        assert!(
+            !source.contains(".includes(ADAPTER_NOT_FOUND)")
+                && !source.contains("test(ADAPTER_NOT_FOUND)"),
+            "a substring or regex match would classify real defects as environment limits"
+        );
+    }
+
+    /// The adapter request the page makes before loading the module must ask
+    /// for the same adapter this crate renders on, or the pre-flight check
+    /// could validate one GPU while the renderer uses another.
+    #[test]
+    fn the_page_requests_the_high_performance_adapter() {
+        let viewport = concat!(env!("CARGO_MANIFEST_DIR"), "/../../editor-v2/viewport.js");
+        let source = std::fs::read_to_string(viewport).expect("editor-v2/viewport.js must exist");
+        assert!(
+            source.contains("powerPreference: 'high-performance'"),
+            "the pre-flight adapter query must ask for the high-performance adapter"
+        );
+        // The crate's own request is what the page's options mirror: if this
+        // ever stops being `HighPerformance`, the JS constant above is wrong.
+        assert!(
+            include_str!("lib.rs")
+                .contains("power_preference: wgpu::PowerPreference::HighPerformance"),
+            "this crate must still request the high-performance adapter"
+        );
+    }
 
     /// The off-browser fallback of `device_pixel_ratio`: host builds never
     /// touch `web_sys::window()` (it panics on non-wasm targets), so the
