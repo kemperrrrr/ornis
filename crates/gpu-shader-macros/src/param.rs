@@ -32,6 +32,12 @@ pub(super) enum Kind {
     TextureCube,
     /// `texture_depth_2d`.
     DepthTexture2d,
+    /// `texture_depth_2d_array` — the shadow-map pool.
+    DepthTexture2dArray,
+    /// `texture_depth_cube_array` — the point-light shadow pool.
+    DepthCubeArray,
+    /// Comparison sampler (`sampler_comparison`).
+    ComparisonSampler,
     /// Filtering sampler (`sampler`).
     Sampler,
 }
@@ -46,6 +52,9 @@ impl Kind {
             Self::Texture2dU32 => "Texture2dU32",
             Self::TextureCube => "TextureCube",
             Self::DepthTexture2d => "DepthTexture2d",
+            Self::DepthTexture2dArray => "DepthTexture2dArray",
+            Self::DepthCubeArray => "DepthCubeArray",
+            Self::ComparisonSampler => "ComparisonSampler",
             Self::Sampler => "Sampler",
         }
     }
@@ -58,6 +67,9 @@ impl Kind {
                 | Self::Texture2dU32
                 | Self::TextureCube
                 | Self::DepthTexture2d
+                | Self::DepthTexture2dArray
+                | Self::DepthCubeArray
+                | Self::ComparisonSampler
                 | Self::Sampler
         )
     }
@@ -113,6 +125,15 @@ pub(super) fn parse(attr: &Attribute, ty: &Type) -> syn::Result<Option<Param>> {
         if meta.path.is_ident("depth_texture_2d") {
             return set_kind(&mut kind, Kind::DepthTexture2d, &meta);
         }
+        if meta.path.is_ident("depth_texture_2d_array") {
+            return set_kind(&mut kind, Kind::DepthTexture2dArray, &meta);
+        }
+        if meta.path.is_ident("depth_texture_cube_array") {
+            return set_kind(&mut kind, Kind::DepthCubeArray, &meta);
+        }
+        if meta.path.is_ident("comparison_sampler") {
+            return set_kind(&mut kind, Kind::ComparisonSampler, &meta);
+        }
         if meta.path.is_ident("sampler") {
             return set_kind(&mut kind, Kind::Sampler, &meta);
         }
@@ -130,15 +151,18 @@ pub(super) fn parse(attr: &Attribute, ty: &Type) -> syn::Result<Option<Param>> {
         }
         Err(meta.error(
             "expected `uniform`, `storage_buffer`, `texture_2d`, `texture_2d_u32`, \
-             `texture_cube`, `depth_texture_2d`, `sampler`, `read_only`, `group = N`, \
-             or `binding = N`",
+             `texture_cube`, `depth_texture_2d`, `depth_texture_2d_array`, \
+             `depth_texture_cube_array`, `comparison_sampler`, `sampler`, `read_only`, \
+             `group = N`, or `binding = N`",
         ))
     })?;
     let kind = kind.ok_or_else(|| {
         syn::Error::new_spanned(
             attr,
             "expected `uniform`, `storage_buffer`, `texture_2d`, `texture_2d_u32`, \
-             `texture_cube`, `depth_texture_2d`, or `sampler` in the gpu attribute",
+             `texture_cube`, `depth_texture_2d`, `depth_texture_2d_array`, \
+             `depth_texture_cube_array`, `comparison_sampler`, or `sampler` in the gpu \
+             attribute",
         )
     })?;
     if read_only && kind != Kind::StorageBuffer {
@@ -212,6 +236,9 @@ fn resolve(
                     Kind::Texture2dU32 => "texture_2d_u32",
                     Kind::TextureCube => "texture_cube",
                     Kind::DepthTexture2d => "depth_texture_2d",
+                    Kind::DepthTexture2dArray => "depth_texture_2d_array",
+                    Kind::DepthCubeArray => "depth_texture_cube_array",
+                    Kind::ComparisonSampler => "comparison_sampler",
                     Kind::Sampler => "sampler",
                 },
                 kind.type_name(),
@@ -249,6 +276,9 @@ fn resolve(
         | Kind::Texture2dU32
         | Kind::TextureCube
         | Kind::DepthTexture2d
+        | Kind::DepthTexture2dArray
+        | Kind::DepthCubeArray
+        | Kind::ComparisonSampler
         | Kind::Sampler => {
             return Err(syn::Error::new_spanned(
                 ty,
@@ -281,6 +311,9 @@ fn resolve_texture(ty: &Type, kind: Kind, group: u32, binding: u32) -> syn::Resu
                     Kind::Texture2dU32 => "texture_2d_u32",
                     Kind::TextureCube => "texture_cube",
                     Kind::DepthTexture2d => "depth_texture_2d",
+                    Kind::DepthTexture2dArray => "depth_texture_2d_array",
+                    Kind::DepthCubeArray => "depth_texture_cube_array",
+                    Kind::ComparisonSampler => "comparison_sampler",
                     Kind::Sampler => "sampler",
                     Kind::Uniform | Kind::StorageBuffer => kind.type_name(),
                 },

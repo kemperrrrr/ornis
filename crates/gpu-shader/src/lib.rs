@@ -107,7 +107,10 @@ pub use math::{
 };
 pub use ornis_gpu_shader_macros::gpu_entry;
 pub use resource::Storage;
-pub use texture::{DepthTexture2d, Sampler, Texture2d, Texture2dU32, TextureCube};
+pub use texture::{
+    ComparisonSampler, DepthCubeArray, DepthTexture2d, DepthTexture2dArray, Sampler, Texture2d,
+    Texture2dU32, TextureCube,
+};
 pub use uniform::{GpuStruct, Uniform};
 pub use vec3::Vec3;
 pub use workgroup::{WorkgroupAtomicU32, WorkgroupU32, workgroup_barrier};

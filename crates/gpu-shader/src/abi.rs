@@ -157,6 +157,29 @@ unsafe extern "C" {
         z: f32,
         lane: u32,
     ) -> f32;
+    #[link_name = "texture_sample_compare_2d_array_f32"]
+    fn texture_sample_compare_2d_array_f32(
+        group: u32,
+        binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        x: f32,
+        y: f32,
+        layer: u32,
+        reference: f32,
+    ) -> f32;
+    #[link_name = "texture_sample_compare_cube_array_f32"]
+    fn texture_sample_compare_cube_array_f32(
+        group: u32,
+        binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+        layer: u32,
+        reference: f32,
+    ) -> f32;
     #[link_name = "texture_width_2d"]
     fn texture_width_2d(group: u32, binding: u32) -> i32;
     #[link_name = "texture_height_2d"]
@@ -589,6 +612,60 @@ pub(crate) fn texture_sample_cube(
         y,
         z,
         lane
+    ))
+}
+
+/// Depth compare through `textureSampleCompare` on a 2D layer stack.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+// qual:allow(srp, max_parameters=8) reason: "one operand per import argument: two binding pairs, uv, the layer and the reference"
+#[inline(always)]
+pub(crate) fn texture_sample_compare_2d_array(
+    group: u32,
+    binding: u32,
+    sampler_group: u32,
+    sampler_binding: u32,
+    x: f32,
+    y: f32,
+    layer: u32,
+    reference: f32,
+) -> f32 {
+    call!(texture_sample_compare_2d_array_f32(
+        group,
+        binding,
+        sampler_group,
+        sampler_binding,
+        x,
+        y,
+        layer,
+        reference
+    ))
+}
+
+/// Depth compare through `textureSampleCompare` on a cube layer stack.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+// qual:allow(srp, max_parameters=9) reason: "the 2D twin plus the direction's third lane; the translator reads the operands positionally"
+#[inline(always)]
+pub(crate) fn texture_sample_compare_cube_array(
+    group: u32,
+    binding: u32,
+    sampler_group: u32,
+    sampler_binding: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    layer: u32,
+    reference: f32,
+) -> f32 {
+    call!(texture_sample_compare_cube_array_f32(
+        group,
+        binding,
+        sampler_group,
+        sampler_binding,
+        x,
+        y,
+        z,
+        layer,
+        reference
     ))
 }
 

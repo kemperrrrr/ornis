@@ -237,6 +237,21 @@ pub const TEXTURE_SAMPLE_LEVEL_CUBE_F32X4: &str = "texture_sample_level_cube_f32
 /// is fragment-only like [`TEXTURE_SAMPLE_2D_F32X4`].
 pub const TEXTURE_SAMPLE_CUBE_F32X4: &str = "texture_sample_cube_f32x4";
 
+/// `(param i32 i32 i32 i32 f32 f32 i32 f32) (result f32)` —
+/// `textureSampleCompare(depth_2d_array, comparison_sampler, uv, layer, ref)`.
+///
+/// Operands are texture group, texture binding, sampler group, sampler
+/// binding, the two uv lanes, the array layer, then the reference value. The
+/// hardware filters the 2×2 taps into one visibility factor.
+pub const TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32: &str = "texture_sample_compare_2d_array_f32";
+
+/// `(param i32 i32 i32 i32 f32 f32 f32 i32 f32) (result f32)` — the cube-array
+/// twin of [`TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32`].
+///
+/// The coordinate is a direction, so it takes three lanes; the point-light
+/// shadow pool is one cube array and the layer picks the light.
+pub const TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32: &str = "texture_sample_compare_cube_array_f32";
+
 /// Vertex entry. The compiled signature is `vs_main()`: builtins and
 /// `@location` values are [`VERTEX_INDEX`], [`VERTEX_INPUT_LANE`], and the
 /// `vertex_store_*` imports.

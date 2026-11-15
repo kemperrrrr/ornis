@@ -822,6 +822,10 @@ impl StageOut {
 /// binding, sampler group and binding.
 const OWNED_SAMPLE_ARGS: usize = 4;
 
+/// Operand slots a depth-compare sample spends after the coordinate: the
+/// array layer and the reference value.
+const COMPARE_VALUE_ARGS: usize = 2;
+
 /// Coordinate shape of a texture sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SampleShape {
@@ -883,6 +887,47 @@ fn sample_import(callee: &str) -> Option<(SampleShape, SampleMip)> {
     } else {
         None
     }
+}
+
+/// Coordinate shape of a depth-compare sample: an arrayed depth image, either
+/// a 2D layer stack or a cube face stack.
+fn compare_import(callee: &str) -> Option<SampleShape> {
+    use ornis_gpu_abi::symbols::{
+        TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32, TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32,
+    };
+    if callee.contains(TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32) {
+        Some(SampleShape::Cube)
+    } else if callee.contains(TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32) {
+        Some(SampleShape::Plane)
+    } else {
+        None
+    }
+}
+
+/// The coordinate and the two globals a sample reads.
+struct SampleTarget {
+    /// The composed coordinate: `vec2` for a plane, `vec3` for a direction.
+    coordinate: naga::Handle<naga::Expression>,
+    /// The image global.
+    image: naga::Handle<naga::Expression>,
+    /// The sampler global.
+    sampler: naga::Handle<naga::Expression>,
+}
+
+/// A texture binding the module declared.
+///
+/// The kind decides what a load returns, `dim` how the coordinate is read, and
+/// `arrayed` whether a layer index comes with it — a 2D array and a cube array
+/// are different types, so one binding cannot serve both.
+struct TextureBinding {
+    /// What a load or sample of the binding returns.
+    kind: TextureKind,
+    /// How the coordinate is shaped.
+    dim: naga::ImageDimension,
+    /// Whether the image carries an array layer.
+    arrayed: bool,
+    /// The global the module reads.
+    handle: naga::Handle<naga::GlobalVariable>,
 }
 
 /// Which `texture_*` binding a load addresses.
@@ -1240,16 +1285,12 @@ struct Builders {
     /// Struct ids currently being laid out, to reject a recursive field.
     struct_stack: Vec<u32>,
     /// `texture_2d` / `texture_depth_2d` globals, one per binding.
-    textures: HashMap<
-        (u32, u32),
-        (
-            TextureKind,
-            naga::ImageDimension,
-            naga::Handle<naga::GlobalVariable>,
-        ),
-    >,
-    /// Filtering samplers, one per binding.
-    samplers: HashMap<(u32, u32), naga::Handle<naga::GlobalVariable>>,
+    textures: HashMap<(u32, u32), TextureBinding>,
+    /// Samplers, one per binding and comparison mode.
+    ///
+    /// A comparison sampler is a different type, not a different use: naga
+    /// rejects a depth compare through a filtering sampler.
+    samplers: HashMap<(u32, u32, bool), naga::Handle<naga::GlobalVariable>>,
     /// `vec2<i32>` used as a `textureLoad` coordinate.
     ivec2: Option<naga::Handle<naga::Type>>,
     /// Plain `array<u32, WORKGROUP_WORDS>` in workgroup memory.
@@ -1420,7 +1461,7 @@ impl Builders {
         binding: u32,
         want: TextureKind,
     ) -> Result<naga::Handle<naga::GlobalVariable>, TranslateError> {
-        self.texture_of(group, binding, want, naga::ImageDimension::D2)
+        self.texture_of(group, binding, want, naga::ImageDimension::D2, false)
     }
 
     /// Texture at `(group, binding)` with an explicit `dim`.
@@ -1434,26 +1475,27 @@ impl Builders {
         binding: u32,
         want: TextureKind,
         dim: naga::ImageDimension,
+        arrayed: bool,
     ) -> Result<naga::Handle<naga::GlobalVariable>, TranslateError> {
         if self.storage_binding.contains_key(&(group, binding)) {
             return Err(TranslateError::UnsupportedType(format!(
                 "binding {group}:{binding} is both storage and a texture"
             )));
         }
-        if let Some((kind, existing_dim, handle)) = self.textures.get(&(group, binding)) {
-            if *kind != want || *existing_dim != dim {
+        if let Some(existing) = self.textures.get(&(group, binding)) {
+            if existing.kind != want || existing.dim != dim || existing.arrayed != arrayed {
                 return Err(TranslateError::UnsupportedType(format!(
                     "texture binding {group}:{binding} is used as two kinds"
                 )));
             }
-            return Ok(*handle);
+            return Ok(existing.handle);
         }
         let ty = self.module.types.insert(
             naga::Type {
                 name: None,
                 inner: naga::TypeInner::Image {
                     dim,
-                    arrayed: false,
+                    arrayed,
                     class: image_class(want, self.sampling.multisampled_at(group, binding)),
                 },
             },
@@ -1470,7 +1512,15 @@ impl Builders {
             },
             naga::Span::default(),
         );
-        self.textures.insert((group, binding), (want, dim, handle));
+        self.textures.insert(
+            (group, binding),
+            TextureBinding {
+                kind: want,
+                dim,
+                arrayed,
+                handle,
+            },
+        );
         Ok(handle)
     }
 
@@ -1478,14 +1528,20 @@ impl Builders {
     ///
     /// Samplers carry no data the kernel can read, so nothing checks the
     /// address or filter modes here; the renderer's bind group owns them.
-    fn sampler(&mut self, group: u32, binding: u32) -> naga::Handle<naga::GlobalVariable> {
-        if let Some(handle) = self.samplers.get(&(group, binding)) {
+    /// Sampler at `(group, binding)`, filtering or comparison.
+    fn sampler_of(
+        &mut self,
+        group: u32,
+        binding: u32,
+        comparison: bool,
+    ) -> naga::Handle<naga::GlobalVariable> {
+        if let Some(handle) = self.samplers.get(&(group, binding, comparison)) {
             return *handle;
         }
         let ty = self.module.types.insert(
             naga::Type {
                 name: None,
-                inner: naga::TypeInner::Sampler { comparison: false },
+                inner: naga::TypeInner::Sampler { comparison },
             },
             naga::Span::default(),
         );
@@ -1500,7 +1556,7 @@ impl Builders {
             },
             naga::Span::default(),
         );
-        self.samplers.insert((group, binding), handle);
+        self.samplers.insert((group, binding, comparison), handle);
         handle
     }
 
@@ -4240,6 +4296,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if let Some((shape, level)) = sample_import(callee) {
             return self.image_sample_lane(out, args, shape, level);
         }
+        if let Some(shape) = compare_import(callee) {
+            return self.image_sample_compare(out, args, shape);
+        }
         if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_U32) {
             return self.texture_load_u32(out, args);
         }
@@ -4789,6 +4848,55 @@ impl<'a, 'b> Lowerer<'a, 'b> {
 
     /// `texture_sample_level_2d_f32x4(group, binding, sampler_group,
     /// sampler_binding, x, y, lane)`: one lane of `textureSampleLevel(…, 0.0)`.
+    /// The parts both sample paths share: the composed coordinate and the
+    /// image and sampler globals.
+    ///
+    /// The first [`OWNED_SAMPLE_ARGS`] operands are always the two binding
+    /// pairs, and the coordinate follows them; only what comes after the
+    /// coordinate differs between a plain sample (a level) and a depth compare
+    /// (a layer and a reference value).
+    fn sample_target(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+        kind: TextureKind,
+        shape: SampleShape,
+        arrayed: bool,
+        comparison: bool,
+    ) -> Result<SampleTarget, TranslateError> {
+        let coordinate_lanes = shape.coordinate_lanes();
+        let group = const_u32(&args[0])?;
+        let binding = const_u32(&args[1])?;
+        let sampler_group = const_u32(&args[2])?;
+        let sampler_binding = const_u32(&args[3])?;
+        let mut components = Vec::with_capacity(coordinate_lanes);
+        for index in 0..coordinate_lanes {
+            components.push(self.operand(out, &args[OWNED_SAMPLE_ARGS + index])?);
+        }
+        let coord_ty = vec_f32_type(&mut self.builders.module, coordinate_lanes as u32)
+            .ok_or(TranslateError::Unsupported)?;
+        let coordinate = self.expr(
+            out,
+            naga::Expression::Compose {
+                ty: coord_ty,
+                components,
+            },
+        );
+        let image = self
+            .builders
+            .texture_of(group, binding, kind, shape.dimension(), arrayed)?;
+        let image = self.expr(out, naga::Expression::GlobalVariable(image));
+        let sampler = self
+            .builders
+            .sampler_of(sampler_group, sampler_binding, comparison);
+        let sampler = self.expr(out, naga::Expression::GlobalVariable(sampler));
+        Ok(SampleTarget {
+            coordinate,
+            image,
+            sampler,
+        })
+    }
+
     /// One lane of `textureSample`/`textureSampleLevel` on the image shape
     /// named by the import.
     ///
@@ -4815,6 +4923,58 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if lane >= VEC4_LANES {
             return Err(TranslateError::Unsupported);
         }
+        let target = self.sample_target(out, args, TextureKind::Sampled, shape, false, false)?;
+        let level = match level {
+            SampleMip::Auto => naga::SampleLevel::Auto,
+            SampleMip::Zero => {
+                let zero = self.expr(out, naga::Expression::Literal(naga::Literal::F32(0.0)));
+                naga::SampleLevel::Exact(zero)
+            }
+            SampleMip::Operand => {
+                let lod = self.operand(out, &args[args.len() - 2])?;
+                naga::SampleLevel::Exact(lod)
+            }
+        };
+        let texel = self.expr(
+            out,
+            naga::Expression::ImageSample {
+                image: target.image,
+                sampler: target.sampler,
+                gather: None,
+                coordinate: target.coordinate,
+                array_index: None,
+                offset: None,
+                level,
+                depth_ref: None,
+                clamp_to_edge: false,
+            },
+        );
+        Ok(self.expr(
+            out,
+            naga::Expression::AccessIndex {
+                base: texel,
+                index: lane,
+            },
+        ))
+    }
+
+    /// `textureSampleCompare` of an arrayed depth image, one `f32` result.
+    ///
+    /// The operands are texture group, texture binding, sampler group,
+    /// sampler binding, the coordinate lanes, the array layer, then the
+    /// reference value. A depth compare goes through a comparison sampler;
+    /// the hardware filters the 2×2 taps into one visibility factor, which is
+    /// what a soft shadow edge is made of.
+    fn image_sample_compare(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+        shape: SampleShape,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let coordinate_lanes = shape.coordinate_lanes();
+        if args.len() != OWNED_SAMPLE_ARGS + coordinate_lanes + COMPARE_VALUE_ARGS {
+            return Err(TranslateError::Unsupported);
+        }
         let group = const_u32(&args[0])?;
         let binding = const_u32(&args[1])?;
         let sampler_group = const_u32(&args[2])?;
@@ -4832,42 +4992,32 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 components,
             },
         );
-        let image =
-            self.builders
-                .texture_of(group, binding, TextureKind::Sampled, shape.dimension())?;
+        let layer = self.operand(out, &args[args.len() - 2])?;
+        let reference = self.operand(out, &args[args.len() - 1])?;
+        let image = self.builders.texture_of(
+            group,
+            binding,
+            TextureKind::Depth,
+            shape.dimension(),
+            true,
+        )?;
         let image = self.expr(out, naga::Expression::GlobalVariable(image));
-        let sampler = self.builders.sampler(sampler_group, sampler_binding);
+        let sampler = self
+            .builders
+            .sampler_of(sampler_group, sampler_binding, true);
         let sampler = self.expr(out, naga::Expression::GlobalVariable(sampler));
-        let level = match level {
-            SampleMip::Auto => naga::SampleLevel::Auto,
-            SampleMip::Zero => {
-                let zero = self.expr(out, naga::Expression::Literal(naga::Literal::F32(0.0)));
-                naga::SampleLevel::Exact(zero)
-            }
-            SampleMip::Operand => {
-                let lod = self.operand(out, &args[args.len() - 2])?;
-                naga::SampleLevel::Exact(lod)
-            }
-        };
-        let texel = self.expr(
+        Ok(self.expr(
             out,
             naga::Expression::ImageSample {
                 image,
                 sampler,
                 gather: None,
                 coordinate,
-                array_index: None,
+                array_index: Some(layer),
                 offset: None,
-                level,
-                depth_ref: None,
+                level: naga::SampleLevel::Zero,
+                depth_ref: Some(reference),
                 clamp_to_edge: false,
-            },
-        );
-        Ok(self.expr(
-            out,
-            naga::Expression::AccessIndex {
-                base: texel,
-                index: lane,
             },
         ))
     }
@@ -6018,6 +6168,25 @@ fn operand(
 mod tests {
     use super::*;
 
+    /// Lower a fragment entry written as LLVM IR and return the module.
+    ///
+    /// Every sample-path test does the same four things — parse, pick `fs_main`
+    /// out of the module, lower it, finish — so they go through here instead of
+    /// repeating the setup.
+    fn lower_fragment(ir: &str) -> naga::Module {
+        let func = crate::parse::parse_module(ir)
+            .expect("parse")
+            .funcs
+            .into_iter()
+            .find(|func| func.name == "fs_main")
+            .expect("entry");
+        let mut lowering = Lowering::new(&[], crate::TextureSampling::SingleSample);
+        lowering
+            .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
+            .expect("lower");
+        lowering.finish()
+    }
+
     #[test]
     fn unary_math_maps_the_sdk_symbols() {
         use ornis_gpu_abi::symbols::{GPU_EXP, GPU_LN, GPU_SQRT, GPU_TAN};
@@ -6074,17 +6243,7 @@ start:
 "#,
             sample = ornis_gpu_abi::symbols::TEXTURE_SAMPLE_LEVEL_CUBE_F32X4
         );
-        let func = crate::parse::parse_module(&ir)
-            .expect("parse")
-            .funcs
-            .into_iter()
-            .find(|func| func.name == "fs_main")
-            .expect("entry");
-        let mut lowering = Lowering::new(&[], crate::TextureSampling::SingleSample);
-        lowering
-            .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
-            .expect("lower");
-        let module = lowering.finish();
+        let module = lower_fragment(&ir);
         let cube = module
             .types
             .iter()
@@ -6116,6 +6275,77 @@ start:
     }
 
     #[test]
+    fn compare_imports_name_their_shape() {
+        use ornis_gpu_abi::symbols::{
+            TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32, TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32,
+        };
+        assert_eq!(
+            compare_import(TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32),
+            Some(SampleShape::Plane)
+        );
+        assert_eq!(
+            compare_import(TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32),
+            Some(SampleShape::Cube)
+        );
+        assert_eq!(compare_import("texture_sample_2d_f32x4"), None);
+        // A compare import must not be mistaken for a plain sample: it has no
+        // level and returns a scalar visibility factor.
+        assert_eq!(sample_import(TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32), None);
+        assert_eq!(sample_import(TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32), None);
+    }
+
+    #[test]
+    fn depth_compare_samples_validate() {
+        use ornis_gpu_abi::symbols::{
+            TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32, TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32,
+        };
+        let ir = format!(
+            r#"
+declare float @{plane}(i32, i32, i32, i32, float, float, i32, float)
+declare float @{cube}(i32, i32, i32, i32, float, float, float, i32, float)
+declare void @fragment_store_f32x4(float, float, float, float)
+define void @fs_main() {{
+start:
+  %a = call float @{plane}(i32 0, i32 0, i32 0, i32 1, float 5.000000e-01, float 5.000000e-01, i32 0, float 9.900000e-01)
+  %b = call float @{cube}(i32 0, i32 2, i32 0, i32 1, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, i32 1, float 9.900000e-01)
+  %s = fadd float %a, %b
+  call void @fragment_store_f32x4(float %s, float %s, float %s, float %s)
+  ret void
+}}
+"#,
+            plane = TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32,
+            cube = TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32
+        );
+        let module = lower_fragment(&ir);
+        // Both samples compare, so both carry a depth reference and read an
+        // arrayed depth image through a comparison sampler.
+        let compared = module
+            .entry_points
+            .iter()
+            .flat_map(|entry| entry.function.expressions.iter())
+            .any(|(_, expr)| {
+                matches!(
+                    expr,
+                    naga::Expression::ImageSample {
+                        depth_ref: Some(_),
+                        array_index: Some(_),
+                        ..
+                    }
+                )
+            });
+        assert!(
+            compared,
+            "a compare sample carries depth_ref and array_index"
+        );
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("depth compare samples validate");
+    }
+
+    #[test]
     fn cube_and_auto_level_samples_validate() {
         // A cube at an explicit level (the prefiltered IBL chain) and a 2D at
         // the level the derivatives pick (the BRDF LUT). naga is the only place
@@ -6139,17 +6369,7 @@ start:
             cube = TEXTURE_SAMPLE_LEVEL_CUBE_F32X4,
             plane = TEXTURE_SAMPLE_2D_F32X4
         );
-        let func = crate::parse::parse_module(&ir)
-            .expect("parse")
-            .funcs
-            .into_iter()
-            .find(|func| func.name == "fs_main")
-            .expect("entry");
-        let mut lowering = Lowering::new(&[], crate::TextureSampling::SingleSample);
-        lowering
-            .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
-            .expect("lower");
-        let module = lowering.finish();
+        let module = lower_fragment(&ir);
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
@@ -6179,17 +6399,7 @@ start:
 "#,
             dx = GPU_DPDX
         );
-        let func = crate::parse::parse_module(&ir)
-            .expect("parse")
-            .funcs
-            .into_iter()
-            .find(|func| func.name == "fs_main")
-            .expect("entry");
-        let mut lowering = Lowering::new(&[], crate::TextureSampling::SingleSample);
-        lowering
-            .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
-            .expect("lower");
-        let module = lowering.finish();
+        let module = lower_fragment(&ir);
         let has_derivative = module.entry_points.iter().any(|entry| {
             entry
                 .function

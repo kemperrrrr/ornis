@@ -209,6 +209,111 @@ impl<const G: u32, const B: u32> Clone for TextureCube<G, B> {
 
 impl<const G: u32, const B: u32> Copy for TextureCube<G, B> {}
 
+/// `texture_depth_2d_array` at `(G, B)` — the shadow-map pool.
+///
+/// One layer per shadow-casting light, read through a comparison sampler: the
+/// reference depth is the fragment's own, and the result is the filtered
+/// visibility factor rather than a raw texel.
+pub struct DepthTexture2dArray<const G: u32, const B: u32> {
+    _binding: core::marker::PhantomData<fn() -> u32>,
+}
+
+impl<const G: u32, const B: u32> DepthTexture2dArray<G, B> {
+    /// Visibility of `reference` at `uv` in `layer`, as
+    /// `textureSampleCompare(tex, sampler, uv, layer, reference)`.
+    ///
+    /// `reference` is the fragment's depth in the light's clip space minus the
+    /// bias, so `1` means lit and `0` fully shadowed.
+    #[inline(always)]
+    pub fn sample_compare<const SG: u32, const SB: u32>(
+        &self,
+        sampler: ComparisonSampler<SG, SB>,
+        x: f32,
+        y: f32,
+        layer: u32,
+        reference: f32,
+    ) -> f32 {
+        let _ = (self, sampler);
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::texture_sample_compare_2d_array(G, B, SG, SB, x, y, layer, reference)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (x, y, layer, reference);
+            crate::host_unavailable()
+        }
+    }
+}
+
+/// `texture_depth_cube_array` at `(G, B)` — the point-light shadow pool.
+///
+/// Sampled with the fragment→light direction, so the hardware picks the face;
+/// `layer` picks the light.
+pub struct DepthCubeArray<const G: u32, const B: u32> {
+    _binding: core::marker::PhantomData<fn() -> u32>,
+}
+
+impl<const G: u32, const B: u32> DepthCubeArray<G, B> {
+    /// Visibility of `reference` along `dir` in `layer`.
+    #[inline(always)]
+    pub fn sample_compare<const SG: u32, const SB: u32>(
+        &self,
+        sampler: ComparisonSampler<SG, SB>,
+        dir: Vec3,
+        layer: u32,
+        reference: f32,
+    ) -> f32 {
+        let _ = (self, sampler);
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::texture_sample_compare_cube_array(
+                G, B, SG, SB, dir.x, dir.y, dir.z, layer, reference,
+            )
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (dir, layer, reference);
+            crate::host_unavailable()
+        }
+    }
+}
+
+impl<const G: u32, const B: u32> Clone for DepthTexture2dArray<G, B> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<const G: u32, const B: u32> Copy for DepthTexture2dArray<G, B> {}
+
+impl<const G: u32, const B: u32> Clone for DepthCubeArray<G, B> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<const G: u32, const B: u32> Copy for DepthCubeArray<G, B> {}
+
+/// Comparison sampler at `(G, B)`.
+///
+/// A comparison sampler is a distinct WGSL type: a depth image sampled through
+/// a filtering sampler is a validation error, not a slower path.
+pub struct ComparisonSampler<const G: u32, const B: u32> {
+    _binding: core::marker::PhantomData<fn() -> u32>,
+}
+
+impl<const G: u32, const B: u32> Clone for ComparisonSampler<G, B> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<const G: u32, const B: u32> Copy for ComparisonSampler<G, B> {}
+
 /// `texture_depth_2d` at `(G, B)`.
 pub struct DepthTexture2d<const G: u32, const B: u32> {
     _binding: core::marker::PhantomData<fn() -> u32>,
@@ -293,6 +398,9 @@ impl<const G: u32, const B: u32> Copy for Sampler<G, B> {}
 const _: () = {
     assert!(core::mem::size_of::<Texture2d<0, 0>>() == 0);
     assert!(core::mem::size_of::<TextureCube<0, 0>>() == 0);
+    assert!(core::mem::size_of::<DepthTexture2dArray<0, 0>>() == 0);
+    assert!(core::mem::size_of::<DepthCubeArray<0, 0>>() == 0);
+    assert!(core::mem::size_of::<ComparisonSampler<0, 0>>() == 0);
     assert!(core::mem::size_of::<DepthTexture2d<0, 0>>() == 0);
     assert!(core::mem::size_of::<Sampler<0, 0>>() == 0);
 };
