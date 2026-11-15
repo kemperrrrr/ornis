@@ -27,6 +27,7 @@ use raw_window_handle::{
 
 use super::frame::{FrameStats, SurfaceSpec, ViewportFrame};
 use super::layout::ViewportPlacement;
+use super::logic::PlacementStep;
 
 /// Storage buffers the render shader stages require (same as the runner).
 const MAX_STORAGE_BUFFERS_PER_STAGE: u32 = 8;
@@ -181,12 +182,22 @@ fn swap_chain_config(
 
 /// Native viewport: one layer-backed `NSView` below the webview plus the GPU
 /// state that draws into it.
+///
+/// # Drop order
+///
+/// Fields are dropped in declaration order, so `view` comes **last**: the
+/// `wgpu::Surface` was created from a raw handle into that view's layer
+/// ([`NativeViewport::new`]) and must be destroyed first. Reading top to
+/// bottom, everything a surface depends on (itself, the device, the queue, the
+/// frame state) goes before the `NSView` it borrows from — that is the
+/// invariant `create_surface_unsafe` was called under, and keeping `view` last
+/// is what makes it hold at teardown instead of relying on the superview to
+/// outlive the struct by luck.
+///
+/// `Drop` additionally detaches the view from its superview, so a destroyed
+/// viewport leaves no hidden layer-backed `NSView` under the webview.
 pub struct NativeViewport {
-    /// The inserted view. `NSView` is retained by its superview, but the field
-    /// also keeps the pointer wgpu was given valid for the surface's lifetime.
-    view: Retained<NSView>,
-    /// Surface created from the view's layer; `'static` because both `view`
-    /// (dropped last) and the surface live in this struct.
+    /// Surface created from the view's layer. Declared first: dropped first.
     surface: wgpu::Surface<'static>,
     /// Device the surface and the frame state share.
     device: wgpu::Device,
@@ -198,6 +209,11 @@ pub struct NativeViewport {
     frame: ViewportFrame,
     /// Placement last applied, to skip a redundant move/resize.
     placement: Option<ViewportPlacement>,
+    /// The inserted view. **Last on purpose** (see the type docs): the surface
+    /// above is built on this view's layer, so it must outlive it at teardown.
+    /// `NSView` is also retained by its superview, but the field is what keeps
+    /// the raw pointer wgpu was handed valid for the surface's lifetime.
+    view: Retained<NSView>,
 }
 
 impl NativeViewport {
@@ -252,16 +268,18 @@ impl NativeViewport {
         parent.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, anchor);
 
         // SAFETY: `view` is a live, layer-backed `NSView` that outlives the
-        // surface (it is `self.view` and a subview of `parent`).
+        // surface — `view` is the **last** field of `Self` (see the type docs),
+        // so the surface is destroyed before it. `Gpu::for_view` only stores a
+        // surface built from this view's layer.
         let gpu = unsafe { Gpu::for_view(&view)? };
         Ok(Self {
-            view,
             surface: gpu.surface,
             device: gpu.device,
             queue: gpu.queue,
             config: gpu.config,
             frame: gpu.frame,
             placement: None,
+            view,
         })
     }
 
@@ -347,37 +365,24 @@ impl NativeViewport {
     }
 }
 
-/// What a new placement requires from the AppKit view and the swap chain.
-///
-/// The interesting rule — "a move must not reallocate GPU targets" — is a pure
-/// decision over two placements, so it is testable without a window, a GPU or
-/// an `NSView`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlacementStep {
-    /// Same rectangle: nothing to do (a repeated bounds post).
-    Unchanged,
-    /// Moved, same size: only the view frame changes.
-    MoveOnly,
-    /// Size changed: view frame and swap chain both move.
-    Resize,
-}
-
-impl PlacementStep {
-    /// Decides the step between the last applied placement and a new one.
+impl Drop for NativeViewport {
+    /// Detaches the view from its superview before the fields go.
     ///
-    /// `previous: None` means nothing is placed yet (first post after startup
-    /// or after the viewport was hidden), which is always a full `Resize`.
-    pub fn decide(previous: Option<ViewportPlacement>, next: ViewportPlacement) -> Self {
-        let Some(previous) = previous else {
-            return Self::Resize;
-        };
-        if previous.needs_surface_resize(next) {
-            Self::Resize
-        } else if previous.needs_frame_change(next) {
-            Self::MoveOnly
-        } else {
-            Self::Unchanged
-        }
+    /// Without this the `NSView` would stay in the webview's superview as a
+    /// hidden, layer-backed sibling holding a `CAMetalLayer` and whatever the
+    /// last presented drawable left in it — invisible, but still composited and
+    /// still retaining GPU resources for as long as the window lives.
+    ///
+    /// The other fields are dropped by the compiler in declaration order right
+    /// after this returns, with `view` last (see the type docs); detaching here
+    /// cannot invalidate the surface, because `removeFromSuperview` only
+    /// unlinks the view from its parent — the view object itself stays alive
+    /// until its own field is dropped.
+    fn drop(&mut self) {
+        // `removeFromSuperview` unlinks the view from whatever superview holds
+        // it; with no superview it is a documented no-op, so this is safe and
+        // needs no SAFETY note.
+        self.view.removeFromSuperview();
     }
 }
 

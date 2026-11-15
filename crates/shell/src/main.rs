@@ -38,6 +38,9 @@ use editor_backend::ipc::{EventSeq, GameEvent, RequestId, UiCommand};
 #[cfg(target_os = "macos")]
 use ornis_shell::native_viewport::ViewportHost;
 use ornis_shell::options::{OptionAction, USAGE};
+// Only the non-macOS branch prints this: macOS hosts build the viewport.
+#[cfg(not(target_os = "macos"))]
+use ornis_shell::NATIVE_VIEWPORT_HOST_UNSUPPORTED;
 #[cfg(target_os = "macos")]
 use ornis_shell::scene_snapshot_json;
 use ornis_shell::{
@@ -345,9 +348,7 @@ impl ApplicationHandler<ShellEvent> for ShellApp {
         }
         #[cfg(not(target_os = "macos"))]
         if self.native_viewport {
-            eprintln!(
-                "ornis-shell: --native-viewport is macOS-only in this prototype;                  the viewport stays in Chrome — cargo xtask editor"
-            );
+            eprintln!("{}", NATIVE_VIEWPORT_HOST_UNSUPPORTED);
         }
         self.window = Some(window);
         self.webview = Some(webview);

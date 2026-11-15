@@ -24,6 +24,15 @@
 pub const WEBGPU_UNAVAILABLE_NOTICE: &str = "WebGPU недоступен в WKWebView — живой вьюпорт \
      открывается в Chrome через `cargo xtask editor`";
 
+/// Message for a host whose build has no native viewport (non-macOS).
+///
+/// A constant rather than an inline literal so the wording is testable on
+/// Linux and cannot regress into a line-break artefact: `eprintln!` continues a
+/// literal across lines, and a missing `\` silently bakes the source indent
+/// into the output.
+pub const NATIVE_VIEWPORT_HOST_UNSUPPORTED: &str = "ornis-shell: --native-viewport is \
+     macOS-only in this prototype; the viewport stays in Chrome — cargo xtask editor";
+
 /// Shell marker the page reads to pick its rendering path.
 ///
 /// `native_viewport` is `true` when the shell renders the scene itself in a
@@ -116,6 +125,20 @@ mod tests {
         // Short enough to sit inside a viewport box without scrolling.
         assert!(WEBGPU_UNAVAILABLE_NOTICE.chars().count() <= 160);
         assert!(!WEBGPU_UNAVAILABLE_NOTICE.contains('\n'));
+    }
+
+    #[test]
+    fn the_non_macos_viewport_message_has_no_layout_artefacts() {
+        // The bug this pins: a wrapped `eprintln!` literal without `\` put the
+        // source indentation into the message.
+        assert!(
+            !NATIVE_VIEWPORT_HOST_UNSUPPORTED.contains("  "),
+            "no run of spaces may reach the user: {NATIVE_VIEWPORT_HOST_UNSUPPORTED:?}"
+        );
+        assert!(!NATIVE_VIEWPORT_HOST_UNSUPPORTED.contains('\n'));
+        assert!(NATIVE_VIEWPORT_HOST_UNSUPPORTED.contains("--native-viewport"));
+        assert!(NATIVE_VIEWPORT_HOST_UNSUPPORTED.contains("macOS-only"));
+        assert!(NATIVE_VIEWPORT_HOST_UNSUPPORTED.contains("cargo xtask editor"));
     }
 
     #[test]

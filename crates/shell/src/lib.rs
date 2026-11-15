@@ -44,7 +44,7 @@ pub use bridge::{
 };
 pub use error::{AssetError, BridgeError};
 pub use native_viewport::{ViewFrame, ViewportPlacement};
-pub use notice::{ShellCapabilities, WEBGPU_UNAVAILABLE_NOTICE};
+pub use notice::{NATIVE_VIEWPORT_HOST_UNSUPPORTED, ShellCapabilities, WEBGPU_UNAVAILABLE_NOTICE};
 pub use options::{OptionAction, ParseOutcome, ShellOptions, USAGE, parse_args};
 pub use probe::probe_page;
 pub use runtime::{pump_events, spawn_event_pump, start_engine};

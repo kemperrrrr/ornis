@@ -1,4 +1,8 @@
 [toolchain]
 channel = "1.97.1"
 components = ["rustfmt", "clippy"]
-targets = ["wasm32-unknown-unknown"]
+# wasm32: the browser viewport crate.
+# aarch64-apple-darwin: `shell-macos` cross-checks the macOS-only native
+# viewport (crates/shell/src/native_viewport) from Linux, where no shard would
+# otherwise compile it. Clippy/check do not link, so no macOS host is needed.
+targets = ["wasm32-unknown-unknown", "aarch64-apple-darwin"]

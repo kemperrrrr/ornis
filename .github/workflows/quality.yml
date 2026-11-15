@@ -114,7 +114,9 @@ jobs:
   #            GPU half and the render `try_device` gates (which the test
   #            shard skips without an adapter); the xtask stages themselves
   #            do not force that variable.
-  #   docs   — doc, wasm-check
+  #   docs   — doc, wasm-check, shell-macos (Apple-target clippy for the
+#            macOS-only native viewport: ~1250 lines that no ubuntu job would
+#            otherwise compile), build-shaders
   fast:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -443,6 +445,14 @@ jobs:
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
 
+      # The native viewport lives behind `cfg(target_os = "macos")`, so the
+      # `shell-macos` stage cross-checks its ~1250 lines (all the `unsafe`
+      # AppKit blocks included) against the Apple target from this Linux
+      # runner. Clippy does not link, so no macOS host or Xcode is needed —
+      # only the target's std.
+      - name: Install aarch64-apple-darwin target
+        run: rustup target add aarch64-apple-darwin
+
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -456,7 +466,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p target
-          cargo xtask quality --ci --only doc,wasm-check,build-shaders 2>&1 | tee target/quality-docs.log
+          cargo xtask quality --ci --only doc,wasm-check,shell-macos,build-shaders 2>&1 | tee target/quality-docs.log
 
       - name: Upload shard log
         if: always()

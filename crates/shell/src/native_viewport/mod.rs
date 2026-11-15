@@ -24,6 +24,7 @@
 //! the pure layout helpers, so the shell still builds and tests everywhere.
 
 pub mod layout;
+pub mod logic;
 
 #[cfg(target_os = "macos")]
 pub mod frame;
@@ -35,7 +36,10 @@ pub mod platform;
 #[cfg(target_os = "macos")]
 pub use frame::{FrameStats, SurfaceSpec, ViewportFrame};
 #[cfg(target_os = "macos")]
-pub use host::{HostError, MAX_FRAME_STEP, ViewportHost, clamp_frame_step};
+pub use host::{HostError, ViewportHost};
 pub use layout::{ViewFrame, ViewportPlacement};
+pub use logic::{BoundsUpdate, MAX_FRAME_STEP, PlacementStep, clamp_frame_step};
+#[cfg(target_os = "macos")]
+pub use logic::{parse_scene_body, resolve_content_height};
 #[cfg(target_os = "macos")]
 pub use platform::{NativeViewport, ViewportError};
