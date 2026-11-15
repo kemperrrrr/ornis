@@ -104,11 +104,19 @@ impl GizmoDrag {
     }
 
     /// Quantizes only the active drag channel (E4): Move snaps the dragged
-    /// coordinate to the absolute world grid along the handle axis (or the
-    /// two in-plane axes), Scale snaps the dragged component, Rotate snaps
-    /// the absolute angle around the handle axis to the angle grid. Every
-    /// other channel is returned bit-exact; snap off returns the preview
-    /// unchanged.
+    /// coordinate to the absolute grid along the handle axis (or the two
+    /// in-plane axes), Scale snaps the dragged component, Rotate snaps the
+    /// absolute angle around the handle axis to the angle grid. Every other
+    /// channel is returned bit-exact; snap off returns the preview unchanged.
+    ///
+    /// Both grids are absolute, so they fire on the very first preview: with
+    /// snap on, a selection off the grid jumps onto it from a one-pixel mouse
+    /// move — or from no motion at all — for Move along the handle axis and
+    /// for Rotate to the nearest angle around it. That counts as a moved
+    /// drag, so an undo entry appears. The Move grid is anchored at the world
+    /// origin and measured along the handle axis; in Local space the axis is
+    /// `R·e`, so the grid follows the rotated axis rather than the world
+    /// basis.
     ///
     /// Rotate's grid is anchored at the zero-twist orientation of the
     /// selection's swing-twist decomposition about the handle axis, so a
@@ -142,28 +150,33 @@ impl GizmoDrag {
         transform
     }
 
-    /// Snaps the dragged coordinate to the absolute world grid along the
-    /// handle axis, keeping the perpendicular components at their start
-    /// values. `axis` is already world-space in both spaces (`R·e` for
-    /// Local), so the grid is measured in the handle's own frame and a Local
-    /// drag stays on its axis. The grid is anchored at the world origin, not
-    /// at the press point: an object at `x = 0.1` dragged by `1.0` with step
-    /// `0.5` lands on `1.0`, not `1.1`.
+    /// Snaps the dragged coordinate to the absolute grid along the handle
+    /// axis, keeping the perpendicular components at their start values.
+    /// `axis` is already world-space in both spaces (`R·e` for Local), so the
+    /// grid is the family of planes perpendicular to that axis, spaced by the
+    /// step and anchored at the world origin — not the world-axis-aligned
+    /// grid. In World the axis is a world basis vector and the two coincide;
+    /// in Local the grid follows the rotated axis, which is what keeps a Local
+    /// drag on its own axis. The grid is anchored at the origin, not at the
+    /// press point: an object at `x = 0.1` dragged by `1.0` with step `0.5`
+    /// lands on `1.0`, not `1.1`.
     fn snap_axis_move(&self, translation: Vec3, snap: &SnapSettings) -> Vec3 {
         let start = self.start.translation;
-        let snapped = snap.snap_offset(translation.dot(self.axis));
+        let snapped = snap.snap_coordinate(translation.dot(self.axis));
         start + self.axis * (snapped - start.dot(self.axis))
     }
 
-    /// Snaps both in-plane coordinates of a plane handle to the absolute
-    /// world grid, independently and in the handle's own (World/Local)
-    /// basis, keeping the out-of-plane component at its start value.
+    /// Snaps both in-plane coordinates of a plane handle to the absolute grid,
+    /// independently and in the handle's own (World/Local) basis, keeping the
+    /// out-of-plane component at its start value. As in [`Self::snap_axis_move`]
+    /// the grid is measured along the handle's axes, so a Local plane handle
+    /// snaps to the rotated basis rather than the world one.
     fn snap_plane_move(&self, translation: Vec3, snap: &SnapSettings) -> Vec3 {
         let (a, b) = plane_directions(&self.start, self.handle);
         let start = self.start.translation;
         start
-            + a * (snap.snap_offset(translation.dot(a)) - start.dot(a))
-            + b * (snap.snap_offset(translation.dot(b)) - start.dot(b))
+            + a * (snap.snap_coordinate(translation.dot(a)) - start.dot(a))
+            + b * (snap.snap_coordinate(translation.dot(b)) - start.dot(b))
     }
 
     /// Snaps the absolute angle around the handle axis to the rotate grid.
@@ -179,10 +192,20 @@ impl GizmoDrag {
     /// rotation about `axis` over `start.rotation`, so the swing travels along
     /// the drag path and the result never leaves the handle axis.
     ///
-    /// The angle is canonicalized to `[-180°, 180°]`, so a step that does not
-    /// divide 360° has a seam at ±180°. A half-turn about an axis
-    /// perpendicular to `axis` has no twist at all; there the increment since
-    /// the press is quantized instead, so the drag still snaps.
+    /// The angle is canonicalized to `[-180°, 180°]` and the grid closes the
+    /// circle ([`SnapSettings::snap_angle`] coerces the step to a divisor of
+    /// 360°), so crossing ±180° costs one step like any other grid crossing.
+    /// A half-turn about an axis perpendicular to `axis` has no twist at all;
+    /// there the increment since the press is quantized instead, so the drag
+    /// still snaps.
+    ///
+    /// The result keeps the quaternion sign of the start orientation. Across
+    /// the seam the angle to the grid point exceeds a half-turn, which flips
+    /// the sign of the composed quaternion: `q` and `-q` are the same rotation
+    /// but not the same value, and [`TransformDesc`] equality drives the
+    /// `moved` flag and undo dedup. Canonicalizing to the start's hemisphere
+    /// makes one orientation one value, so a snap that lands back on the start
+    /// compares equal and commits no undo.
     // qual:allow(iosp) reason: "one rotation-snap step: absolute-angle recovery, quantization and quaternion composition belong together (mirrors apply_rotate)"
     fn snap_rotate(&self, rotation: UnitQuat, snap: &SnapSettings) -> UnitQuat {
         if snap.rotate_deg <= 0.0 {
@@ -196,9 +219,13 @@ impl GizmoDrag {
             (Some(absolute), Some(from)) => snap.snap_angle(absolute) - from,
             _ => snap.snap_angle(swept_angle(rotation.get(), start, self.axis)),
         };
-        UnitQuat::normalize(Quat::from_axis_angle(self.axis, angle))
-            .and_then(|delta| UnitQuat::normalize(delta.get() * start))
-            .unwrap_or(rotation)
+        let snapped = Quat::from_axis_angle(self.axis, angle) * start;
+        let snapped = if snapped.dot(start) < 0.0 {
+            -snapped
+        } else {
+            snapped
+        };
+        UnitQuat::normalize(snapped).unwrap_or(rotation)
     }
 
     /// Axis translation: offset along `axis` since the press.

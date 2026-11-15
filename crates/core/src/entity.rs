@@ -238,8 +238,10 @@ impl EntityAllocator {
 
     /// Marks an entity as dead and queues its id for reuse.
     ///
-    /// Bumps the id's generation, invalidating every outstanding handle
-    /// to it. Deallocating an unknown or already-dead id is a no-op.
+    /// Bumps the id's generation to at least the slot's floor, invalidating
+    /// every outstanding handle to it — including one a newer allocator
+    /// issued for the same slot (see [`Self::advance_generations_past`]).
+    /// Deallocating an unknown or already-dead id is a no-op.
     pub fn deallocate(&mut self, entity: Entity) {
         // Idempotent: concurrent `destroy_entity` calls for the same handle
         // must not push one id onto the free list twice — duplicates would
@@ -249,7 +251,8 @@ impl EntityAllocator {
             return;
         }
         let idx = entity.id.index();
-        self.generations[idx] = entity.generation.as_u32().wrapping_add(1);
+        let floor = self.min_next_generation.get(idx).copied().unwrap_or(0);
+        self.generations[idx] = entity.generation.as_u32().wrapping_add(1).max(floor);
         self.free_list.push(entity.id.as_u32());
     }
 
@@ -272,10 +275,11 @@ impl EntityAllocator {
     /// named a different entity.
     ///
     /// Handles alive here stay alive: the floor bounds what the *next*
-    /// allocate of a slot may issue, not its current generation. That covers
-    /// all three cases — a slot alive here that `live` recycled, a slot freed
-    /// here, and a slot `live` created beyond this allocator's frontier
-    /// (which stays unallocated, so it never reports as alive).
+    /// allocate of a slot may issue and what [`Self::deallocate`] may retire
+    /// it to, not its current generation. That covers all three cases — a
+    /// slot alive here that `live` recycled, a slot freed here, and a slot
+    /// `live` created beyond this allocator's frontier (which stays
+    /// unallocated, so it never reports as alive).
     ///
     /// A slot already freed here has no handle left to preserve, so its
     /// generation moves to the floor outright: a handle `live` issued for it
@@ -283,8 +287,19 @@ impl EntityAllocator {
     ///
     /// Generations wrap at `u32::MAX` just as [`Self::deallocate`] does, so
     /// the guarantee holds until a single slot has been recycled 2^32 times.
+    ///
+    /// Total in `live`: a shorter `live` (one that never saw this allocator's
+    /// later slots) leaves those slots' floors at zero rather than panicking
+    /// on a freed id past its frontier. On the E4 Stop path `live` is a grown
+    /// clone, so this only matters for other callers of the public API.
     pub fn advance_generations_past(&mut self, live: &Self) {
-        let len = self.min_next_generation.len().max(live.generations.len());
+        // Own slots must be covered too: `free_list` ids index the floor
+        // table below, and `live` may be shorter than this allocator.
+        let len = self
+            .min_next_generation
+            .len()
+            .max(live.generations.len())
+            .max(self.generations.len());
         self.min_next_generation.resize(len, 0);
         for (idx, &issued) in live.generations.iter().enumerate() {
             let floor = issued.wrapping_add(1);
@@ -412,6 +427,74 @@ mod tests {
         assert_eq!(next.id(), hero.id());
         assert_ne!(next, recycled, "{next:?} already named a Play entity");
         assert_ne!(next, hero);
+    }
+
+    /// Retiring that restored handle must not resurrect the Play handle of
+    /// the same slot (E4 review, Editor blocker): `deallocate` writes
+    /// `gen + 1`, which for a slot Play recycled *is* the Play generation, so
+    /// the stale handle reported alive on a free slot, a second `deallocate`
+    /// of it passed the idempotency guard and queued the id twice, and two
+    /// allocates then handed out the same entity.
+    #[test]
+    fn deallocate_floors_the_generation_so_a_play_handle_stays_dead() {
+        let mut snapshot = EntityAllocator::new();
+        let hero = snapshot.allocate();
+
+        let mut live = snapshot.clone();
+        live.deallocate(hero);
+        let recycled = live.allocate();
+        assert_eq!(recycled.id(), hero.id());
+        assert_ne!(recycled.generation(), hero.generation());
+
+        snapshot.advance_generations_past(&live);
+        assert!(snapshot.is_alive(hero));
+        snapshot.deallocate(hero);
+        assert!(
+            !snapshot.is_alive(recycled),
+            "{recycled:?} named a Play entity, but its slot is free now"
+        );
+        // The stale Play handle must not queue the id a second time.
+        snapshot.deallocate(recycled);
+        let first = snapshot.allocate();
+        let second = snapshot.allocate();
+        assert_ne!(
+            first, second,
+            "the id was queued twice, both allocates returned {first:?}"
+        );
+        assert_ne!(first, recycled);
+        assert_ne!(second, recycled);
+    }
+
+    /// A `live` allocator shorter than this one must not panic on a freed id
+    /// past its frontier (E4 review, Core): the floor table covers every own
+    /// slot, and slots `live` never saw keep a zero floor.
+    #[test]
+    fn advance_generations_past_tolerates_a_shorter_live_allocator() {
+        let mut snapshot = EntityAllocator::new();
+        let kept = snapshot.allocate();
+        let freed = snapshot.allocate();
+        let also_freed = snapshot.allocate();
+        snapshot.deallocate(freed);
+        snapshot.deallocate(also_freed);
+
+        // Only two slots: the snapshot's third freed id is past this frontier.
+        let mut live = EntityAllocator::new();
+        let play_kept = live.allocate();
+        let play_freed = live.allocate();
+        live.deallocate(play_freed);
+        let play_handle = live.allocate();
+        assert_eq!(play_handle.id(), play_freed.id());
+        assert!(live.generations.len() < snapshot.generations.len());
+
+        snapshot.advance_generations_past(&live);
+        assert!(snapshot.is_alive(kept));
+        assert_eq!(kept, play_kept);
+        assert!(
+            !snapshot.is_alive(play_handle),
+            "{play_handle:?} named a Play entity on a freed slot"
+        );
+        let next = snapshot.allocate();
+        assert_ne!(next, play_handle);
     }
 
     /// A Play handle for a slot the snapshot had already freed must be dead

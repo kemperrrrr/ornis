@@ -596,6 +596,49 @@ pub type RunCondition = Arc<dyn Fn(&Resources) -> bool + Send + Sync>;
 /// Bits per word of the per-system gate bitset.
 const GATE_WORD_BITS: usize = u64::BITS as usize;
 
+/// Per-system gate decisions for one frame. The first word lives inline, so a
+/// plan of up to 64 systems allocates nothing at the frame boundary; larger
+/// plans spill the remaining words to the heap.
+struct GateBits {
+    head: u64,
+    tail: Vec<u64>,
+}
+
+impl GateBits {
+    /// Zeroed decisions for `len` systems.
+    fn new(len: usize) -> Self {
+        Self {
+            head: 0,
+            tail: vec![0; len.saturating_sub(GATE_WORD_BITS).div_ceil(GATE_WORD_BITS)],
+        }
+    }
+
+    /// Permits the system at `index`.
+    fn set(&mut self, index: usize) {
+        let bit = 1u64 << (index % GATE_WORD_BITS);
+        if index < GATE_WORD_BITS {
+            self.head |= bit;
+        } else {
+            self.tail[index / GATE_WORD_BITS - 1] |= bit;
+        }
+    }
+
+    /// Whether the system at `index` may run. An index past the evaluated
+    /// plan is never permitted, so gates taken from a shorter plan skip
+    /// systems instead of panicking on the bitset index.
+    fn permits(&self, index: usize) -> bool {
+        let word = if index < GATE_WORD_BITS {
+            self.head
+        } else {
+            self.tail
+                .get(index / GATE_WORD_BITS - 1)
+                .copied()
+                .unwrap_or(0)
+        };
+        word & (1u64 << (index % GATE_WORD_BITS)) != 0
+    }
+}
+
 /// One frame's run-condition decisions for a [`Schedule`], produced by
 /// [`Schedule::evaluate_gates`] and consumed by
 /// [`Schedule::run_with_gates`].
@@ -604,11 +647,18 @@ const GATE_WORD_BITS: usize = u64::BITS as usize;
 /// the gate at the frame boundary (to freeze the fixed clock) and then run
 /// several fixed ticks against that same reading, instead of re-asking the
 /// predicate per tick.
+///
+/// The decisions belong to the plan they were evaluated for:
+/// [`Schedule::run_with_gates`] asserts the system count matches, and a
+/// system past the evaluated plan is skipped rather than run.
 pub struct ScheduleGates {
     permits: bool,
-    /// One bit per system (set = may run), or `None` when the plan installs
-    /// no per-system condition — the ungated path allocates nothing.
-    systems: Option<Vec<u64>>,
+    /// System count the decisions were evaluated for.
+    systems_len: usize,
+    /// One bit per system (set = may run), or `None` when no per-system
+    /// decision was taken — the plan installs no condition, or its whole-plan
+    /// gate closed. Both paths allocate nothing.
+    systems: Option<GateBits>,
 }
 
 impl ScheduleGates {
@@ -619,9 +669,7 @@ impl ScheduleGates {
     }
 
     fn permits_system(&self, index: usize) -> bool {
-        self.systems.as_ref().is_none_or(|bits| {
-            bits[index / GATE_WORD_BITS] & (1u64 << (index % GATE_WORD_BITS)) != 0
-        })
+        self.systems.as_ref().is_none_or(|bits| bits.permits(index))
     }
 }
 
@@ -1106,33 +1154,33 @@ impl Schedule {
     /// called once per frame rather than once per tick, and all systems of
     /// the frame share one decision. A closed whole-plan gate short-circuits
     /// before the per-system predicates. A plan with no per-system condition
-    /// allocates nothing.
+    /// allocates nothing, and one of up to 64 systems stores its decisions in
+    /// an inline word — the frame boundary never allocates for either.
     #[must_use]
     pub fn evaluate_gates(&self, resources: &Resources) -> ScheduleGates {
-        if !self.schedule_permits(resources) {
-            return ScheduleGates {
-                permits: false,
-                systems: None,
-            };
-        }
-        let systems = if self.conditions.iter().any(Option::is_some) {
-            let mut bits = vec![0u64; self.conditions.len().div_ceil(GATE_WORD_BITS)];
-            for (index, condition) in self.conditions.iter().enumerate() {
-                if condition
-                    .as_ref()
-                    .is_none_or(|condition| condition(resources))
-                {
-                    bits[index / GATE_WORD_BITS] |= 1u64 << (index % GATE_WORD_BITS);
-                }
-            }
-            Some(bits)
-        } else {
-            None
-        };
+        let systems_len = self.conditions.len();
+        let permits = self.schedule_permits(resources);
+        let systems = (permits && self.conditions.iter().any(Option::is_some))
+            .then(|| self.evaluate_system_gates(resources));
         ScheduleGates {
-            permits: true,
+            permits,
+            systems_len,
             systems,
         }
+    }
+
+    /// Per-system decisions of a plan whose whole-plan gate is open.
+    fn evaluate_system_gates(&self, resources: &Resources) -> GateBits {
+        let mut bits = GateBits::new(self.conditions.len());
+        for (index, condition) in self.conditions.iter().enumerate() {
+            if condition
+                .as_ref()
+                .is_none_or(|condition| condition(resources))
+            {
+                bits.set(index);
+            }
+        }
+        bits
     }
 
     /// Executes the schedule over the world.
@@ -1143,7 +1191,21 @@ impl Schedule {
     /// Executes the schedule with the conditions already evaluated by
     /// [`Schedule::evaluate_gates`], so several runs in one frame (the fixed
     /// ticks) reuse a single reading of the gated resources.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, when `gates` was evaluated for a plan with a different
+    /// system count — gates belong to the schedule that produced them. In
+    /// release builds a system past the evaluated plan is skipped, so a
+    /// mismatched bitset never panics on its index.
     pub fn run_with_gates(&self, resources: &Resources, gates: &ScheduleGates) {
+        debug_assert_eq!(
+            gates.systems_len,
+            self.systems.len(),
+            "ScheduleGates were evaluated for {} systems, this plan has {}",
+            gates.systems_len,
+            self.systems.len()
+        );
         if !gates.permits {
             return;
         }
@@ -1520,6 +1582,61 @@ mod tests {
             sched.set_run_condition("ghost", None),
             Err(OrderError::UnknownNode { .. })
         ));
+    }
+
+    /// Gates taken from a shorter plan must skip the systems past the bitset
+    /// instead of panicking on its index (E4 review, Grok Bot 5). Both the
+    /// inline word and the heap spill are total, including an index that
+    /// would overflow the word shift.
+    #[test]
+    fn gate_bits_past_the_evaluated_plan_are_not_permitted() {
+        let mut inline = GateBits::new(2);
+        inline.set(0);
+        inline.set(1);
+        assert!(inline.permits(0));
+        assert!(inline.permits(1));
+        for index in [2, GATE_WORD_BITS, GATE_WORD_BITS + 1, usize::MAX] {
+            assert!(
+                !inline.permits(index),
+                "inline index {index} must be skipped"
+            );
+        }
+
+        let mut heap = GateBits::new(GATE_WORD_BITS + 2);
+        heap.set(GATE_WORD_BITS + 1);
+        assert!(heap.permits(GATE_WORD_BITS + 1));
+        for index in [GATE_WORD_BITS + 2, 2 * GATE_WORD_BITS, usize::MAX] {
+            assert!(!heap.permits(index), "heap index {index} must be skipped");
+        }
+    }
+
+    /// The inline word covers a plan of up to 64 systems without allocating;
+    /// larger plans spill to the heap and address every bit correctly
+    /// (E4 review, Grok Bot 6).
+    #[test]
+    fn gate_bits_cover_plans_larger_than_one_word() {
+        for len in [
+            1,
+            GATE_WORD_BITS,
+            GATE_WORD_BITS + 1,
+            2 * GATE_WORD_BITS + 3,
+        ] {
+            let mut bits = GateBits::new(len);
+            assert_eq!(
+                bits.tail.capacity() > 0,
+                len > GATE_WORD_BITS,
+                "len {len}: only a plan past one word may allocate"
+            );
+            for index in 0..len {
+                assert!(!bits.permits(index), "len {len} index {index} starts unset");
+                bits.set(index);
+                assert!(bits.permits(index), "len {len} index {index} must be set");
+            }
+            assert!(
+                !bits.permits(len),
+                "len {len}: past the plan must be skipped"
+            );
+        }
     }
 
     /// Strong Confluence: a parallel run produces the same result as a

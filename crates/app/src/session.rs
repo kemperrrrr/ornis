@@ -301,7 +301,10 @@ struct PlaySnapshot {
     scene_name: String,
     /// Lights/camera/ambient at Play start.
     environment: SceneEnvironment,
-    /// Frame clock at Play start.
+    /// Frame clock at Play start. Restoring it rewinds `Time::frame()` too, so
+    /// the frame counter is **not monotonic** across Stop: a consumer that
+    /// treats it as a change tick (e.g. a replica cache key) must not assume
+    /// it only ever grows. Today only `delta_seconds` is read on the hot path.
     time: Time,
     /// Simulation clock at Play start (tick, elapsed and accumulator).
     fixed_time: FixedTime,
@@ -1495,18 +1498,30 @@ fn set_component(
 /// `sync_in` treats a dynamic body as solver-authoritative, so a gizmo drag
 /// committed in Paused would be overwritten by the solver on resume: the
 /// edit reaches the [`TransformDesc`] lane but never the body. Teleporting
-/// the bound body makes the edit stick. Unbound bodies (the usual case in
-/// Edit) need nothing — `sync_in` binds them at the edited pose.
-fn teleport_edited_body(world: &EditorSession, entity: Entity) {
-    let Some(store) = world.store() else {
-        return;
-    };
-    let Some(transform) = store
-        .read_lane::<TransformDesc>()
+/// the bound body makes the edit stick, and zeroing its velocity makes the
+/// resume start from rest at the edited pose instead of continuing the fall
+/// with the speed accumulated before the pause. The velocity is zeroed in
+/// the [`RigidBody`] lane, not in the solver: `sync_external_pose` forwards
+/// the lane velocity into a dynamic body every tick, so that is the side
+/// that survives the resume. Unbound bodies (the usual case in Edit) need
+/// nothing — `sync_in` binds them at the edited pose.
+fn teleport_edited_body(world: &mut EditorSession, entity: Entity) {
+    let Some(transform) = world
+        .store()
+        .and_then(|store| store.read_lane::<TransformDesc>())
         .and_then(|lane| lane.get(entity).cloned())
     else {
         return;
     };
+    if let Some(store) = world.store_mut()
+        && let Some(mut body) = store
+            .read_lane::<RigidBody>()
+            .and_then(|lane| lane.get(entity).cloned())
+    {
+        body.velocity = Vec3::ZERO;
+        body.angular_velocity = Vec3::ZERO;
+        store.insert(entity, body);
+    }
     let Some(runtime) = world.world().resources().get::<Mutex<PhysicsRuntime>>() else {
         return;
     };
@@ -4078,6 +4093,74 @@ mod tests {
         assert!(
             (resumed - Vec3::new(5.0, 3.0, -2.0)).length() < 0.05,
             "resume must continue from the edited pose ({resumed:?}), not the fallen one ({fallen})"
+        );
+    }
+
+    /// The edit zeroes the body's velocity, not just its pose (E4 review,
+    /// Grok Bot 2): a body dragged in Paused must resume from rest. Ten ticks
+    /// make the retained speed visible — the one-tick 0.05 tolerance above
+    /// passed the ~1.6 m/s the body had accumulated before the pause. The
+    /// control world falls the same ten ticks from rest, so the comparison
+    /// does not depend on the integrator's formula: any retained velocity
+    /// shows up as extra fall.
+    #[test]
+    fn a_transform_edit_in_paused_zeroes_the_body_velocity() {
+        /// Ten ticks of free fall from rest, as a positive distance.
+        fn fall_from_rest() -> f32 {
+            let (mut world, _ev_tx, _ev_rx) = world_and_events();
+            let body = world.spawn(Some("Rest".into()));
+            world
+                .world_mut()
+                .store_mut()
+                .expect("store")
+                .insert(body, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+            world.play();
+            for _ in 0..10 {
+                world.tick(1.0 / 60.0);
+            }
+            -pose_y(&world, body)
+        }
+
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        let hero = world.spawn(Some("Hero".into()));
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(hero, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+
+        world.play();
+        for _ in 0..10 {
+            world.tick(1.0 / 60.0);
+        }
+        world.pause();
+        assert!(
+            pose_y(&world, hero) < 0.0,
+            "Play must have simulated gravity"
+        );
+
+        world.handle_command(
+            &set_component(
+                hero.id(),
+                Some(hero.generation()),
+                "Transform",
+                r#"{"translation":[5,3,-2],"rotation":[0,0,0,1],"scale":[1,1,1]}"#,
+            ),
+            &ev_tx,
+        );
+        drain_all(&ev_rx);
+        assert_eq!(pose_y(&world, hero), 3.0, "the edit reaches the lane");
+
+        world.play();
+        for _ in 0..10 {
+            world.tick(1.0 / 60.0);
+        }
+        let edited_fall = 3.0 - pose_y(&world, hero);
+        let rest_fall = fall_from_rest();
+        assert!(rest_fall > 0.0, "the control must have fallen");
+        assert!(
+            (edited_fall - rest_fall).abs() < 1e-4,
+            "the edited body must fall from rest ({rest_fall}), it fell {edited_fall}"
         );
     }
 

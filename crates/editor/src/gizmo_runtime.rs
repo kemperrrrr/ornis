@@ -92,7 +92,11 @@ impl GizmoRuntime {
     /// Records a preview transform; returns whether the drag moved.
     ///
     /// The preview is compared against the transform the drag started from,
-    /// so a press without motion never counts as a move.
+    /// so a press without motion never counts as a move — with one exception:
+    /// an absolute snap grid moves an off-grid selection on the very first
+    /// preview, for Move and Rotate alike, so even a one-pixel mouse jitter
+    /// (or no motion at all) counts as a move and [`Self::commit`] promotes
+    /// the undo candidate.
     fn preview(&mut self, transform: &TransformDesc) -> bool {
         let Some(drag) = self.drag.as_ref() else {
             return false;
@@ -222,6 +226,36 @@ mod tests {
         runtime.set_snap(snap);
         runtime.begin(drag, Entity::new(1), None);
         runtime.preview_transform(&release).expect("a preview")
+    }
+
+    /// A press whose release ray is the press ray: the pointer never moved,
+    /// so only an absolute snap grid can change the selection. Asserts the
+    /// contract shared by Move and Rotate — the preview moved off the start
+    /// and the commit promoted the undo candidate — and returns the preview
+    /// for the channel-specific check.
+    fn press_without_motion(
+        start: &TransformDesc,
+        handle: GizmoHandle,
+        press: PickRay,
+        snap: SnapSettings,
+    ) -> TransformDesc {
+        let drag = GizmoDrag::begin(start, handle, &press).expect("drag starts");
+        let mut runtime = GizmoRuntime::default();
+        runtime.set_snap(snap);
+        let candidate = GizmoTarget {
+            id: 1,
+            generation: 0,
+            transform: start.clone(),
+        };
+        runtime.begin(drag, Entity::new(1), Some(candidate.clone()));
+        let preview = runtime.preview_transform(&press).expect("a preview");
+        assert_ne!(preview, *start, "the snap jump is a move");
+        assert_eq!(
+            runtime.commit(EditorMode::Edit),
+            Some(candidate),
+            "a snap-only drag must still leave an undo entry"
+        );
+        preview
     }
 
     /// A press ray through the drag handle.
@@ -505,6 +539,38 @@ mod tests {
         assert!(
             (preview.translation.x - 1.0).abs() < 1e-6,
             "the drag must land on a multiple of the step, got {:?}",
+            preview.translation
+        );
+    }
+
+    /// The absolute grid fires on the first preview (E4 review, Editor 3):
+    /// pressing a handle without moving the mouse at all still snaps an
+    /// off-grid selection onto the grid, so the drag counts as moved and
+    /// commit promotes the undo candidate. Expected for an absolute grid —
+    /// Blender and Unity behave the same.
+    #[test]
+    fn a_press_without_motion_snaps_onto_the_grid_and_commits_undo() {
+        let start = TransformDesc {
+            translation: Vec3::new(0.1, 0.0, 0.0),
+            ..TransformDesc::IDENTITY
+        };
+        let preview = press_without_motion(
+            &start,
+            GizmoHandle {
+                mode: GizmoMode::Move,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::X,
+            },
+            down_ray(Vec3::new(0.1, 0.0, 5.0)),
+            SnapSettings {
+                enabled: true,
+                translate: 0.5,
+                ..SnapSettings::default()
+            },
+        );
+        assert!(
+            preview.translation.x.abs() < 1e-6,
+            "0.1 must snap to the 0.0 grid line, got {:?}",
             preview.translation
         );
     }
@@ -926,5 +992,113 @@ mod tests {
         assert_turns_around(&preview, &start, Vec3::Y);
         assert_eq!(preview.translation, start.translation);
         assert_eq!(preview.scale, start.scale);
+    }
+
+    /// Crossing ±180° costs one step, not `360 mod step` (E4 review, Editor
+    /// a). 25° does not divide 360°, so the grid is coerced to 360/14 and the
+    /// drag walks it uniformly through the seam: the snapped twist never
+    /// jumps by less than a step.
+    #[test]
+    fn rotate_snap_crosses_the_seam_in_one_step() {
+        let start = TransformDesc {
+            rotation: UnitQuat::normalize(Quat::from_rotation_y(160.0_f32.to_radians()))
+                .expect("unit"),
+            ..TransformDesc::IDENTITY
+        };
+        let snap = SnapSettings {
+            enabled: true,
+            rotate_deg: 25.0,
+            ..SnapSettings::default()
+        };
+        let step = 360.0 / 14.0;
+        let mut previous: Option<f32> = None;
+        for swept in [0.0_f32, 10.0, 20.0, 25.0, 30.0, 40.0] {
+            let preview = snapped_preview(
+                &start,
+                GizmoHandle {
+                    mode: GizmoMode::Rotate,
+                    space: GizmoSpace::World,
+                    axis: GizmoAxis::Y,
+                },
+                rotate_ray(0.0),
+                rotate_ray(-swept.to_radians()),
+                snap,
+            );
+            let degrees = twist_degrees(preview.rotation, Vec3::Y).rem_euclid(360.0);
+            assert!(
+                ((degrees / step).round() * step - degrees).abs() < 1e-2,
+                "sweep {swept}°: {degrees}° is not on the {step}° grid"
+            );
+            if let Some(previous) = previous {
+                let gap = (degrees - previous).rem_euclid(360.0);
+                assert!(
+                    gap < 1e-2 || (gap - step).abs() < 1e-2,
+                    "sweep {swept}°: {previous}° -> {degrees}° is not one step"
+                );
+            }
+            previous = Some(degrees);
+            assert_turns_around(&preview, &start, Vec3::Y);
+        }
+    }
+
+    /// One orientation is one quaternion value (E4 review, Editor b): two
+    /// sweeps landing on the same grid point from opposite sides of the seam
+    /// must agree in sign, not come out as `q` and `-q`. On the far side the
+    /// angle to the grid point exceeds a half-turn and flips the composed
+    /// sign, and `TransformDesc` equality drives the `moved` flag and undo
+    /// dedup — so a snap back onto the start must compare equal to it.
+    #[test]
+    fn rotate_snap_keeps_one_quaternion_sign_across_the_seam() {
+        let start = TransformDesc {
+            rotation: UnitQuat::normalize(Quat::from_rotation_y(179.0_f32.to_radians()))
+                .expect("unit"),
+            ..TransformDesc::IDENTITY
+        };
+        let from_below = rotate_snap_preview(&start, -2.0);
+        let from_above = rotate_snap_preview(&start, 2.0);
+        let agreement = from_below.rotation.get().dot(from_above.rotation.get());
+        assert!(
+            agreement > 1.0 - 1e-5,
+            "the same orientation must not be stored as q and -q (dot {agreement})"
+        );
+        assert!(
+            from_below.rotation.get().dot(start.rotation.get()) > 0.0,
+            "the sign must follow the start orientation"
+        );
+        assert_on_grid(twist_degrees(from_below.rotation, Vec3::Y).abs());
+        assert_turns_around(&from_below, &start, Vec3::Y);
+        assert_turns_around(&from_above, &start, Vec3::Y);
+    }
+
+    /// The Rotate grid fires on the first preview too (E4 review, Editor c):
+    /// pressing a handle without moving the mouse at all snaps an off-grid
+    /// twist onto the grid, so the drag counts as moved and commit promotes
+    /// the undo candidate — the same contract as the Move grid.
+    #[test]
+    fn a_rotate_press_without_motion_snaps_and_commits_undo() {
+        let start = TransformDesc {
+            rotation: UnitQuat::normalize(Quat::from_rotation_y(10.0_f32.to_radians()))
+                .expect("unit"),
+            ..TransformDesc::IDENTITY
+        };
+        let preview = press_without_motion(
+            &start,
+            GizmoHandle {
+                mode: GizmoMode::Rotate,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::Y,
+            },
+            rotate_ray(0.0),
+            SnapSettings {
+                enabled: true,
+                rotate_deg: 15.0,
+                ..SnapSettings::default()
+            },
+        );
+        assert!(
+            (twist_degrees(preview.rotation, Vec3::Y) - 15.0).abs() < 1e-3,
+            "10° must snap to 15°, got {:?}",
+            preview.rotation
+        );
     }
 }
