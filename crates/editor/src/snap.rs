@@ -21,8 +21,10 @@
 //! world components instead would slide the object off its own axis.
 //!
 //! The Rotate grid lives on a circle, so its step is coerced to the nearest
-//! divisor of 360° ([`SnapSettings::snap_angle`]): a grid that does not close
-//! the turn has a seam where the snapped angle jumps by less than a step.
+//! divisor of 360° and clamped to a half-turn at the coarse end
+//! ([`SnapSettings::effective_rotate_deg`]): a grid that does not close the
+//! turn has a seam where the snapped angle jumps by less than a step, and a
+//! grid with a single point would block rotation altogether.
 
 /// Floor for a snapped scale component's magnitude (never zero), matching
 /// the drag math's `MIN_SCALE`.
@@ -32,6 +34,11 @@ const MIN_SCALE: f32 = 1e-3;
 /// step is measured against this rather than against the canonical angle
 /// range.
 const FULL_TURN_DEG: f32 = 360.0;
+
+/// Fewest points the rotate grid may have. A single point would snap every
+/// orientation to zero twist and block rotation outright, so the coarsest
+/// grid is a half-turn.
+const MIN_ROTATE_DIVISIONS: f32 = 2.0;
 
 /// Per-mode snap steps. `enabled` gates all three; each step is in world
 /// units (translate), degrees (rotate) or a scale factor (scale).
@@ -90,36 +97,52 @@ impl SnapSettings {
     /// Rounds an absolute angle (radians) around the dragged axis to the
     /// rotate grid, anchored at zero twist rather than at the press point.
     ///
-    /// The grid closes the circle: the step is coerced to the nearest value
-    /// that divides a full turn evenly, `360 / round(360 / rotate_deg)`. A
-    /// step that already divides 360° — the 15° default among them — is used
-    /// unchanged; 25° becomes 360/14 ≈ 25.714°. Without that coercion the
-    /// canonical `[-180°, 180°]` range would cut the circle between two grid
-    /// points, and a drag crossing ±180° would jump by `360 mod step` instead
-    /// of one step. Snap off or an unusable step returns `angle` unchanged.
+    /// The grid is the one [`Self::effective_rotate_deg`] reports, not the
+    /// requested step: it closes the circle and keeps at least two points.
+    /// Snap off or an unusable step returns `angle` unchanged.
     #[must_use]
     pub fn snap_angle(&self, angle: f32) -> f32 {
-        if !self.enabled {
-            return angle;
-        }
         let Some(step) = self.rotate_step() else {
             return angle;
         };
         (angle / step).round() * step
     }
 
-    /// Rotate step in radians, coerced to a divisor of a full turn.
+    /// The rotate step the grid actually uses, in degrees, or `None` when
+    /// the channel is unquantized (snap off, or a step that cannot define a
+    /// circular grid).
     ///
-    /// `None` when the step cannot define a circular grid: unusable (see
-    /// [`usable_step`]), so small that `360 / step` overflows, or so large
-    /// that `round(360 / step)` comes out zero.
-    fn rotate_step(&self) -> Option<f32> {
-        if !usable_step(self.rotate_deg) {
+    /// Two coercions turn the requested step into a grid that closes the
+    /// circle:
+    ///
+    /// * the step becomes the nearest divisor of a full turn,
+    ///   `360 / round(360 / rotate_deg)`. A step that already divides 360° —
+    ///   the 15° default among them — is used unchanged; 25° becomes
+    ///   360/14 ≈ 25.714°. Without it the canonical `[-180°, 180°]` range
+    ///   would cut the circle between two grid points, and a drag crossing
+    ///   ±180° would jump by `360 mod step` instead of one step;
+    /// * the grid keeps at least two points, so a step wider than a
+    ///   half-turn (270°, 300°, …) becomes 180°. A one-point grid would snap
+    ///   every orientation to zero twist and block rotation outright.
+    ///
+    /// `None` when the step is unusable — not finite and positive, or so
+    /// small that its reciprocal overflows — or so small that `360 / step`
+    /// overflows. The toolbar shows this value next to the requested step,
+    /// so neither coercion is silent.
+    #[must_use]
+    pub fn effective_rotate_deg(&self) -> Option<f32> {
+        if !self.enabled || !usable_step(self.rotate_deg) {
             return None;
         }
         let divisions = (FULL_TURN_DEG / self.rotate_deg).round();
-        (divisions.is_finite() && divisions >= 1.0)
-            .then(|| (FULL_TURN_DEG / divisions).to_radians())
+        divisions
+            .is_finite()
+            .then(|| FULL_TURN_DEG / divisions.max(MIN_ROTATE_DIVISIONS))
+    }
+
+    /// Rotate step in radians, coerced to a divisor of a full turn.
+    fn rotate_step(&self) -> Option<f32> {
+        self.effective_rotate_deg().map(f32::to_radians)
     }
 }
 
@@ -327,12 +350,82 @@ mod tests {
             "38° must snap to {step}°, got {got}"
         );
 
-        for step in [1000.0, 1e-38] {
+        // 1e-38 passes `usable_step` but overflows `360 / step`.
+        let overflow = SnapSettings {
+            rotate_deg: 1e-38,
+            ..enabled()
+        };
+        assert_eq!(overflow.snap_angle(0.38), 0.38);
+        assert_eq!(overflow.effective_rotate_deg(), None);
+    }
+
+    /// A step wider than a half-turn used to coerce to a full turn, i.e. a
+    /// one-point grid: every orientation snapped to zero twist and the drag
+    /// could not turn at all (E4 review, Editor 3). The coarsest grid keeps
+    /// two points, so the object still turns — by a half-turn.
+    #[test]
+    fn a_rotate_step_wider_than_a_half_turn_still_turns() {
+        for step in [241.0, 270.0, 300.0, 359.0, 360.0, 720.0, 1000.0] {
             let snap = SnapSettings {
                 rotate_deg: step,
                 ..enabled()
             };
-            assert_eq!(snap.snap_angle(0.38), 0.38, "rotate step {step}");
+            assert_eq!(
+                snap.effective_rotate_deg(),
+                Some(180.0),
+                "step {step}: the coarsest grid is a half-turn"
+            );
+            let turned = snap.snap_angle(179.0_f32.to_radians()).to_degrees();
+            assert!(
+                (turned - 180.0).abs() < 1e-3,
+                "step {step}: 179° must reach 180°, got {turned}"
+            );
+            let back = snap.snap_angle((-179.0_f32).to_radians()).to_degrees();
+            assert!(
+                (back + 180.0).abs() < 1e-3,
+                "step {step}: -179° must reach -180°, got {back}"
+            );
         }
+    }
+
+    /// The toolbar reads the effective step, so it must report exactly the
+    /// grid `snap_angle` uses — including both coercions and the unquantized
+    /// cases (E4 review, Editor 2).
+    #[test]
+    fn effective_rotate_deg_reports_the_grid_in_use() {
+        for (requested, expected) in [
+            (15.0, Some(15.0)),
+            (25.0, Some(360.0 / 14.0)),
+            (7.0, Some(360.0 / 51.0)),
+            (300.0, Some(180.0)),
+            (0.0, None),
+            (-15.0, None),
+            (f32::NAN, None),
+            (f32::INFINITY, None),
+        ] {
+            let snap = SnapSettings {
+                rotate_deg: requested,
+                ..enabled()
+            };
+            assert_eq!(
+                snap.effective_rotate_deg(),
+                expected,
+                "requested step {requested}"
+            );
+            if let Some(step) = expected {
+                let angle = 0.38;
+                let snapped = snap.snap_angle(angle).to_degrees();
+                assert!(
+                    ((snapped / step).round() * step - snapped).abs() < 1e-3,
+                    "requested step {requested}: {snapped} is off the reported grid"
+                );
+            }
+        }
+
+        let disabled = SnapSettings {
+            rotate_deg: 25.0,
+            ..SnapSettings::default()
+        };
+        assert_eq!(disabled.effective_rotate_deg(), None, "snap is off");
     }
 }

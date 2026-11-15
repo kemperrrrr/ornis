@@ -1639,6 +1639,34 @@ mod tests {
         }
     }
 
+    /// Gates belong to the plan that produced them: running a longer plan
+    /// with a shorter plan's gates trips the debug assertion (E4 review,
+    /// Editor 4). The release path skips the extra systems instead — see
+    /// `gate_bits_past_the_evaluated_plan_are_not_permitted`.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "ScheduleGates were evaluated for 1 systems, this plan has 2")]
+    fn run_with_gates_rejects_gates_from_a_shorter_plan() {
+        let mut res = Resources::new();
+        res.insert(Log::default());
+        let bump = |name| Bump {
+            name,
+            access: SystemAccess::new().reads::<Log>(),
+            target: name,
+        };
+
+        let mut short = Schedule::new();
+        short.set_parallel(false);
+        short.add_system(bump("a"));
+        let gates = short.evaluate_gates(&res);
+
+        let mut long = Schedule::new();
+        long.set_parallel(false);
+        long.add_system(bump("a"));
+        long.add_system(bump("b"));
+        long.run_with_gates(&res, &gates);
+    }
+
     /// Strong Confluence: a parallel run produces the same result as a
     /// sequential one, regardless of thread count.
     #[test]

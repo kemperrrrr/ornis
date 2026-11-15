@@ -1495,16 +1495,21 @@ fn set_component(
 
 /// Carries an explicit transform edit into the solver (E4 review).
 ///
-/// `sync_in` treats a dynamic body as solver-authoritative, so a gizmo drag
-/// committed in Paused would be overwritten by the solver on resume: the
-/// edit reaches the [`TransformDesc`] lane but never the body. Teleporting
-/// the bound body makes the edit stick, and zeroing its velocity makes the
-/// resume start from rest at the edited pose instead of continuing the fall
-/// with the speed accumulated before the pause. The velocity is zeroed in
-/// the [`RigidBody`] lane, not in the solver: `sync_external_pose` forwards
-/// the lane velocity into a dynamic body every tick, so that is the side
-/// that survives the resume. Unbound bodies (the usual case in Edit) need
-/// nothing — `sync_in` binds them at the edited pose.
+/// `sync_in` treats a dynamic body as solver-authoritative, so a transform
+/// written from the inspector would be overwritten by the solver: the edit
+/// reaches the [`TransformDesc`] lane but never the body. Teleporting the
+/// bound body makes the edit stick.
+///
+/// The velocity is zeroed in **every** mode, not only in Paused: an explicit
+/// Transform write is a teleport from rest. Keeping the accumulated speed
+/// would carry the body off the pose the user just typed on the very next
+/// tick — the same "the edit does not stick" failure the Paused case was
+/// reported for, so Play and Edit follow the same contract rather than
+/// silently preserving momentum. The zeroing happens in the [`RigidBody`]
+/// lane, not in the solver: `sync_external_pose` forwards the lane velocity
+/// into a dynamic body every tick, so that is the side that survives the
+/// resume. Unbound bodies (the usual case in Edit) need nothing — `sync_in`
+/// binds them at the edited pose.
 fn teleport_edited_body(world: &mut EditorSession, entity: Entity) {
     let Some(transform) = world
         .store()
@@ -4096,31 +4101,29 @@ mod tests {
         );
     }
 
-    /// The edit zeroes the body's velocity, not just its pose (E4 review,
-    /// Grok Bot 2): a body dragged in Paused must resume from rest. Ten ticks
-    /// make the retained speed visible — the one-tick 0.05 tolerance above
-    /// passed the ~1.6 m/s the body had accumulated before the pause. The
-    /// control world falls the same ten ticks from rest, so the comparison
-    /// does not depend on the integrator's formula: any retained velocity
-    /// shows up as extra fall.
-    #[test]
-    fn a_transform_edit_in_paused_zeroes_the_body_velocity() {
-        /// Ten ticks of free fall from rest, as a positive distance.
-        fn fall_from_rest() -> f32 {
-            let (mut world, _ev_tx, _ev_rx) = world_and_events();
-            let body = world.spawn(Some("Rest".into()));
-            world
-                .world_mut()
-                .store_mut()
-                .expect("store")
-                .insert(body, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
-            world.play();
-            for _ in 0..10 {
-                world.tick(1.0 / 60.0);
-            }
-            -pose_y(&world, body)
+    /// Ten ticks of free fall from rest, as a positive distance.
+    fn fall_from_rest() -> f32 {
+        let (mut world, _ev_tx, _ev_rx) = world_and_events();
+        let body = world.spawn(Some("Rest".into()));
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(body, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        world.play();
+        for _ in 0..10 {
+            world.tick(1.0 / 60.0);
         }
+        -pose_y(&world, body)
+    }
 
+    /// A dynamic body falls ten ticks, gets an explicit Transform edit to
+    /// `[5, 3, -2]` while the session is in `mode`, then falls ten more ticks.
+    /// Returns that second fall next to the control world's fall from rest:
+    /// comparing displacements rather than absolute heights keeps the check
+    /// independent of the integrator's formula and of `GlobalTransform` not
+    /// being refreshed in Paused.
+    fn fall_after_a_transform_edit(mode: EditorMode) -> (f32, f32) {
         let (mut world, ev_tx, ev_rx) = world_and_events();
         let hero = world.spawn(Some("Hero".into()));
         world
@@ -4133,7 +4136,10 @@ mod tests {
         for _ in 0..10 {
             world.tick(1.0 / 60.0);
         }
-        world.pause();
+        if mode == EditorMode::Paused {
+            world.pause();
+        }
+        assert_eq!(world.mode(), mode, "the edit lands in {mode:?}");
         assert!(
             pose_y(&world, hero) < 0.0,
             "Play must have simulated gravity"
@@ -4150,13 +4156,44 @@ mod tests {
         );
         drain_all(&ev_rx);
         assert_eq!(pose_y(&world, hero), 3.0, "the edit reaches the lane");
+        let body = read_component::<RigidBody>(world.store().expect("store"), hero)
+            .expect("body survives the edit");
+        assert_eq!(
+            body.velocity,
+            Vec3::ZERO,
+            "the edit zeroes the lane velocity"
+        );
+        assert_eq!(body.angular_velocity, Vec3::ZERO);
 
+        // Idempotent in Play, resumes from Paused.
         world.play();
         for _ in 0..10 {
             world.tick(1.0 / 60.0);
         }
-        let edited_fall = 3.0 - pose_y(&world, hero);
-        let rest_fall = fall_from_rest();
+        (3.0 - pose_y(&world, hero), fall_from_rest())
+    }
+
+    /// The edit zeroes the body's velocity, not just its pose (E4 review,
+    /// Grok Bot 2): a body dragged in Paused must resume from rest. Ten ticks
+    /// make the retained speed visible — the one-tick 0.05 tolerance above
+    /// passed the ~1.6 m/s the body had accumulated before the pause.
+    #[test]
+    fn a_transform_edit_in_paused_zeroes_the_body_velocity() {
+        let (edited_fall, rest_fall) = fall_after_a_transform_edit(EditorMode::Paused);
+        assert!(rest_fall > 0.0, "the control must have fallen");
+        assert!(
+            (edited_fall - rest_fall).abs() < 1e-4,
+            "the edited body must fall from rest ({rest_fall}), it fell {edited_fall}"
+        );
+    }
+
+    /// The same contract holds in Play (E4 review, Editor 1): the reset is
+    /// not Paused-only. An explicit Transform write is a teleport from rest
+    /// in every mode, so a body edited mid-simulation does not carry the
+    /// speed it had before the edit off the pose the user typed.
+    #[test]
+    fn a_transform_edit_in_play_zeroes_the_body_velocity() {
+        let (edited_fall, rest_fall) = fall_after_a_transform_edit(EditorMode::Play);
         assert!(rest_fall > 0.0, "the control must have fallen");
         assert!(
             (edited_fall - rest_fall).abs() < 1e-4,

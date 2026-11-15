@@ -34,6 +34,18 @@ pub fn set_snap(enabled: bool, translate: f32, rotate_deg: f32, scale: f32) {
     });
 }
 
+/// The rotate step the grid actually uses, in degrees, or `null` when the
+/// channel is unquantized (snap off, or an unusable step).
+///
+/// The grid coerces the requested step to a divisor of 360° and clamps it to
+/// a half-turn at the coarse end, so the toolbar reads this back to show the
+/// effective step next to the field instead of duplicating the coercion.
+// qual:api — wasm-bindgen export; called from the browser snap controls.
+#[wasm_bindgen]
+pub fn snap_effective_rotate_deg() -> Option<f32> {
+    snap_settings().effective_rotate_deg()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +96,31 @@ mod tests {
         }
         // Restore the default for the other tests on this thread.
         set_snap(false, 0.5, 15.0, 0.25);
+    }
+
+    /// The toolbar reads the effective rotate step back from the replica
+    /// (E4 review, Editor 2): a requested step that does not divide 360°, or
+    /// is wider than a half-turn, must be reported as the grid in use, and an
+    /// unquantized channel as `null`.
+    #[test]
+    fn effective_rotate_step_is_readable_from_the_browser() {
+        set_snap(true, 0.5, 25.0, 0.25);
+        let coerced = snap_effective_rotate_deg().expect("a quantized channel");
+        assert!(
+            (coerced - 360.0 / 14.0).abs() < 1e-4,
+            "25° must report 360/14, got {coerced}"
+        );
+
+        set_snap(true, 0.5, 300.0, 0.25);
+        assert_eq!(snap_effective_rotate_deg(), Some(180.0));
+
+        set_snap(true, 0.5, 15.0, 0.25);
+        assert_eq!(snap_effective_rotate_deg(), Some(15.0));
+
+        set_snap(true, 0.5, 0.0, 0.25);
+        assert_eq!(snap_effective_rotate_deg(), None, "a zero step is off");
+
+        set_snap(false, 0.5, 15.0, 0.25);
+        assert_eq!(snap_effective_rotate_deg(), None, "snap is off");
     }
 }

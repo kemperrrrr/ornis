@@ -815,7 +815,25 @@
   var snapTranslate = document.getElementById("snap-translate");
   var snapRotate = document.getElementById("snap-rotate");
   var snapScale = document.getElementById("snap-scale");
+  var snapRotateEffective = document.getElementById("snap-rotate-effective");
   var snapEnabled = false;
+
+  // The rotate grid coerces the requested step to a divisor of 360° (and to
+  // a half-turn at the coarse end), so the field alone misreports the grid:
+  // 25° is really 25.714°. Read the effective step back from the replica
+  // instead of duplicating the coercion here, and show it beside the field.
+  function renderEffectiveRotateStep() {
+    if (!snapRotateEffective) return;
+    var api = window.OrnisViewport;
+    var step = api && api.effectiveRotateStep ? api.effectiveRotateStep() : null;
+    if (typeof step !== "number" || !isFinite(step)) {
+      snapRotateEffective.textContent = "";
+      return;
+    }
+    var requested = snapRotate ? Number(snapRotate.value) : NaN;
+    var coerced = !isFinite(requested) || Math.abs(step - requested) > 1e-3;
+    snapRotateEffective.textContent = (coerced ? "≈" : "") + Number(step.toFixed(3)) + "°";
+  }
 
   function pushSnap() {
     var api = window.OrnisViewport;
@@ -827,6 +845,7 @@
         scale: snapScale ? snapScale.value : 0.25
       });
     }
+    renderEffectiveRotateStep();
   }
   if (snapToggle) {
     snapToggle.addEventListener("click", function () {

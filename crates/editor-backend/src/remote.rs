@@ -2654,6 +2654,31 @@ mod tests {
         );
     }
 
+    /// The rotate grid coerces the requested step (divisor of 360°, half-turn
+    /// at the coarse end), so the toolbar must show the effective step next
+    /// to the field and read it back from the replica rather than re-deriving
+    /// it in JS (E4 review, Editor 2).
+    #[test]
+    fn editor_v2_shows_the_effective_rotate_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../editor-v2");
+        let index = std::fs::read_to_string(root.join("index.html")).expect("editor-v2 index");
+        assert!(
+            index.contains("id=\"snap-rotate-effective\""),
+            "the effective rotate step must have a slot next to the step field"
+        );
+        let live = std::fs::read_to_string(root.join("live.js")).expect("editor-v2 live");
+        assert!(
+            live.contains("snap-rotate-effective") && live.contains("effectiveRotateStep()"),
+            "live.js must fill the slot from the replica's effective step"
+        );
+        let viewport =
+            std::fs::read_to_string(root.join("viewport.js")).expect("editor-v2 viewport");
+        assert!(
+            viewport.contains("snap_effective_rotate_deg"),
+            "viewport.js must expose the wasm effective-step export"
+        );
+    }
+
     // ── POST guards: Origin / Host / Content-Type / body limit ────────────
 
     #[test]

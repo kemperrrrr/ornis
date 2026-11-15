@@ -11,6 +11,7 @@ import init, {
     set_gizmo_mode,
     set_gizmo_space,
     set_snap,
+    snap_effective_rotate_deg,
     set_editor_mode,
     undo_gizmo,
     viewport_state_json,
@@ -206,6 +207,12 @@ window.OrnisViewport = {
     },
     setSnap(next) {
         return applySnap(next || {});
+    },
+    // The rotate grid coerces the requested step (divisor of 360°, half-turn
+    // at the coarse end); the toolbar reads the effective value back rather
+    // than duplicating the formula. `null` when the channel is unquantized.
+    effectiveRotateStep() {
+        return booted ? snap_effective_rotate_deg() : null;
     },
     undoGizmo() {
         return undoGizmoDrag();

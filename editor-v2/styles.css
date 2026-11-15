@@ -214,6 +214,7 @@ button { font: inherit; color: inherit; }
   border: 1px solid var(--line); border-radius: 6px;
 }
 .snap-step:focus { outline: none; border-color: var(--accent); }
+.snap-effective { min-width: 42px; font-size: 10px; color: var(--muted); white-space: nowrap; }
 .viewport-settings {
   position: absolute; top: 2px; right: 10px;
   width: 38px; height: 38px; padding: 0;
