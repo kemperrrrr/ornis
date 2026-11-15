@@ -124,6 +124,39 @@ unsafe extern "C" {
         y: f32,
         lane: u32,
     ) -> f32;
+    #[link_name = "texture_sample_2d_f32x4"]
+    fn texture_sample_2d_f32x4(
+        group: u32,
+        binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        x: f32,
+        y: f32,
+        lane: u32,
+    ) -> f32;
+    #[link_name = "texture_sample_level_cube_f32x4"]
+    fn texture_sample_level_cube_f32x4(
+        group: u32,
+        binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+        lod: f32,
+        lane: u32,
+    ) -> f32;
+    #[link_name = "texture_sample_cube_f32x4"]
+    fn texture_sample_cube_f32x4(
+        group: u32,
+        binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+        lane: u32,
+    ) -> f32;
     #[link_name = "texture_width_2d"]
     fn texture_width_2d(group: u32, binding: u32) -> i32;
     #[link_name = "texture_height_2d"]
@@ -477,6 +510,84 @@ pub(crate) fn texture_sample_level_f32x4(
         sampler_binding,
         x,
         y,
+        lane
+    ))
+}
+
+/// One lane of `textureSample(tex, sampler, vec2(x, y))`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+// qual:allow(srp, max_parameters=7) reason: "one operand per import argument: texture binding, sampler binding, uv, and the lane"
+#[inline(always)]
+pub(crate) fn texture_sample_auto(
+    group: u32,
+    binding: u32,
+    sampler_group: u32,
+    sampler_binding: u32,
+    x: f32,
+    y: f32,
+    lane: u32,
+) -> f32 {
+    call!(texture_sample_2d_f32x4(
+        group,
+        binding,
+        sampler_group,
+        sampler_binding,
+        x,
+        y,
+        lane
+    ))
+}
+
+/// One lane of `textureSampleLevel(cube, sampler, dir, lod)`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+// qual:allow(srp, max_parameters=9) reason: "one operand per import argument: two binding pairs, three direction lanes, the level and the lane"
+#[inline(always)]
+pub(crate) fn texture_sample_level_cube(
+    group: u32,
+    binding: u32,
+    sampler_group: u32,
+    sampler_binding: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    lod: f32,
+    lane: u32,
+) -> f32 {
+    call!(texture_sample_level_cube_f32x4(
+        group,
+        binding,
+        sampler_group,
+        sampler_binding,
+        x,
+        y,
+        z,
+        lod,
+        lane
+    ))
+}
+
+/// One lane of `textureSample(cube, sampler, dir)`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+// qual:allow(srp, max_parameters=8) reason: "the explicit-level twin minus the level; the translator reads the operands positionally"
+#[inline(always)]
+pub(crate) fn texture_sample_cube(
+    group: u32,
+    binding: u32,
+    sampler_group: u32,
+    sampler_binding: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    lane: u32,
+) -> f32 {
+    call!(texture_sample_cube_f32x4(
+        group,
+        binding,
+        sampler_group,
+        sampler_binding,
+        x,
+        y,
+        z,
         lane
     ))
 }

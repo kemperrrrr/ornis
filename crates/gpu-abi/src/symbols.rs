@@ -216,6 +216,27 @@ pub const TEXTURE_SAMPLE_2D: &str = "texture_sample_2d";
 /// binding, UV, then an explicit mip level.
 pub const TEXTURE_SAMPLE_2D_LOD: &str = "texture_sample_2d_lod";
 
+/// `(param i32 i32 i32 i32 f32 f32 f32) (result f32)` — lane of
+/// `textureSample(tex, sampler, uv)`.
+///
+/// Same operands as [`TEXTURE_SAMPLE_2D_F32X4`]; the level comes from the
+/// screen-space derivatives of `uv`, so this only exists in a fragment stage.
+pub const TEXTURE_SAMPLE_2D_F32X4: &str = "texture_sample_2d_f32x4";
+
+/// `(param i32 i32 i32 i32 f32 f32 f32 f32) (result f32)` — lane of
+/// `textureSampleLevel(cube, sampler, direction, lod)`.
+///
+/// Operands are texture group, texture binding, sampler group, sampler
+/// binding, the three direction lanes, the level, then the lane.
+pub const TEXTURE_SAMPLE_LEVEL_CUBE_F32X4: &str = "texture_sample_level_cube_f32x4";
+
+/// `(param i32 i32 i32 i32 f32 f32 f32 f32) (result f32)` — lane of
+/// `textureSample(cube, sampler, direction)`.
+///
+/// The irradiance cube is read at the level its derivatives select, so this
+/// is fragment-only like [`TEXTURE_SAMPLE_2D_F32X4`].
+pub const TEXTURE_SAMPLE_CUBE_F32X4: &str = "texture_sample_cube_f32x4";
+
 /// Vertex entry. The compiled signature is `vs_main()`: builtins and
 /// `@location` values are [`VERTEX_INDEX`], [`VERTEX_INPUT_LANE`], and the
 /// `vertex_store_*` imports.
