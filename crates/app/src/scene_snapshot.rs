@@ -73,7 +73,7 @@ impl SnapshotEntityMeta {
 /// Root object of the `/api/scene` response. Unknown fields
 /// (`entity_count`, entity `id`/`generation`, …) are ignored by serde.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ApiScene {
+struct ApiScene {
     /// Server-side scene version; the client re-uploads GPU data only when
     /// this changes between polls.
     pub version: u64,
@@ -98,7 +98,7 @@ pub struct ApiScene {
 /// wire: a missing id stays `None` instead of defaulting to `0`, which is
 /// a valid server entity and must never be invented.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ApiEntity {
+struct ApiEntity {
     #[serde(default)]
     pub id: Option<u32>,
     #[serde(default)]
@@ -113,7 +113,7 @@ pub struct ApiEntity {
 /// is the fallback signal. Other registry entries (`Name`, future types)
 /// are ignored by serde.
 #[derive(Debug, Clone, Deserialize)]
-pub struct RenderComponents {
+struct RenderComponents {
     #[serde(rename = "Transform")]
     pub transform: TransformDesc,
     #[serde(rename = "Mesh")]

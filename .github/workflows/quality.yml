@@ -102,7 +102,8 @@ jobs:
   # is the slowest shard, not the sum of all 13 stages.
   #
   # Shard map (stage ids):
-  #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual, machete, typos (no compilation)
+  #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual, machete, typos,
+#            editor-viewport (no compilation; editor-viewport needs `node`)
   #   clippy — clippy-physics, clippy
   #   test   — test, test-lockfree (workspace + ornis-core lock-free lanes)
   #   gpu    — test-physics, test-wasm2gpu, test-render-gpu, smoke (all need
@@ -222,7 +223,7 @@ jobs:
         # the previous step read live into ORNIS_BASELINE_BUMP_ALLOWED.
         run: |
           mkdir -p target
-          cargo xtask quality --ci --only fmt,audit,deny,outdated,upgrade-check,rustqual,machete,typos 2>&1 | tee target/quality-fast.log
+          cargo xtask quality --ci --only fmt,audit,deny,outdated,upgrade-check,rustqual,machete,typos,editor-viewport 2>&1 | tee target/quality-fast.log
 
       - name: Upload shard log
         if: always()

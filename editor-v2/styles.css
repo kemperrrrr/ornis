@@ -181,6 +181,23 @@ button { font: inherit; color: inherit; }
   background: var(--viewport); }
 .viewport-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .viewport-canvas.failed { background: #300; }
+/* Native viewport (PLAN.md §j, вариант 1): the shell draws the scene into a
+   layer UNDER the webview, so the page's own viewport box must let it show
+   through. Only in embedded mode — Chrome keeps the opaque canvas. */
+body.ornis-native-viewport .viewport { background: transparent; }
+body.ornis-native-viewport .viewport-canvas { visibility: hidden; }
+/* Written fallback for "this webview has no WebGPU". Replaces the bare red
+   canvas: a dead end with no way forward is worse than nothing. */
+.viewport-notice {
+  position: absolute; inset: 0; z-index: 3;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; padding: 24px; text-align: center;
+  background: var(--viewport); color: var(--text);
+}
+.viewport-notice[hidden] { display: none; }
+.viewport-notice-title { margin: 0; font: 600 14px/1.3 "Inter", system-ui, sans-serif; color: var(--accent); }
+.viewport-notice-body { margin: 0; max-width: 52ch; font-size: 13px; line-height: 1.5; color: var(--text); }
+.viewport-notice-detail { margin: 4px 0 0; max-width: 52ch; font: 11px/1.5 ui-monospace, SFMono-Regular, monospace; color: var(--muted); word-break: break-word; }
 .plane-grid { position: absolute; inset: 0; pointer-events: none; }
 .viewport-gizmos {
   position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);

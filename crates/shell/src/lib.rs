@@ -26,6 +26,8 @@
 pub mod assets;
 pub mod bridge;
 pub mod error;
+pub mod native_viewport;
+pub mod notice;
 pub mod probe;
 pub mod viewport_ipc;
 
@@ -34,9 +36,11 @@ pub use assets::{
 };
 pub use bridge::{
     AckOutcome, IncomingPost, ack_json, ack_message_json, allocate_request_id, dispatch_script,
-    event_json, events_message_json, init_script, parse_incoming,
+    event_json, events_message_json, init_script, init_script_for, parse_incoming,
 };
 pub use error::{AssetError, BridgeError};
+pub use native_viewport::{ViewFrame, ViewportPlacement};
+pub use notice::{ShellCapabilities, WEBGPU_UNAVAILABLE_NOTICE};
 pub use probe::probe_page;
 pub use viewport_ipc::{
     MAX_PRESSED, MAX_SCALE, MAX_VIEWPORT_EDGE, MIN_SCALE, MIN_VIEWPORT_EDGE, PhysicalRect,

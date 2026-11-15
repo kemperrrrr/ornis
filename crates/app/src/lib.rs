@@ -45,12 +45,12 @@ pub use game_world::{
     EntityMut, GameWorld, ModelInstance, ModelSpawn, PlaybackError, ReplicaGameWorld, Spawn,
     SpawnModelError,
 };
-pub use scene_snapshot::{SceneSnapshot, SnapshotEntityMeta, parse_scene_json};
 pub use ornis_animation::{
     AnimEvent, Animator, AnimatorAccess, BasePull, ClipId, ControlRig, Effector, JointMask, MaskId,
     SkelLayer, SkelLayerStack, SkelPlayer, SkelTree, SyncMark, TreeCmp, TreeCond, TreeNodeDef,
     TreeParam, TreeTransition, TwoBoneIk, try_animator,
 };
+pub use scene_snapshot::{SceneSnapshot, SnapshotEntityMeta, parse_scene_json};
 
 /// Inserts the flat authored pose as both local [`Transform`] and world
 /// [`GlobalTransform`].

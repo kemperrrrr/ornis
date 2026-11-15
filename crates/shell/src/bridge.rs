@@ -24,6 +24,7 @@ use editor_backend::ipc::{EventSeq, GameEvent, RequestId, UiCommand};
 use editor_backend::remote::parse_command_payload;
 
 use crate::error::BridgeError;
+use crate::notice::ShellCapabilities;
 
 /// A validated page post: the transport id plus the parse outcome.
 ///
@@ -266,32 +267,46 @@ pub fn dispatch_script(message_json: &str) -> String {
 
 /// Initialization script installed on every page load (before `onload`).
 ///
-/// Marks embedded mode (`window.ornisShell = {scheme, api}`) and provides
+/// Marks embedded mode (`window.ornisShell = {scheme, api, nativeViewport,
+/// webgpuNotice}` — see [`crate::notice::ShellCapabilities`]) and provides
 /// a promise-based `window.ornisSend(type, data)` helper over the raw
 /// `window.ipc.postMessage` channel: acks and event batches arrive as
 /// `ornis-ipc` custom events (see [`dispatch_script`]) and are routed to
 /// pending posts by `request_id` or to `window.ornisOnEvents` subscribers.
-pub fn init_script() -> &'static str {
-    concat!(
-        "(function(){",
-        "window.ornisShell={scheme:\"ornis\",api:1};",
-        "var nextId=1;var pending=new Map();var subs=[];",
-        "window.ornisOnEvents=function(fn){subs.push(fn);};",
-        "window.ornisSend=function(type,data){",
-        "var id=nextId++;",
-        "return new Promise(function(resolve,reject){",
-        "pending.set(id,{resolve:resolve,reject:reject});",
-        "window.ipc.postMessage(JSON.stringify({type:type,request_id:id,data:data||{}}));",
-        "});};",
-        "window.addEventListener(\"ornis-ipc\",function(ev){",
-        "var msg=ev.detail;if(!msg||typeof msg!==\"object\")return;",
-        "if(msg.kind===\"ack\"&&typeof msg.request_id===\"number\"){",
-        "var p=pending.get(msg.request_id);if(!p)return;pending.delete(msg.request_id);",
-        "if(msg.accepted){p.resolve(msg);}else{p.reject(new Error(msg.error||\"rejected\"));}return;}",
-        "if(msg.kind===\"events\"&&Array.isArray(msg.events)){",
-        "for(var i=0;i<msg.events.length;i++){for(var j=0;j<subs.length;j++){subs[j](msg.events[i]);}}}",
-        "});",
-        "})();",
+pub fn init_script() -> String {
+    init_script_for(ShellCapabilities::WEBVIEW_ONLY)
+}
+
+/// [`init_script`] for a specific shell capability set.
+///
+/// The page branches on `nativeViewport`: with a native viewport it reports
+/// its viewport rectangle and forwards input instead of booting the WASM
+/// renderer; without one it boots the renderer and, when WebGPU is missing,
+/// shows `webgpuNotice` instead of a dead red canvas.
+pub fn init_script_for(capabilities: ShellCapabilities) -> String {
+    format!(
+        concat!(
+            "(function(){{",
+            "window.ornisShell={};",
+            "var nextId=1;var pending=new Map();var subs=[];",
+            "window.ornisOnEvents=function(fn){{subs.push(fn);}};",
+            "window.ornisSend=function(type,data){{",
+            "var id=nextId++;",
+            "return new Promise(function(resolve,reject){{",
+            "pending.set(id,{{resolve:resolve,reject:reject}});",
+            "window.ipc.postMessage(JSON.stringify({{type:type,request_id:id,data:data||{{}}}}));",
+            "}});}};",
+            "window.addEventListener(\"ornis-ipc\",function(ev){{",
+            "var msg=ev.detail;if(!msg||typeof msg!==\"object\")return;",
+            "if(msg.kind===\"ack\"&&typeof msg.request_id===\"number\"){{",
+            "var p=pending.get(msg.request_id);if(!p)return;pending.delete(msg.request_id);",
+            "if(msg.accepted){{p.resolve(msg);}}else{{p.reject(new Error(msg.error||\"rejected\"));}}return;}}",
+            "if(msg.kind===\"events\"&&Array.isArray(msg.events)){{",
+            "for(var i=0;i<msg.events.length;i++){{for(var j=0;j<subs.length;j++){{subs[j](msg.events[i]);}}}}",
+            "}});",
+            "}})();",
+        ),
+        capabilities.marker_js()
     )
 }
 
@@ -306,6 +321,7 @@ fn embedded_json(json_data: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notice::WEBGPU_UNAVAILABLE_NOTICE;
     use editor_backend::ipc::EditorCommand;
 
     #[test]
@@ -500,6 +516,17 @@ mod tests {
         assert!(script.contains("window.ornisShell"));
         assert!(script.contains("window.ornisSend"));
         assert!(script.contains("window.ipc.postMessage"));
+        assert!(script.contains("ornis-ipc"));
+        // Default embedded mode: webview only, notice available for the page.
+        assert!(script.contains("nativeViewport:false"));
+        assert!(script.contains(WEBGPU_UNAVAILABLE_NOTICE));
+    }
+
+    #[test]
+    fn init_script_marks_native_viewport_mode() {
+        let script = init_script_for(ShellCapabilities::NATIVE_VIEWPORT);
+        assert!(script.contains("nativeViewport:true"));
+        assert!(script.contains("window.ornisSend"), "IPC stays available");
         assert!(script.contains("ornis-ipc"));
     }
 }

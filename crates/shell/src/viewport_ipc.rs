@@ -163,10 +163,7 @@ impl ViewportInput {
     /// of the session.
     pub fn is_valid(&self) -> bool {
         self.pointer_position.iter().all(|v| v.is_finite())
-            && self
-                .pointer_delta
-                .iter()
-                .all(|value| value.is_finite())
+            && self.pointer_delta.iter().all(|value| value.is_finite())
             && self.wheel_delta.is_finite()
             && self.pressed_keys.len() <= MAX_PRESSED
             && self.pressed_mouse_buttons.len() <= MAX_PRESSED
