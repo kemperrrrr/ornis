@@ -818,6 +818,73 @@ impl StageOut {
     }
 }
 
+/// Operand slots a texture sample spends on bindings: texture group and
+/// binding, sampler group and binding.
+const OWNED_SAMPLE_ARGS: usize = 4;
+
+/// Coordinate shape of a texture sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SampleShape {
+    /// `texture_2d<f32>`, sampled with a `vec2<f32>`.
+    Plane,
+    /// `texture_cube<f32>`, sampled with a direction `vec3<f32>`.
+    Cube,
+}
+
+impl SampleShape {
+    /// How the coordinate is read.
+    fn dimension(self) -> naga::ImageDimension {
+        match self {
+            Self::Plane => naga::ImageDimension::D2,
+            Self::Cube => naga::ImageDimension::Cube,
+        }
+    }
+
+    /// Coordinate lanes the sampler takes.
+    fn coordinate_lanes(self) -> usize {
+        match self {
+            Self::Plane => VEC2_LANES as usize,
+            Self::Cube => VEC3_LANES as usize,
+        }
+    }
+}
+
+/// Where a sample's mip level comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SampleMip {
+    /// `textureSample`: the hardware differences the coordinate across the
+    /// pixel quad. Fragment stage only.
+    Auto,
+    /// `textureSampleLevel(.., 0.0)`: the blur and AO passes read mip 0.
+    Zero,
+    /// `textureSampleLevel(.., lod)`: the level is the caller's operand, the
+    /// way the prefiltered IBL cube is read.
+    Operand,
+}
+
+/// Shape and mip source of a texture-sample import, by its name.
+///
+/// `texture_sample_level_*` is checked before `texture_sample_*`: the longer
+/// spelling is the explicit-level one and the shorter would otherwise swallow
+/// it.
+fn sample_import(callee: &str) -> Option<(SampleShape, SampleMip)> {
+    use ornis_gpu_abi::symbols::{
+        TEXTURE_SAMPLE_2D_F32X4, TEXTURE_SAMPLE_CUBE_F32X4, TEXTURE_SAMPLE_LEVEL_CUBE_F32X4,
+    };
+    const LEVEL_2D: &str = "texture_sample_level_2d_f32x4";
+    if callee.contains(TEXTURE_SAMPLE_LEVEL_CUBE_F32X4) {
+        Some((SampleShape::Cube, SampleMip::Operand))
+    } else if callee.contains(TEXTURE_SAMPLE_CUBE_F32X4) {
+        Some((SampleShape::Cube, SampleMip::Auto))
+    } else if callee.contains(LEVEL_2D) {
+        Some((SampleShape::Plane, SampleMip::Zero))
+    } else if callee.contains(TEXTURE_SAMPLE_2D_F32X4) {
+        Some((SampleShape::Plane, SampleMip::Auto))
+    } else {
+        None
+    }
+}
+
 /// Which `texture_*` binding a load addresses.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TextureKind {
@@ -1173,7 +1240,14 @@ struct Builders {
     /// Struct ids currently being laid out, to reject a recursive field.
     struct_stack: Vec<u32>,
     /// `texture_2d` / `texture_depth_2d` globals, one per binding.
-    textures: HashMap<(u32, u32), (TextureKind, naga::Handle<naga::GlobalVariable>)>,
+    textures: HashMap<
+        (u32, u32),
+        (
+            TextureKind,
+            naga::ImageDimension,
+            naga::Handle<naga::GlobalVariable>,
+        ),
+    >,
     /// Filtering samplers, one per binding.
     samplers: HashMap<(u32, u32), naga::Handle<naga::GlobalVariable>>,
     /// `vec2<i32>` used as a `textureLoad` coordinate.
@@ -1346,13 +1420,28 @@ impl Builders {
         binding: u32,
         want: TextureKind,
     ) -> Result<naga::Handle<naga::GlobalVariable>, TranslateError> {
+        self.texture_of(group, binding, want, naga::ImageDimension::D2)
+    }
+
+    /// Texture at `(group, binding)` with an explicit `dim`.
+    ///
+    /// A cube image is a different type, not a different kind: the class
+    /// (`Sampled`/`Depth`) still decides what a sample returns, while `dim`
+    /// decides how the coordinate is read.
+    fn texture_of(
+        &mut self,
+        group: u32,
+        binding: u32,
+        want: TextureKind,
+        dim: naga::ImageDimension,
+    ) -> Result<naga::Handle<naga::GlobalVariable>, TranslateError> {
         if self.storage_binding.contains_key(&(group, binding)) {
             return Err(TranslateError::UnsupportedType(format!(
                 "binding {group}:{binding} is both storage and a texture"
             )));
         }
-        if let Some((kind, handle)) = self.textures.get(&(group, binding)) {
-            if *kind != want {
+        if let Some((kind, existing_dim, handle)) = self.textures.get(&(group, binding)) {
+            if *kind != want || *existing_dim != dim {
                 return Err(TranslateError::UnsupportedType(format!(
                     "texture binding {group}:{binding} is used as two kinds"
                 )));
@@ -1363,7 +1452,7 @@ impl Builders {
             naga::Type {
                 name: None,
                 inner: naga::TypeInner::Image {
-                    dim: naga::ImageDimension::D2,
+                    dim,
                     arrayed: false,
                     class: image_class(want, self.sampling.multisampled_at(group, binding)),
                 },
@@ -1381,7 +1470,7 @@ impl Builders {
             },
             naga::Span::default(),
         );
-        self.textures.insert((group, binding), (want, handle));
+        self.textures.insert((group, binding), (want, dim, handle));
         Ok(handle)
     }
 
@@ -4148,8 +4237,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains("workgroup_load_u32") {
             return self.workgroup_load(out, args, false);
         }
-        if callee.contains("texture_sample_level_2d_f32x4") {
-            return self.texture_sample_lane(out, args);
+        if let Some((shape, level)) = sample_import(callee) {
+            return self.image_sample_lane(out, args, shape, level);
         }
         if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_U32) {
             return self.texture_load_u32(out, args);
@@ -4700,15 +4789,29 @@ impl<'a, 'b> Lowerer<'a, 'b> {
 
     /// `texture_sample_level_2d_f32x4(group, binding, sampler_group,
     /// sampler_binding, x, y, lane)`: one lane of `textureSampleLevel(…, 0.0)`.
-    fn texture_sample_lane(
+    /// One lane of `textureSample`/`textureSampleLevel` on the image shape
+    /// named by the import.
+    ///
+    /// The operand order is texture group, texture binding, sampler group,
+    /// sampler binding, the coordinate lanes, then the mip level when the
+    /// import takes one, then the lane. `Auto` leaves the level to the
+    /// hardware, which needs a fragment stage: the translator emits it and
+    /// naga rejects it anywhere else.
+    fn image_sample_lane(
         &mut self,
         out: &mut naga::Block,
         args: &[Operand],
+        shape: SampleShape,
+        level: SampleMip,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
-        if args.len() != 7 {
+        let coordinate_lanes = shape.coordinate_lanes();
+        let level_args = usize::from(matches!(level, SampleMip::Operand));
+        // Bindings, coordinate lanes, the level when the import takes one, and
+        // the lane.
+        if args.len() != OWNED_SAMPLE_ARGS + coordinate_lanes + level_args + 1 {
             return Err(TranslateError::Unsupported);
         }
-        let lane = const_u32(&args[6])?;
+        let lane = const_u32(&args[args.len() - 1])?;
         if lane >= VEC4_LANES {
             return Err(TranslateError::Unsupported);
         }
@@ -4716,24 +4819,36 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let binding = const_u32(&args[1])?;
         let sampler_group = const_u32(&args[2])?;
         let sampler_binding = const_u32(&args[3])?;
-        let x = self.operand(out, &args[4])?;
-        let y = self.operand(out, &args[5])?;
-        let coord_ty = vec_f32_type(&mut self.builders.module, VEC2_LANES)
+        let mut components = Vec::with_capacity(coordinate_lanes);
+        for index in 0..coordinate_lanes {
+            components.push(self.operand(out, &args[OWNED_SAMPLE_ARGS + index])?);
+        }
+        let coord_ty = vec_f32_type(&mut self.builders.module, coordinate_lanes as u32)
             .ok_or(TranslateError::Unsupported)?;
         let coordinate = self.expr(
             out,
             naga::Expression::Compose {
                 ty: coord_ty,
-                components: vec![x, y],
+                components,
             },
         );
-        let image = self
-            .builders
-            .texture(group, binding, TextureKind::Sampled)?;
+        let image =
+            self.builders
+                .texture_of(group, binding, TextureKind::Sampled, shape.dimension())?;
         let image = self.expr(out, naga::Expression::GlobalVariable(image));
         let sampler = self.builders.sampler(sampler_group, sampler_binding);
         let sampler = self.expr(out, naga::Expression::GlobalVariable(sampler));
-        let level = self.expr(out, naga::Expression::Literal(naga::Literal::F32(0.0)));
+        let level = match level {
+            SampleMip::Auto => naga::SampleLevel::Auto,
+            SampleMip::Zero => {
+                let zero = self.expr(out, naga::Expression::Literal(naga::Literal::F32(0.0)));
+                naga::SampleLevel::Exact(zero)
+            }
+            SampleMip::Operand => {
+                let lod = self.operand(out, &args[args.len() - 2])?;
+                naga::SampleLevel::Exact(lod)
+            }
+        };
         let texel = self.expr(
             out,
             naga::Expression::ImageSample {
@@ -4743,7 +4858,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 coordinate,
                 array_index: None,
                 offset: None,
-                level: naga::SampleLevel::Exact(level),
+                level,
                 depth_ref: None,
                 clamp_to_edge: false,
             },
@@ -5915,6 +6030,132 @@ mod tests {
         assert_eq!(unary_math("gpu_exp2"), Some(naga::MathFunction::Exp2));
         assert_eq!(unary_math("gpu_log2"), Some(naga::MathFunction::Log2));
         assert_eq!(unary_math("llvm.sqrt.f32"), Some(naga::MathFunction::Sqrt));
+    }
+
+    #[test]
+    fn sample_imports_name_their_shape_and_mip_source() {
+        use SampleMip::{Auto, Operand, Zero};
+        use SampleShape::{Cube, Plane};
+        assert_eq!(
+            sample_import("texture_sample_level_cube_f32x4"),
+            Some((Cube, Operand))
+        );
+        assert_eq!(
+            sample_import("texture_sample_cube_f32x4"),
+            Some((Cube, Auto))
+        );
+        assert_eq!(
+            sample_import("texture_sample_2d_f32x4"),
+            Some((Plane, Auto))
+        );
+        assert_eq!(
+            sample_import("texture_sample_level_2d_f32x4"),
+            Some((Plane, Zero))
+        );
+        assert_eq!(sample_import("texture_load_2d_f32x4"), None);
+        assert_eq!(Cube.coordinate_lanes(), VEC3_LANES as usize);
+        assert_eq!(Plane.coordinate_lanes(), VEC2_LANES as usize);
+    }
+
+    #[test]
+    fn cube_sample_lowers_to_a_cube_image() {
+        // Bindings 0:0 (cube), 0:1 (sampler), level and lane as literals: the
+        // shape has to come from the import name alone.
+        let ir = format!(
+            r#"
+declare float @{sample}(i32, i32, i32, i32, float, float, float, float, i32)
+declare void @fragment_store_f32x4(float, float, float, float)
+define void @fs_main() {{
+start:
+  %v = call float @{sample}(i32 0, i32 0, i32 0, i32 1, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 2.000000e+00, i32 0)
+  call void @fragment_store_f32x4(float %v, float %v, float %v, float %v)
+  ret void
+}}
+"#,
+            sample = ornis_gpu_abi::symbols::TEXTURE_SAMPLE_LEVEL_CUBE_F32X4
+        );
+        let func = crate::parse::parse_module(&ir)
+            .expect("parse")
+            .funcs
+            .into_iter()
+            .find(|func| func.name == "fs_main")
+            .expect("entry");
+        let mut lowering = Lowering::new(&[], crate::TextureSampling::SingleSample);
+        lowering
+            .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
+            .expect("lower");
+        let module = lowering.finish();
+        let cube = module
+            .types
+            .iter()
+            .find(|(_, ty)| {
+                matches!(
+                    &ty.inner,
+                    naga::TypeInner::Image {
+                        dim: naga::ImageDimension::Cube,
+                        ..
+                    }
+                )
+            })
+            .map(|(handle, _)| handle)
+            .expect("a cube image type");
+        let consumed = module.entry_points.iter().any(|entry| {
+            entry.function.expressions.iter().any(|(_, expr)| {
+                matches!(
+                    expr,
+                    naga::Expression::ImageSample { level: naga::SampleLevel::Exact(_), .. }
+                )
+            }) && entry.function.expressions.iter().any(|(_, expr)| {
+                matches!(expr, naga::Expression::GlobalVariable(var) if module.global_variables[*var].ty == cube)
+            })
+        });
+        assert!(
+            consumed,
+            "the sample reads the cube image at an exact level"
+        );
+    }
+
+    #[test]
+    fn cube_and_auto_level_samples_validate() {
+        // A cube at an explicit level (the prefiltered IBL chain) and a 2D at
+        // the level the derivatives pick (the BRDF LUT). naga is the only place
+        // the "implicit level is fragment-only" rule is enforced, so the module
+        // goes through the real validator.
+        use ornis_gpu_abi::symbols::{TEXTURE_SAMPLE_2D_F32X4, TEXTURE_SAMPLE_LEVEL_CUBE_F32X4};
+        let ir = format!(
+            r#"
+declare float @{cube}(i32, i32, i32, i32, float, float, float, float, i32)
+declare float @{plane}(i32, i32, i32, i32, float, float, i32)
+declare void @fragment_store_f32x4(float, float, float, float)
+define void @fs_main() {{
+start:
+  %a = call float @{cube}(i32 0, i32 0, i32 0, i32 1, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 2.000000e+00, i32 0)
+  %b = call float @{plane}(i32 0, i32 2, i32 0, i32 3, float 5.000000e-01, float 2.500000e-01, i32 1)
+  %s = fadd float %a, %b
+  call void @fragment_store_f32x4(float %s, float %s, float %s, float %s)
+  ret void
+}}
+"#,
+            cube = TEXTURE_SAMPLE_LEVEL_CUBE_F32X4,
+            plane = TEXTURE_SAMPLE_2D_F32X4
+        );
+        let func = crate::parse::parse_module(&ir)
+            .expect("parse")
+            .funcs
+            .into_iter()
+            .find(|func| func.name == "fs_main")
+            .expect("entry");
+        let mut lowering = Lowering::new(&[], crate::TextureSampling::SingleSample);
+        lowering
+            .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
+            .expect("lower");
+        let module = lowering.finish();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("cube and auto-level samples validate");
     }
 
     #[test]

@@ -1,10 +1,12 @@
-//! Typed 2D texture bindings.
+//! Typed texture bindings.
 //!
 //! A texture is a zero-sized parameter, like [`Storage`](crate::Storage): the
 //! group and binding live in the type, and `#[gpu_entry]` fills them from the
 //! `#[gpu(texture_2d)]` or `#[gpu(depth_texture_2d)]` attribute. Loads are mip
 //! 0. A sampled texture returns one lane of `vec4<f32>`; a depth texture
 //! returns the scalar depth.
+
+use crate::Vec3;
 
 /// Sampled `texture_2d<u32>` at `(G, B)`.
 ///
@@ -80,6 +82,31 @@ impl<const G: u32, const B: u32> Texture2d<G, B> {
         }
     }
 
+    /// Lane `LANE` of `textureSample(tex, sampler, vec2(x, y))`.
+    ///
+    /// The level comes from the screen-space derivatives of the coordinate, so
+    /// this is a fragment-stage operation: naga rejects it in a vertex or
+    /// compute entry. The BRDF LUT is read this way.
+    #[inline(always)]
+    pub fn sample_auto_lane<const SG: u32, const SB: u32, const LANE: u32>(
+        &self,
+        sampler: Sampler<SG, SB>,
+        x: f32,
+        y: f32,
+    ) -> f32 {
+        const { assert!(LANE < 4, "a texel is a vec4") };
+        let _ = (self, sampler);
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::texture_sample_auto(G, B, SG, SB, x, y, LANE)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (x, y);
+            crate::host_unavailable()
+        }
+    }
+
     /// Red lane of `textureSampleLevel(tex, sampler, vec2(x, y), 0.0)`.
     #[inline(always)]
     pub fn sample_r<const SG: u32, const SB: u32>(
@@ -115,6 +142,72 @@ impl<const G: u32, const B: u32> Texture2d<G, B> {
         crate::host_unavailable()
     }
 }
+
+/// Sampled `texture_cube<f32>` at `(G, B)` — the IBL environment maps.
+///
+/// A cube is sampled with a direction, not a uv: the hardware picks the face
+/// from the major axis, so the prefiltered radiance and the irradiance cube
+/// need no per-face bookkeeping in the shader.
+pub struct TextureCube<const G: u32, const B: u32> {
+    _binding: core::marker::PhantomData<fn() -> u32>,
+}
+
+impl<const G: u32, const B: u32> TextureCube<G, B> {
+    /// Lane `LANE` of `textureSampleLevel(cube, sampler, dir, lod)`.
+    ///
+    /// The level is explicit: a prefiltered mip chain is indexed by perceptual
+    /// roughness, so the shader chooses the blur instead of the hardware.
+    #[inline(always)]
+    pub fn sample_level_lane<const SG: u32, const SB: u32, const LANE: u32>(
+        &self,
+        sampler: Sampler<SG, SB>,
+        dir: Vec3,
+        lod: f32,
+    ) -> f32 {
+        const { assert!(LANE < 4, "a texel is a vec4") };
+        let _ = (self, sampler);
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::texture_sample_level_cube(G, B, SG, SB, dir.x, dir.y, dir.z, lod, LANE)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (dir, lod);
+            crate::host_unavailable()
+        }
+    }
+
+    /// Lane `LANE` of `textureSample(cube, sampler, dir)`.
+    ///
+    /// Fragment-only, like every implicit-level sample.
+    #[inline(always)]
+    pub fn sample_auto_lane<const SG: u32, const SB: u32, const LANE: u32>(
+        &self,
+        sampler: Sampler<SG, SB>,
+        dir: Vec3,
+    ) -> f32 {
+        const { assert!(LANE < 4, "a texel is a vec4") };
+        let _ = (self, sampler);
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::texture_sample_cube(G, B, SG, SB, dir.x, dir.y, dir.z, LANE)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = dir;
+            crate::host_unavailable()
+        }
+    }
+}
+
+impl<const G: u32, const B: u32> Clone for TextureCube<G, B> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<const G: u32, const B: u32> Copy for TextureCube<G, B> {}
 
 /// `texture_depth_2d` at `(G, B)`.
 pub struct DepthTexture2d<const G: u32, const B: u32> {
@@ -199,6 +292,7 @@ impl<const G: u32, const B: u32> Copy for Sampler<G, B> {}
 
 const _: () = {
     assert!(core::mem::size_of::<Texture2d<0, 0>>() == 0);
+    assert!(core::mem::size_of::<TextureCube<0, 0>>() == 0);
     assert!(core::mem::size_of::<DepthTexture2d<0, 0>>() == 0);
     assert!(core::mem::size_of::<Sampler<0, 0>>() == 0);
 };
