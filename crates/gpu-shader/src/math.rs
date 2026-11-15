@@ -14,16 +14,16 @@
 //! independently — a parity gate compares them with a tolerance, it never
 //! expects a bit-exact match.
 
-/// Coefficients of the Hermite smoothstep curve, `3t² - 2t³`.
-const SMOOTHSTEP_CUBIC: f32 = 3.0;
-/// Coefficient of the cubic term, `-2t³`.
-const SMOOTHSTEP_CUBIC_NEGATIVE: f32 = -2.0;
-
 /// Host-side implementations shared by the arithmetic functions below.
 ///
 /// `wasm32` has none of these: every shader operation is an import there.
 #[cfg(not(target_arch = "wasm32"))]
 mod host {
+    /// Coefficient of the quadratic term of the Hermite smoothstep, `3t²`.
+    const SMOOTHSTEP_QUADRATIC: f32 = 3.0;
+    /// Coefficient of the cubic term of the Hermite smoothstep, `-2t³`.
+    const SMOOTHSTEP_CUBIC: f32 = -2.0;
+
     /// `-1`, `0` or `1`, the WGSL `sign` of `value`.
     #[inline(always)]
     pub(super) fn sign(value: f32) -> f32 {
@@ -59,7 +59,7 @@ mod host {
             return 0.0;
         }
         let t = ((x - low) / span).clamp(0.0, 1.0);
-        t * t * (super::SMOOTHSTEP_CUBIC + super::SMOOTHSTEP_CUBIC_NEGATIVE * t)
+        t * t * (SMOOTHSTEP_QUADRATIC + SMOOTHSTEP_CUBIC * t)
     }
 }
 
@@ -188,6 +188,40 @@ pub fn atan2(y: f32, x: f32) -> f32 {
     #[cfg(not(target_arch = "wasm32"))]
     {
         libm::atan2f(y, x)
+    }
+}
+
+/// Screen-space derivative along x, one WGSL `dpdx`.
+///
+/// A host build evaluates one pixel at a time, so the derivative there is zero:
+/// there is no neighbour to difference against. A shader must not depend on the
+/// host value — it exists so the kernel crate is executable off the GPU.
+#[inline(always)]
+#[must_use]
+pub fn dpdx(value: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::dpdx(value)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
+        0.0
+    }
+}
+
+/// Screen-space derivative along y, one WGSL `dpdy`.
+#[inline(always)]
+#[must_use]
+pub fn dpdy(value: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::dpdy(value)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
+        0.0
     }
 }
 
@@ -323,5 +357,72 @@ pub fn normalize_lane<const LANE: u32>(x: f32, y: f32, z: f32) -> f32 {
             1 => y * inverse,
             _ => z * inverse,
         }
+    }
+}
+
+/// The host arms, evaluated: the SDK is the reference implementation a parity
+/// gate compares GPU output against, so each arm has to return the real value
+/// rather than a placeholder.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn unary_arms_evaluate() {
+        close(sqrt(4.0), 2.0);
+        close(abs(-2.5), 2.5);
+        close(sign(-3.0), -1.0);
+        close(sign(0.0), 0.0);
+        close(sign(3.0), 1.0);
+        close(fract(2.25), 0.25);
+        close(log2(8.0), 3.0);
+        close(exp2(3.0), 8.0);
+        close(ln(1.0), 0.0);
+        close(exp(0.0), 1.0);
+        close(cos(0.0), 1.0);
+        close(sin(0.0), 0.0);
+        close(tan(0.0), 0.0);
+        close(acos(1.0), 0.0);
+    }
+
+    #[test]
+    fn binary_and_ternary_arms_evaluate() {
+        close(pow(2.0, 3.0), 8.0);
+        close(atan2(1.0, 1.0), core::f32::consts::FRAC_PI_4);
+        close(clamp(1.5, 0.0, 1.0), 1.0);
+        close(clamp(-1.5, 0.0, 1.0), 0.0);
+        close(clamp(0.25, 0.0, 1.0), 0.25);
+        close(mix(2.0, 4.0, 0.5), 3.0);
+        close(smoothstep(0.0, 1.0, 0.5), 0.5);
+        close(smoothstep(0.0, 1.0, -1.0), 0.0);
+        close(smoothstep(0.0, 1.0, 2.0), 1.0);
+    }
+
+    #[test]
+    fn vector_arms_evaluate() {
+        close(dot2(1.0, 2.0, 3.0, 4.0), 11.0);
+        close(dot3(1.0, 2.0, 3.0, 4.0, 5.0, 6.0), 32.0);
+        close(length3(3.0, 4.0, 0.0), 5.0);
+        close(cross_lane::<0>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 0.0);
+        close(cross_lane::<1>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 0.0);
+        close(cross_lane::<2>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0), 1.0);
+        close(normalize_lane::<0>(3.0, 4.0, 0.0), 0.6);
+        close(normalize_lane::<1>(3.0, 4.0, 0.0), 0.8);
+        close(homogeneous_divide(6.0, 3.0), 2.0);
+    }
+
+    #[test]
+    fn derivative_arms_report_no_neighbour() {
+        // A host evaluation is one pixel, so there is nothing to difference
+        // against: the derivative is zero, and a shader must not rely on it.
+        close(dpdx(5.0), 0.0);
+        close(dpdy(5.0), 0.0);
     }
 }
