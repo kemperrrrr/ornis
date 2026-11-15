@@ -13,6 +13,9 @@ mod compute;
 #[path = "gpu_e2e/compute_abi.rs"]
 mod compute_abi;
 
+#[path = "gpu_e2e/workgroup_layout.rs"]
+mod workgroup_layout;
+
 #[path = "gpu_e2e/texture_fetch.rs"]
 mod texture_fetch;
 
