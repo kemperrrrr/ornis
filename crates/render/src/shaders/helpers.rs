@@ -211,27 +211,34 @@ fn specular_aa_roughness(roughness: f32, n: glam::Vec3) -> f32 {
     return sqrt(sqrt(max(square, 0.0)));
 }
 
-/// Zero a non-finite HDR color. Finite highlights stay untouched so ACES
-/// in the composite can compress them; NaN/Inf would otherwise resolve to
-/// white.
+/// Zero the non-finite channels of an HDR color. Finite highlights stay
+/// untouched so ACES in the composite can compress them; NaN/Inf would
+/// otherwise resolve to white.
+///
+/// Each channel is *selected* away, not masked by a factor: `NaN * 0` and
+/// `Inf * 0` are both NaN, so the old `color * ok` form left the poisoned
+/// channel poisoned and also dropped the finite channels of the same pixel.
+/// Selecting returns the replacement value unchanged, which is the only way
+/// to get a NaN out of the pipeline.
 #[ornis_macros::wgsl_fn]
 fn sanitize_hdr(color: glam::Vec3) -> glam::Vec3 {
-    let x_ok = select(
-        0.0,
-        1.0,
-        color.x == color.x && abs(color.x) < HDR_FINITE_LIMIT,
+    return Vec3::new(
+        select(
+            0.0,
+            color.x,
+            color.x == color.x && abs(color.x) < HDR_FINITE_LIMIT,
+        ),
+        select(
+            0.0,
+            color.y,
+            color.y == color.y && abs(color.y) < HDR_FINITE_LIMIT,
+        ),
+        select(
+            0.0,
+            color.z,
+            color.z == color.z && abs(color.z) < HDR_FINITE_LIMIT,
+        ),
     );
-    let y_ok = select(
-        0.0,
-        1.0,
-        color.y == color.y && abs(color.y) < HDR_FINITE_LIMIT,
-    );
-    let z_ok = select(
-        0.0,
-        1.0,
-        color.z == color.z && abs(color.z) < HDR_FINITE_LIMIT,
-    );
-    return color * (x_ok * y_ok * z_ok);
 }
 
 /// Base specular lobe `F · D · V`, with Smith `V` already including
@@ -790,7 +797,15 @@ mod tests {
     fn sanitize_hdr_drops_non_finite_colors() {
         let src = sanitize_hdr::wgsl_source();
         assert!(src.contains("HDR_FINITE_LIMIT"), "{src}");
+        // The NaN test stays spelled `v == v`: naga's unordered compare is
+        // what the IR path lowers.
         assert!(src.contains("color.x == color.x"), "{src}");
+        // The replacement is a `select` per channel, never a factor
+        // multiply: `NaN * 0` and `Inf * 0` are both NaN, so a mask leaves
+        // the poisoned channel poisoned (and drops the finite channels of the
+        // same pixel). Any `color *` in the body is the regression.
+        assert!(src.contains("select(0.0, color.x,"), "{src}");
+        assert!(!src.contains("color *"), "{src}");
     }
 
     #[test]

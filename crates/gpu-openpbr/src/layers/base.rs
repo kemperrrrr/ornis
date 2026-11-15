@@ -34,15 +34,27 @@ pub fn specular_aa_roughness(roughness: f32, n: Vec3) -> f32 {
     sqrt(sqrt(max_f32(square, OFF)))
 }
 
-/// Zero a non-finite HDR color. Finite highlights stay untouched so ACES in the
-/// composite can compress them; NaN/Inf would otherwise resolve to white.
+/// Zero the non-finite channels of an HDR color. Finite highlights stay
+/// untouched so ACES in the composite can compress them; NaN/Inf would
+/// otherwise resolve to white.
+///
+/// The channels are *selected* away, not masked by a factor: `NaN * 0` and
+/// `Inf * 0` are both NaN, so a `color * ok` form leaves the poisoned channel
+/// poisoned and also drops the finite channels of the same pixel.
 #[inline(always)]
 #[must_use]
 pub fn sanitize_hdr(color: Vec3) -> Vec3 {
-    let x_ok = factor(finite(color.x));
-    let y_ok = factor(finite(color.y));
-    let z_ok = factor(finite(color.z));
-    scale3(color, x_ok * y_ok * z_ok)
+    v3(
+        keep_finite(color.x),
+        keep_finite(color.y),
+        keep_finite(color.z),
+    )
+}
+
+/// `value` when it is a number the composite may carry, `0.0` otherwise.
+#[inline(always)]
+fn keep_finite(value: f32) -> f32 {
+    if finite(value) { value } else { OFF }
 }
 
 /// Pick a deferred debug term. `view == 0` returns `beauty` unchanged.
