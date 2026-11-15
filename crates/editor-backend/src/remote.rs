@@ -2679,6 +2679,50 @@ mod tests {
         );
     }
 
+    /// Snap can be enabled before the wasm module finishes loading: the click
+    /// only updates the JS mirror then, so the effective-step label reads back
+    /// `null` and stays empty until the next field edit. Boot re-applies the
+    /// mirror and must notify the toolbar afterwards, and the toolbar must
+    /// subscribe (E4 review, Editor 3).
+    #[test]
+    fn editor_v2_repaints_the_effective_rotate_step_after_boot() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../editor-v2");
+        let live = std::fs::read_to_string(root.join("live.js")).expect("editor-v2 live");
+        assert!(
+            live.contains("onReady(renderEffectiveRotateStep)"),
+            "live.js must repaint the effective step once the viewport is ready"
+        );
+        let viewport =
+            std::fs::read_to_string(root.join("viewport.js")).expect("editor-v2 viewport");
+        assert!(
+            viewport.contains("onReady(callback)"),
+            "window.OrnisViewport must expose the ready hook to the toolbar"
+        );
+        let ready = viewport
+            .split("function onViewportReady(callback)")
+            .nth(1)
+            .expect("viewport.js must define the ready hook");
+        assert!(
+            ready.contains("if (booted)"),
+            "subscribing after boot must run at once — there is no second boot"
+        );
+        let boot = viewport
+            .split("async function boot()")
+            .nth(1)
+            .expect("viewport.js must boot the wasm module");
+        let mirror = boot
+            .find("set_snap(")
+            .expect("boot must re-apply the snap mirror");
+        let notify = boot
+            .find("const callbacks = readyCallbacks;")
+            .expect("boot must run the ready subscribers");
+        assert!(
+            mirror < notify,
+            "the subscribers must run after the snap mirror is re-applied, \
+             otherwise the effective step is read back before it is set"
+        );
+    }
+
     // ── POST guards: Origin / Host / Content-Type / body limit ────────────
 
     #[test]

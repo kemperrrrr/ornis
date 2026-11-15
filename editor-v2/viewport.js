@@ -49,6 +49,7 @@ const currentMode = () => {
 };
 
 let booted = false;
+let readyCallbacks = [];
 let gizmoMode = 'move';
 let gizmoSpace = 'world';
 let editorMode = 'edit';
@@ -162,6 +163,19 @@ const paintOverlay = () => {
 
 const overlayLoop = () => { paintOverlay(); requestAnimationFrame(overlayLoop); };
 
+// A control used before the wasm module is ready only updates the JS mirror,
+// so a read-back taken then is stale (the effective rotate step reads `null`).
+// Boot re-applies the mirrors first and only then runs the subscribers, which
+// is what lets the toolbar repaint against the applied settings. Subscribing
+// after boot runs immediately, so the order of the two modules cannot lose it.
+function onViewportReady(callback) {
+    if (booted) {
+        callback();
+        return;
+    }
+    readyCallbacks.push(callback);
+}
+
 async function boot() {
     console.log('[ornis-editor] loading WASM…');
     await init();
@@ -177,6 +191,9 @@ async function boot() {
     set_snap(snap.enabled, snap.translate, snap.rotateDeg, snap.scale);
     set_editor_mode(editorMode);
     requestAnimationFrame(overlayLoop);
+    const callbacks = readyCallbacks;
+    readyCallbacks = [];
+    callbacks.forEach((callback) => callback());
 }
 
 boot().catch((err) => {
@@ -213,6 +230,12 @@ window.OrnisViewport = {
     // than duplicating the formula. `null` when the channel is unquantized.
     effectiveRotateStep() {
         return booted ? snap_effective_rotate_deg() : null;
+    },
+    // Runs `callback` once boot has re-applied the toolbar mirrors (or
+    // immediately if it already has), so a read-back is not left stale by a
+    // control used before the wasm module was ready.
+    onReady(callback) {
+        onViewportReady(callback);
     },
     undoGizmo() {
         return undoGizmoDrag();

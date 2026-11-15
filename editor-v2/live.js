@@ -859,6 +859,13 @@
   [snapTranslate, snapRotate, snapScale].forEach(function (input) {
     if (input) input.addEventListener("change", pushSnap);
   });
+  // Snap enabled before the wasm module finished loading only updated the
+  // mirror, so the label read back `null` and stayed empty until the next
+  // field edit. Boot re-applies the mirror — repaint the label after it.
+  var viewportApi = window.OrnisViewport;
+  if (viewportApi && viewportApi.onReady) {
+    viewportApi.onReady(renderEffectiveRotateStep);
+  }
 
   var commandPalette = document.getElementById("command-palette");
   if (commandPalette) {
