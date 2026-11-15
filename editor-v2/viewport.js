@@ -38,6 +38,21 @@ const nativeViewport = !!(shell && shell.nativeViewport);
 // in native mode, where the shell renders instead).
 let wasm = null;
 
+// ── copy ──────────────────────────────────────────────────────────────────
+// Every user-visible string this module owns, in one place and in the same
+// language as the rest of the editor UI. The shell owns the *environment*
+// wording (`window.ornisShell.webgpuNotice`) — that one is Rust's, because only
+// the shell knows which host the page is in.
+const STRINGS = {
+    noticeTitle: 'Viewport unavailable',
+    noticeFallback:
+        'WebGPU is unavailable in this environment — open the editor in Chrome via cargo xtask editor',
+    // Shown over the viewport in native mode: the toolbar's 3D/2D, gizmo and
+    // snap controls drive the WASM replica, which does not exist when the shell
+    // renders. Saying so beats a button that silently does nothing.
+    nativeToolbarNotice: 'Gizmo, snap and 3D/2D controls apply to the browser viewport (cargo xtask editor)',
+};
+
 // Pointer events (orbit camera, handled inside the WASM module) need
 // touch-action:none so the browser does not hijack drags.
 if (canvasEl) canvasEl.style.touchAction = 'none';
@@ -73,15 +88,14 @@ let snap = { enabled: false, translate: 0.5, rotateDeg: 15, scale: 0.25 };
 
 // ── written fallback ──────────────────────────────────────────────────────
 // The written fallback: no WebGPU in this webview, so there is nothing to
-// render here. Wording comes from the shell (it knows the environment); the
-// page only decides that this is the state to paint.
+// render here. The title is ours; the body wording comes from the shell when it
+// has one (it knows the environment), with an English fallback for a browser.
 function showNotice(reason) {
     if (!noticeEl) return;
-    if (noticeTitleEl) noticeTitleEl.textContent = 'Вьюпорт недоступен';
+    if (noticeTitleEl) noticeTitleEl.textContent = STRINGS.noticeTitle;
     if (noticeBodyEl) {
         noticeBodyEl.textContent =
-            (shell && shell.webgpuNotice) ||
-            'WebGPU недоступен в этом окружении — откройте редактор в Chrome через `cargo xtask editor`';
+            (shell && shell.webgpuNotice) || STRINGS.noticeFallback;
     }
     if (noticeDetailEl) {
         noticeDetailEl.textContent = reason ? String(reason) : '';
@@ -90,7 +104,10 @@ function showNotice(reason) {
     noticeEl.hidden = false;
     if (canvasEl) {
         // The red `#300` failure fill is gone: an explained viewport beats a
-        // dead one, so the canvas steps aside instead.
+        // dead one, so the canvas steps aside instead. `hidden` only wins over
+        // `.viewport-canvas { display: block }` because styles.css also carries
+        // `.viewport-canvas[hidden] { display: none }` — an attribute alone
+        // does not beat a class rule.
         canvasEl.classList.remove('failed');
         canvasEl.hidden = true;
     }
@@ -109,9 +126,49 @@ function webgpuMissing() {
     return !(typeof navigator !== 'undefined' && 'gpu' in navigator);
 }
 
+// Failure messages that mean "this environment cannot do WebGPU", as opposed to
+// "the renderer is broken". Chrome on a Linux box without the right flags
+// resolves `requestAdapter()` to `null` and wgpu surfaces that as an adapter or
+// device failure — an environment fact, like a missing `navigator.gpu`, so it
+// deserves the written notice rather than a red canvas. A *different* init error
+// (shader compilation, a lost device) is a real defect and keeps the red mark.
+const WEBGPU_ENVIRONMENT_FAILURE =
+    /navigator\.gpu|webgpu|adapter|requestAdapter|requestDevice|no suitable|not supported/i;
+
+function isEnvironmentWebgpuFailure(message) {
+    return webgpuMissing() || WEBGPU_ENVIRONMENT_FAILURE.test(String(message || ''));
+}
+
 // ── native viewport client ────────────────────────────────────────────────
 // The shell draws the scene; the page reports the box and forwards input. Wire
 // format and validation live in `ornis_shell::viewport_ipc`.
+
+// Interactive controls that live *inside* `#viewport` (mode switch, settings,
+// gizmo toolbars, snap fields). A native-viewport handler must ignore events
+// whose target is one of these, or a button click would also become a camera
+// drag and `setPointerCapture` would steal the following events from the
+// button. Kept as one selector so the filter cannot drift from the markup.
+const VIEWPORT_CONTROL_SELECTOR =
+    'button, input, select, textarea, a, [contenteditable], ' +
+    '.viewport-mode, .viewport-gizmos, .viewport-settings, .snap-controls, .viewport-notice';
+
+// Whether a pointer/wheel/keyboard event belongs to the engine rather than to a
+// page control. `closest` walks up from the real target, so a click on an
+// icon inside a button is still recognised as that button.
+function isViewportSurfaceEvent(event) {
+    const target = event && event.target;
+    if (!target || typeof target.closest !== 'function') {
+        // No element target (a synthetic event, or text selection): treat it as
+        // the viewport itself, which is what a drag on the backing area is.
+        return true;
+    }
+    if (target === viewportEl || target === canvasEl) return true;
+    if (target.closest(VIEWPORT_CONTROL_SELECTOR)) return false;
+    // Anything else inside the viewport box (the grid overlay, the canvas
+    // container) is still backing surface.
+    return viewportEl ? viewportEl.contains(target) : false;
+}
+
 function postShell(type, data) {
     if (!shell || typeof window.ipc === 'undefined' || !window.ipc) return;
     try {
@@ -121,29 +178,75 @@ function postShell(type, data) {
     }
 }
 
-function postBounds() {
-    if (!viewportEl) return;
-    const rect = viewportEl.getBoundingClientRect();
-    postShell('viewport_bounds', {
+function viewportRect() {
+    return viewportEl
+        ? viewportEl.getBoundingClientRect()
+        : { left: 0, top: 0, width: 0, height: 0 };
+}
+
+function boundsPost(rect) {
+    return {
         x: rect.left,
         y: rect.top,
         width: rect.width,
         height: rect.height,
         scale: window.devicePixelRatio || 1,
-    });
+    };
+}
+
+function postBounds() {
+    if (!viewportEl) return;
+    postShell('viewport_bounds', boundsPost(viewportRect()));
+}
+
+// Tells the page that the toolbar cannot drive anything in this mode, so the
+// controls read as unavailable instead of silently doing nothing.
+function markToolbarUnavailable() {
+    const controls = document.querySelectorAll(
+        '.viewport-mode button, .viewport-gizmos .gizmo, .viewport-settings, .snap-controls',
+    );
+    for (const control of controls) {
+        control.setAttribute('aria-disabled', 'true');
+        control.classList.add('unavailable');
+        if (!control.title) control.title = STRINGS.nativeToolbarNotice;
+    }
+    const banner = document.getElementById('viewport-native-hint');
+    if (banner) {
+        banner.textContent = STRINGS.nativeToolbarNotice;
+        banner.hidden = false;
+    }
 }
 
 function startNativeViewport() {
     document.body.classList.add('ornis-native-viewport');
     hideNotice();
+    markToolbarUnavailable();
     // The shell configures its layer from the first post onwards; layout
     // changes (docks, tabs, window resize) arrive as more posts.
     postBounds();
+
+    // A size observer alone misses a *move*: the viewport box can shift without
+    // changing size (top bar grows, a banner appears, a panel scrolls) and the
+    // native layer would then sit at the old place. So the rectangle is also
+    // re-read once per frame and posted only when it actually changed — a
+    // stable layout costs one `getBoundingClientRect` and one comparison.
+    let lastBounds = boundsPost(viewportRect());
+    const sameBounds = (a, b) =>
+        a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height && a.scale === b.scale;
+    const followBounds = () => {
+        const next = boundsPost(viewportRect());
+        if (!sameBounds(next, lastBounds)) {
+            lastBounds = next;
+            postShell('viewport_bounds', next);
+        }
+        requestAnimationFrame(followBounds);
+    };
     if (typeof ResizeObserver === 'function' && viewportEl) {
         const observer = new ResizeObserver(postBounds);
         observer.observe(viewportEl);
     }
     window.addEventListener('resize', postBounds);
+    requestAnimationFrame(followBounds);
     if (!viewportEl) return;
 
     const postInput = (extra) => {
@@ -168,18 +271,30 @@ function startNativeViewport() {
         return held;
     };
     let last = null;
+    // Held keys, mirrored from DOM `code` -> raw engine codes. The shell's
+    // `viewport_ipc` validates this list exactly like `pressed_buttons`.
+    const heldKeys = new Set();
     const pointer = (event) => {
-        const rect = viewportEl.getBoundingClientRect();
+        const rect = viewportRect();
         const position = [event.clientX - rect.left, event.clientY - rect.top];
         const delta = last ? [position[0] - last[0], position[1] - last[1]] : [0, 0];
         last = position;
         postInput({
+            pressed_keys: Array.from(heldKeys),
             pressed_mouse_buttons: pressedButtons(event.buttons),
             pointer_position: position,
             pointer_delta: delta,
         });
     };
+    const releaseAll = () => {
+        last = null;
+        heldKeys.clear();
+        postInput({});
+    };
     viewportEl.addEventListener('pointerdown', (event) => {
+        // A click on the 3D/2D switch, Settings, a gizmo tool or a snap field is
+        // that control's, not a camera drag.
+        if (!isViewportSurfaceEvent(event)) return;
         // Capture keeps a drag alive when the pointer leaves the box; the
         // shell's layer is under the page, so the page must own the drag.
         if (viewportEl.setPointerCapture) {
@@ -191,37 +306,100 @@ function startNativeViewport() {
         }
         pointer(event);
     });
-    viewportEl.addEventListener('pointermove', pointer);
+    viewportEl.addEventListener('pointermove', (event) => {
+        if (!isViewportSurfaceEvent(event)) return;
+        pointer(event);
+    });
     const release = (event) => {
+        if (!isViewportSurfaceEvent(event)) return;
         pointer(event);
         last = null;
     };
     viewportEl.addEventListener('pointerup', release);
     viewportEl.addEventListener('pointercancel', release);
-    viewportEl.addEventListener('lostpointercapture', () => {
-        last = null;
-        postInput({});
-    });
+    viewportEl.addEventListener('lostpointercapture', releaseAll);
     viewportEl.addEventListener(
         'wheel',
         (event) => {
+            // Wheel over a snap field must scroll/step that field, not zoom the
+            // camera — and must not have its default suppressed.
+            if (!isViewportSurfaceEvent(event)) return;
             event.preventDefault();
-            const rect = viewportEl.getBoundingClientRect();
+            const rect = viewportRect();
             postInput({
+                pressed_keys: Array.from(heldKeys),
                 pointer_position: [event.clientX - rect.left, event.clientY - rect.top],
                 wheel_delta: event.deltaY,
             });
         },
+        // Capture phase: a handler of the field itself still runs, but the
+        // filter above keeps the event away from the shell.
         { passive: false },
     );
-    viewportEl.addEventListener('contextmenu', (event) => event.preventDefault());
-    // A tab switch or window deactivation delivers no `pointerup`; the shell
-    // would keep a button held and orbit forever.
-    window.addEventListener('blur', () => {
-        last = null;
-        postInput({});
+    viewportEl.addEventListener('contextmenu', (event) => {
+        if (!isViewportSurfaceEvent(event)) return;
+        event.preventDefault();
     });
+
+    // Keyboard follows focus, like any editor viewport: keys reach the engine
+    // only while focus is inside the viewport box, so typing in the inspector or
+    // a shortcut field never moves the camera. The box itself is made focusable
+    // so a click on the backing surface starts keyboard navigation.
+    viewportEl.setAttribute('tabindex', '0');
+    const focusInside = () => {
+        const active = document.activeElement;
+        return !!(viewportEl && active && viewportEl.contains(active));
+    };
+    const onKey = (event, pressed) => {
+        if (!focusInside()) return;
+        if (!isViewportSurfaceEvent(event)) return;
+        const codes = gameKeyCodes(event.code);
+        if (!codes || codes.length === 0) return;
+        event.preventDefault();
+        for (const code of codes) {
+            if (pressed) heldKeys.add(code);
+            else heldKeys.delete(code);
+        }
+        postInput({
+            pressed_keys: Array.from(heldKeys),
+            pointer_position: last || [0, 0],
+        });
+    };
+    // The listener sits on the window so a key-up still arrives after focus
+    // moved; the guards above decide whether it belongs to the engine.
+    window.addEventListener('keydown', (event) => onKey(event, true));
+    window.addEventListener('keyup', (event) => onKey(event, false));
+    // Losing the window (tab switch) delivers no `keyup`/`pointerup`; without
+    // this the shell keeps a key or button held forever.
+    window.addEventListener('blur', releaseAll);
     console.log('[ornis-editor] native viewport: shell renders, page lays out');
+}
+
+// DOM `KeyboardEvent.code` -> the raw code aliases the engine reads, mirroring
+// `ornis_input::KeyCode` (winit physical + ASCII for W/A/S/D, legacy DOM key
+// codes for the arrows). Kept beside its only caller: the WASM path has the same
+// table inside `ornis-wasm`, which cannot be reached from here.
+function gameKeyCodes(code) {
+    switch (code) {
+        case 'KeyW':
+            return [17, 87];
+        case 'KeyA':
+            return [30, 65];
+        case 'KeyS':
+            return [31, 83];
+        case 'KeyD':
+            return [32, 68];
+        case 'ArrowUp':
+            return [38];
+        case 'ArrowDown':
+            return [40];
+        case 'ArrowLeft':
+            return [37];
+        case 'ArrowRight':
+            return [39];
+        default:
+            return null;
+    }
 }
 
 if (btn3d) btn3d.addEventListener('click', () => applyMode('perspective3d'));
@@ -393,14 +571,16 @@ async function boot() {
 boot().catch((err) => {
     console.error('[ornis-editor] failed to start:', err);
     const message = (err && err.message) || String(err);
-    if (webgpuMissing()) {
-        // A WebGPU-less webview is an environment fact, not an editor bug: the
-        // written fallback beats a red canvas nobody can act on.
+    if (!nativeViewport && isEnvironmentWebgpuFailure(message)) {
+        // The environment cannot do WebGPU (no `navigator.gpu`, or an adapter
+        // that resolved null): the written notice beats a red canvas nobody can
+        // act on. `nativeViewport` is excluded because the shell's own failure
+        // to attach the layer says nothing about WebGPU.
         showNotice(message);
         return;
     }
-    // WebGPU exists and still failed: that is a real defect worth a loud red
-    // canvas and a title, so the environment case above must not swallow it.
+    // WebGPU exists and the renderer still failed on a real defect (shader,
+    // device lost): keep the loud red canvas and its title.
     if (canvasEl) {
         canvasEl.classList.add('failed');
         canvasEl.title = 'WebGPU init failed: ' + message;

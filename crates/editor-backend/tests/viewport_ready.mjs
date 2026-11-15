@@ -26,9 +26,13 @@ const liveSource = readFileSync(join(editorDir, 'live.js'), 'utf8');
 // `a_rotate_step_wider_than_a_half_turn_still_turns` (crates/editor/src/snap.rs)
 // plus `effective_rotate_step_is_readable_from_the_browser`
 // (crates/wasm/src/snap.rs) — keep this stub in step with them.
+// The failure that must stay a loud red canvas is a *renderer defect* after a
+// working adapter (here: shader compilation), not an environment limit: the page
+// routes "no navigator.gpu" and "no adapter" to the written notice instead, so a
+// message naming an adapter would test the wrong branch.
 function stubSource(failInit) {
     const initBody = failInit
-        ? "throw new Error('WebGPU adapter unavailable');"
+        ? "throw new Error('shader compilation failed: unresolved identifier');"
         : 'await gate;';
     return `
 export const calls = [];

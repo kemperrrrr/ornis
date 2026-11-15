@@ -181,11 +181,33 @@ button { font: inherit; color: inherit; }
   background: var(--viewport); }
 .viewport-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .viewport-canvas.failed { background: #300; }
+/* `hidden` is a UA rule of the lowest specificity: a class rule with
+   `display: block` beats it, so the attribute alone would not hide the canvas
+   when the written fallback replaces it. */
+.viewport-canvas[hidden] { display: none; }
 /* Native viewport (PLAN.md §j, вариант 1): the shell draws the scene into a
    layer UNDER the webview, so the page's own viewport box must let it show
    through. Only in embedded mode — Chrome keeps the opaque canvas. */
 body.ornis-native-viewport .viewport { background: transparent; }
 body.ornis-native-viewport .viewport-canvas { visibility: hidden; }
+/* The toolbar's 3D/2D, gizmo and snap controls drive the WASM replica, which
+   does not exist when the shell renders. They stay visible (the frame is the
+   same) but read as unavailable, and one line of text says why. */
+body.ornis-native-viewport .viewport-mode,
+body.ornis-native-viewport .viewport-gizmos,
+body.ornis-native-viewport .snap-controls { opacity: .55; }
+/* `aria-disabled`, not `disabled`: a real `disabled` attribute would also
+   remove the controls from the tab order and from the a11y tree. */
+body.ornis-native-viewport .unavailable,
+body.ornis-native-viewport .unavailable:disabled { cursor: not-allowed; }
+.viewport-native-hint {
+  position: absolute; left: 50%; top: 8px; transform: translateX(-50%);
+  z-index: 2; margin: 0; max-width: min(52ch, calc(100% - 20px));
+  padding: 4px 10px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line); color: var(--muted);
+  font-size: 11px; line-height: 1.4; text-align: center;
+}
+.viewport-native-hint[hidden] { display: none; }
 /* Written fallback for "this webview has no WebGPU". Replaces the bare red
    canvas: a dead end with no way forward is worse than nothing. */
 .viewport-notice {

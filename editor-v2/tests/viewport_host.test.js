@@ -10,8 +10,12 @@
 // browser would: a WebGPU-less or native-mode boot must not even import the
 // WASM package. No browser, no GPU, no network.
 //
-// Run: `node --test editor-v2/tests/` (CI: `cargo xtask quality`, stage
-// `editor-viewport`). A missing `node` is a SKIP there, never a pass.
+// Run: `node --test editor-v2/tests/viewport_host.test.js` (CI: `cargo xtask
+// quality`, stage `editor-viewport`). The explicit file matters: a bare
+// `node --test editor-v2/tests/` is a *directory* argument, which Node 24
+// rejects with "Cannot find module". A shell glob
+// (`editor-v2/tests/*.test.js`) works too, but the named file does not depend
+// on the caller's globbing. A missing `node` is a SKIP there, never a pass.
 'use strict';
 
 const assert = require('node:assert');
@@ -41,10 +45,14 @@ export const viewport_state_json = () =>
   JSON.stringify({ mode: 'perspective3d', dpr: 1, grid: null });
 `;
 
-// A WebGPU-capable host whose adapter/device refuses: the renderer exists but
-// cannot start. That is a real defect and must stay a loud red canvas.
-const WASM_STUB_REFUSING = `
-export default async () => { throw new Error('WebGPU adapter unavailable'); };
+// A WebGPU-capable host whose "requestAdapter()" resolves null -- exactly what
+// Chrome on a box without the right flags does. This is an environment fact, so
+// it must land on the written notice (not the red canvas) even though
+// "navigator.gpu" exists.
+const WASM_STUB_NO_ADAPTER = `
+export default async () => {
+  throw new Error('no adapter found (requestAdapter returned null)');
+};
 export const start_renderer = async () => {};
 export const set_viewport_mode = () => true;
 export const set_gizmo_mode = () => true;
@@ -56,16 +64,36 @@ export const snap_effective_rotate_deg = () => 15;
 export const viewport_state_json = () => JSON.stringify({ mode: 'perspective3d', dpr: 1 });
 `;
 
+// A genuine defect after a working adapter: shader compilation failed. This is
+// a bug, not an environment limit, so the loud red canvas must stay.
+const WASM_STUB_BROKEN_SHADER = `
+export default async () => {
+  throw new Error('shader compilation failed: unresolved identifier');
+};`;
+
 let copyCounter = 0;
 
 // Minimal element: the viewport only reads boxes, toggles classes/attributes
 // and registers listeners. `dispatch` runs them, which is how input
 // forwarding is observed.
-function element({ width = 640, height = 480, left = 100, top = 60, hidden = false } = {}) {
+//
+// `parent` + `controls` model the real DOM shape the input filter walks: an
+// event dispatched on a control bubbles to `#viewport`, so `target.closest()`
+// must be able to find the control's selectors. Without that the "a click on the
+// toolbar is not a camera drag" case could not be tested at all.
+function element({
+  width = 640,
+  height = 480,
+  left = 100,
+  top = 60,
+  hidden = false,
+  controls = [],
+  selectors = [],
+} = {}) {
   const listeners = new Map();
   const classes = new Set();
   const attrs = new Map();
-  return {
+  const el = {
     hidden,
     title: '',
     textContent: '',
@@ -94,31 +122,64 @@ function element({ width = 640, height = 480, left = 100, top = 60, hidden = fal
     },
     setPointerCapture: () => {},
     hasPointerCapture: () => true,
+    // Containment is by explicit list: the stub has no tree to walk.
+    contains: (node) => node === el || controls.includes(node),
+    // Selector matching for `closest`: the test gives each element the list of
+    // selectors it should answer for, and the walk goes element -> parent.
+    closest: (selector) => {
+      const wanted = selector.split(',').map((part) => part.trim());
+      let node = el;
+      while (node) {
+        if (node.selectors && node.selectors.some((s) => wanted.includes(s))) return node;
+        node = node.parent;
+      }
+      return null;
+    },
+    selectors,
+    controls,
+    parent: null,
     dispatch: (type, event) => {
       // Real events always answer `preventDefault`; the viewport calls it on
       // wheel to keep the page from scrolling.
-      const withDefaults = Object.assign({ preventDefault: () => {} }, event);
+      const withDefaults = Object.assign(
+        { preventDefault: () => {}, target: el },
+        event,
+      );
       for (const handler of listeners.get(type) || []) handler(withDefaults);
     },
   };
+  for (const control of controls) control.parent = el;
+  return el;
+}
+
+// A toolbar control inside `#viewport` (a 3D/2D button, a gizmo tool, a snap
+// field): it must keep its own pointer and wheel events.
+function control(selectors) {
+  return element({ width: 30, height: 30, selectors });
 }
 
 // Boots a fresh copy of `viewport.js` next to the stub WASM package with the
 // DOM/window stubs installed as globals (the module reads them as globals,
 // exactly like in a browser).
-async function bootPage({ shell, gpu = true, failInit = false }) {
+async function bootPage({ shell, gpu = true, stub = WASM_STUB }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ornis-viewport-'));
   fs.mkdirSync(path.join(dir, 'pkg'));
   fs.writeFileSync(
     path.join(dir, 'pkg', 'ornis_wasm.js'),
-    failInit ? WASM_STUB_REFUSING : WASM_STUB,
+    stub,
   );
   copyCounter += 1;
   const entry = path.join(dir, `viewport-${copyCounter}.mjs`);
   fs.writeFileSync(entry, SOURCE);
 
   const dom = {
-    viewport: element(),
+    viewport: element({
+      controls: [
+        control(['button']),
+        control(['input']),
+        control(['.viewport-gizmos']),
+      ],
+    }),
     canvas: element(),
     'plane-grid': element(),
     'mode-3d': element(),
@@ -129,11 +190,18 @@ async function bootPage({ shell, gpu = true, failInit = false }) {
     'viewport-notice-title': element(),
     'viewport-notice-body': element(),
     'viewport-notice-detail': element(),
+    'viewport-native-hint': element({ hidden: true }),
   };
   const posted = [];
   const windowListeners = new Map();
   const bodyClasses = new Set();
   const consoleMessages = [];
+  // `document.querySelectorAll` in the module asks for one selector (the
+  // toolbar controls it disables in native mode); this answers it with the
+  // stubbed controls.
+  const TOOLBAR_SELECTOR =
+    '.viewport-mode button, .viewport-gizmos .gizmo, .viewport-settings, .snap-controls';
+  const queryStubs = [[[dom['mode-3d'], dom['mode-2d']], TOOLBAR_SELECTOR]];
   const saved = {
     window: globalThis.window,
     document: globalThis.document,
@@ -172,13 +240,32 @@ async function bootPage({ shell, gpu = true, failInit = false }) {
         contains: (name) => bodyClasses.has(name),
       },
     },
+    // The toolbar controls `markToolbarUnavailable` walks: the DOM stub has no
+    // tree, so the list is what `querySelectorAll` answers with. `mode-3d` and
+    // `mode-2d` are in the map too, so they must be given a matching selector.
+    querySelectorAll: (selector) => {
+      for (const [list, matches] of queryStubs) {
+        if (matches === selector) return list;
+      }
+      return [];
+    },
     getElementById: (id) => dom[id] || null,
+    // `document.activeElement` decides keyboard routing: only a focused element
+    // inside the viewport box forwards keys to the engine.
+    activeElement: null,
   };
   globalThis.ResizeObserver = function ResizeObserver() {
     this.observe = () => {};
     this.disconnect = () => {};
   };
-  globalThis.requestAnimationFrame = () => 0;
+  // The native client schedules a per-frame bounds check. Recording the
+  // callbacks lets a test step the loop by hand instead of waiting for real
+  // frames.
+  const frames = [];
+  globalThis.requestAnimationFrame = (callback) => {
+    frames.push(callback);
+    return frames.length;
+  };
   globalThis.console = {
     log: (message) => consoleMessages.push(String(message)),
     warn: (message) => consoleMessages.push(String(message)),
@@ -210,10 +297,14 @@ async function bootPage({ shell, gpu = true, failInit = false }) {
     dom,
     posted,
     calls,
+    frames,
     bodyClasses,
     consoleMessages,
     dispatchWindow: (type, event) => {
-      for (const handler of windowListeners.get(type) || []) handler(event);
+      // Window-level listeners get the same `preventDefault` every real event
+      // answers; the key handlers call it on a key the engine consumes.
+      const withDefaults = Object.assign({ preventDefault: () => {} }, event);
+      for (const handler of windowListeners.get(type) || []) handler(withDefaults);
     },
     restore,
   };
@@ -254,7 +345,11 @@ test('shell without WebGPU shows the written notice, not a red canvas', async ()
       notice,
       'the shell owns the wording; the page only paints it',
     );
-    assert.strictEqual(page.dom['viewport-notice-title'].textContent, 'Вьюпорт недоступен');
+    assert.strictEqual(
+      page.dom['viewport-notice-title'].textContent,
+      'Viewport unavailable',
+      'the title is English like the rest of the editor UI',
+    );
     assert.strictEqual(
       page.dom['viewport-notice-detail'].textContent,
       'navigator.gpu missing',
@@ -328,14 +423,163 @@ test('shell with a native viewport reports bounds and forwards input', async () 
   }
 });
 
+test('toolbar controls keep their own pointer and wheel events', async () => {
+  // The blocker: `#viewport` contains the 3D/2D switch, Settings, the gizmo
+  // toolbars and the snap step fields. A handler on the container that ignores
+  // `event.target` turns every one of those into a camera drag, and
+  // `setPointerCapture` then steals the events the control needs.
+  const page = await bootPage({
+    shell: { nativeViewport: true, webgpuNotice: 'unused' },
+    gpu: false,
+  });
+  try {
+    const viewport = page.dom.viewport;
+    const [button, field, gizmos] = viewport.controls;
+    const before = page.posted.length;
+
+    // A press on a toolbar button must not post input nor capture the pointer.
+    let captured = 0;
+    viewport.setPointerCapture = () => {
+      captured += 1;
+    };
+    viewport.dispatch('pointerdown', {
+      clientX: 110,
+      clientY: 70,
+      buttons: 1,
+      pointerId: 1,
+      target: button,
+    });
+    assert.strictEqual(page.posted.length, before, 'a button press is not viewport input');
+    assert.strictEqual(captured, 0, 'a button press must not steal pointer capture');
+
+    // Nor a move or a release that started on the control.
+    viewport.dispatch('pointermove', { clientX: 130, clientY: 70, buttons: 1, target: button });
+    viewport.dispatch('pointerup', { clientX: 130, clientY: 70, buttons: 0, target: button });
+    assert.strictEqual(page.posted.length, before, 'button events never reach the shell');
+
+    // A wheel over a snap field must not be suppressed nor forwarded: the field
+    // needs its default scrolling/stepping behaviour.
+    let prevented = false;
+    viewport.dispatch('wheel', {
+      clientX: 120,
+      clientY: 80,
+      deltaY: -60,
+      target: field,
+      preventDefault: () => {
+        prevented = true;
+      },
+    });
+    assert.strictEqual(prevented, false, 'wheel over a field keeps its default');
+    assert.strictEqual(page.posted.length, before, 'wheel over a field is not camera zoom');
+
+    // The gizmo toolbar is a control container: a press on it is the toolbar's.
+    viewport.dispatch('pointerdown', {
+      clientX: 120,
+      clientY: 80,
+      buttons: 1,
+      pointerId: 2,
+      target: gizmos,
+    });
+    assert.strictEqual(page.posted.length, before, 'the gizmo toolbar owns its presses');
+
+    // The backing surface still works: the filter must not swallow real drags.
+    viewport.dispatch('pointerdown', { clientX: 110, clientY: 70, buttons: 1, pointerId: 3 });
+    assert.strictEqual(page.posted.at(-1).type, 'viewport_input');
+    assert.strictEqual(captured, 1, 'a drag on the surface still captures the pointer');
+  } finally {
+    page.restore();
+  }
+});
+
+test('keys reach the engine only while the viewport has focus', async () => {
+  const page = await bootPage({
+    shell: { nativeViewport: true, webgpuNotice: 'unused' },
+    gpu: false,
+  });
+  try {
+    const before = page.posted.length;
+    // Focus elsewhere (the inspector, a shortcut field): a WASD press is that
+    // control's, not the camera's.
+    globalThis.document.activeElement = page.dom['mode-3d'];
+    page.dispatchWindow('keydown', { code: 'KeyW' });
+    assert.strictEqual(page.posted.length, before, 'keys outside the viewport are ignored');
+
+    // Focus inside the box: the key travels as the engine's raw aliases.
+    const viewport = page.dom.viewport;
+    globalThis.document.activeElement = viewport;
+    page.dispatchWindow('keydown', { code: 'KeyW' });
+    const down = page.posted.at(-1);
+    assert.strictEqual(down.type, 'viewport_input');
+    assert.deepStrictEqual(down.data.pressed_keys, [17, 87], 'W maps to its alias pair');
+
+    // A second key adds to the held set rather than replacing it.
+    page.dispatchWindow('keydown', { code: 'ArrowUp' });
+    assert.deepStrictEqual(page.posted.at(-1).data.pressed_keys, [17, 87, 38]);
+
+    // Releasing one leaves the other held.
+    page.dispatchWindow('keyup', { code: 'KeyW' });
+    assert.deepStrictEqual(page.posted.at(-1).data.pressed_keys, [38]);
+
+    // A key the engine does not bind is not forwarded at all.
+    const afterBound = page.posted.length;
+    page.dispatchWindow('keydown', { code: 'KeyQ' });
+    assert.strictEqual(page.posted.length, afterBound, 'unbound keys are not forwarded');
+
+    // Losing the window releases held keys, or the camera would keep moving.
+    page.dispatchWindow('blur', {});
+    assert.deepStrictEqual(page.posted.at(-1).data.pressed_keys, []);
+  } finally {
+    page.restore();
+  }
+});
+
+test('a moved viewport box re-posts its bounds without a resize', async () => {
+  // `ResizeObserver` only fires on a size change. A viewport that merely shifts
+  // (top bar grows, a banner appears) would leave the native layer behind, so
+  // the client also re-reads the rectangle per frame and posts a change.
+  const page = await bootPage({
+    shell: { nativeViewport: true, webgpuNotice: 'unused' },
+    gpu: false,
+  });
+  try {
+    // The stub records scheduled frames; calling the newest one simulates the
+    // next frame of the per-frame bounds check.
+    const { frames } = page;
+    assert.ok(frames.length > 0, 'the native client must schedule a layout follow-up');
+
+    const postedBefore = page.posted.length;
+    // Nothing moved: no post.
+    frames.at(-1)();
+    assert.strictEqual(page.posted.length, postedBefore, 'an unchanged box is not re-posted');
+
+    // Shift the box by 12 px without changing its size.
+    page.dom.viewport.getBoundingClientRect = () => ({
+      left: 112,
+      top: 60,
+      width: 640,
+      height: 480,
+      right: 752,
+      bottom: 540,
+    });
+    frames.at(-1)();
+    const moved = page.posted.at(-1);
+    assert.strictEqual(moved.type, 'viewport_bounds');
+    assert.strictEqual(moved.data.x, 112, 'the shift is reported');
+    assert.strictEqual(moved.data.width, 640, 'the size is unchanged');
+  } finally {
+    page.restore();
+  }
+});
+
 test('a real init failure stays a loud red canvas, not the environment notice', async () => {
-  // WebGPU is present and the adapter still refuses: an actionable bug, so the
-  // `failed` marker and the title must survive. Only a *missing* navigator.gpu
-  // is the environment case the written notice replaces.
+  // WebGPU is present, the adapter works, and the renderer still failed (a
+  // shader bug): actionable, so the `failed` marker and the title must survive.
+  // Only an environment limit (no `navigator.gpu`, or a null adapter) is the
+  // case the written notice replaces.
   const page = await bootPage({
     shell: { nativeViewport: false, webgpuNotice: 'environment notice' },
     gpu: true,
-    failInit: true,
+    stub: WASM_STUB_BROKEN_SHADER,
   });
   try {
     assert.ok(
@@ -350,6 +594,32 @@ test('a real init failure stays a loud red canvas, not the environment notice', 
       page.dom['viewport-notice'].hidden,
       true,
       'the environment notice must not hide a real defect',
+    );
+  } finally {
+    page.restore();
+  }
+});
+
+test('a null adapter is an environment limit, not a red canvas', async () => {
+  // `navigator.gpu` exists but `requestAdapter()` resolves null — Chrome on a
+  // Linux box without the right flags. Nothing the user can fix in the editor,
+  // so the written notice is the honest answer; the red canvas would blame the
+  // renderer for the machine.
+  const page = await bootPage({
+    shell: { nativeViewport: false, webgpuNotice: 'no GPU here' },
+    gpu: true,
+    stub: WASM_STUB_NO_ADAPTER,
+  });
+  try {
+    assert.strictEqual(
+      page.dom['viewport-notice'].hidden,
+      false,
+      'the notice must be shown when the adapter cannot be created',
+    );
+    assert.strictEqual(page.dom['viewport-notice-body'].textContent, 'no GPU here');
+    assert.ok(
+      !page.dom.canvas.classes.has('failed'),
+      'a missing adapter is not a renderer defect',
     );
   } finally {
     page.restore();

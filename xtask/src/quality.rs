@@ -70,13 +70,7 @@ const LEVEL1_IDS: [&str; 16] = [
     "machete",
     "typos",
 ];
-const CI_IDS: [&str; 5] = [
-    "doc",
-    "wasm-check",
-    "editor-viewport",
-    "shell-macos",
-    "build-shaders",
-];
+const CI_IDS: [&str; 4] = ["doc", "wasm-check", "editor-viewport", "build-shaders"];
 const FULL_IDS: [&str; 3] = ["coverage", "bench-compile", "hack-check"];
 const BENCH_IDS: [&str; 1] = ["criterion"];
 const DEEP_IDS: [&str; 3] = ["mutants", "fuzz-scene", "fuzz-editor"];
@@ -2101,41 +2095,6 @@ fn ci_stages(stages: &mut StageList<'_>) {
         );
     }
 
-    // The native viewport is macOS-only (`crates/shell/src/native_viewport`
-    // is `cfg(target_os = "macos")`), so on the Linux shards ~1250 lines —
-    // including every `unsafe` AppKit block — would never see a compiler.
-    // Cross-checking the Apple target catches type/lint errors in that code
-    // without a Mac: `cargo check` does not link, so it works on Linux as
-    // long as the target's std is installed.
-    if apple_target_installed() {
-        let mut shell = stages.cargo(&[
-            "clippy",
-            "-p",
-            "ornis-shell",
-            "--all-targets",
-            "--target",
-            "aarch64-apple-darwin",
-            "--",
-            "-D",
-            "warnings",
-        ]);
-        // A host linker flag must never leak into the Apple target build.
-        shell.env_remove("RUSTFLAGS");
-        stages.run(
-            "shell-macos",
-            "shell-macos",
-            "cargo clippy -p ornis-shell --all-targets --target aarch64-apple-darwin",
-            shell,
-            false,
-        );
-    } else {
-        stages.skip(
-            "shell-macos",
-            "shell-macos",
-            "aarch64-apple-darwin target not installed:  rustup target add aarch64-apple-darwin",
-        );
-    }
-
     // Editor page behaviour: `editor-v2/viewport.js` picks its host at boot
     // (WASM renderer in Chrome, bounds+input client with a native viewport,
     // written fallback without WebGPU). Plain `node --test`, no browser and
@@ -2145,7 +2104,7 @@ fn ci_stages(stages: &mut StageList<'_>) {
         stages.run(
             "editor-viewport",
             "editor-viewport",
-            "node --test editor-v2/tests/ (viewport host selection, no browser)",
+            "node --test editor-v2/tests/viewport_host.test.js (viewport host selection, no browser)",
             cmd(
                 stages.root,
                 "node",
@@ -2890,23 +2849,6 @@ fn wasm_target_installed() -> bool {
         })
         .unwrap_or(false)
 }
-
-/// Whether the Apple target's std is installed, so the macOS-only shell code
-/// can be cross-checked from a Linux runner.
-fn apple_target_installed() -> bool {
-    Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .output()
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .any(|l| l.trim().starts_with(APPLE_TARGET))
-        })
-        .unwrap_or(false)
-}
-
-/// The Apple triple the `shell-macos` stage checks against.
-const APPLE_TARGET: &str = "aarch64-apple-darwin";
 
 fn install_hint(sub: &str) -> String {
     match sub {

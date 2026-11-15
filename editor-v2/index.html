@@ -67,6 +67,10 @@
           <p class="viewport-notice-detail" id="viewport-notice-detail"></p>
         </div>
         <div class="plane-grid" id="plane-grid" hidden></div>
+        <!-- Native mode only: the toolbar drives the WASM replica, which does
+             not exist when the shell renders. Text comes from `viewport.js`
+             (`STRINGS.nativeToolbarNotice`), not hardcoded here. -->
+        <p class="viewport-native-hint" id="viewport-native-hint" hidden></p>
         <button class="viewport-settings" id="btn-settings" title="Settings">
           <svg viewBox="0 0 24 24"><use href="icons/settings.svg#icon" /></svg>
         </button>
