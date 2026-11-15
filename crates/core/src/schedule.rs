@@ -649,8 +649,9 @@ impl GateBits {
 /// predicate per tick.
 ///
 /// The decisions belong to the plan they were evaluated for:
-/// [`Schedule::run_with_gates`] asserts the system count matches, and a
-/// system past the evaluated plan is skipped rather than run.
+/// [`Schedule::run_with_gates`] asserts the system count matches in debug
+/// builds, and in every profile a system past that count is skipped rather
+/// than run — whether or not a per-system bitset was taken.
 pub struct ScheduleGates {
     permits: bool,
     /// System count the decisions were evaluated for.
@@ -668,8 +669,12 @@ impl ScheduleGates {
         self.permits
     }
 
+    /// Whether the system at `index` may run. The evaluated system count is
+    /// the bound in every build profile: a plan that installs no per-system
+    /// condition takes no bitset, so the bitset alone cannot refuse an index
+    /// past the plan (E4 review, Core track).
     fn permits_system(&self, index: usize) -> bool {
-        self.systems.as_ref().is_none_or(|bits| bits.permits(index))
+        index < self.systems_len && self.systems.as_ref().is_none_or(|bits| bits.permits(index))
     }
 }
 
@@ -1196,8 +1201,10 @@ impl Schedule {
     ///
     /// In debug builds, when `gates` was evaluated for a plan with a different
     /// system count — gates belong to the schedule that produced them. In
-    /// release builds a system past the evaluated plan is skipped, so a
-    /// mismatched bitset never panics on its index.
+    /// release builds every system past that count is skipped, so a mismatched
+    /// gate neither panics on a bitset index nor runs a system the decisions
+    /// never covered — including when the plan installs no per-system
+    /// condition and takes no bitset at all.
     pub fn run_with_gates(&self, resources: &Resources, gates: &ScheduleGates) {
         debug_assert_eq!(
             gates.systems_len,
@@ -1639,32 +1646,62 @@ mod tests {
         }
     }
 
+    /// Sequential plan of bump systems over [`Log`], one per name.
+    fn bump_plan(names: &[&'static str]) -> Schedule {
+        let mut plan = Schedule::new();
+        plan.set_parallel(false);
+        for &name in names {
+            plan.add_system(Bump {
+                name,
+                access: SystemAccess::new().reads::<Log>(),
+                target: name,
+            });
+        }
+        plan
+    }
+
     /// Gates belong to the plan that produced them: running a longer plan
     /// with a shorter plan's gates trips the debug assertion (E4 review,
     /// Editor 4). The release path skips the extra systems instead — see
-    /// `gate_bits_past_the_evaluated_plan_are_not_permitted`.
+    /// `gates_without_a_bitset_still_refuse_indices_past_the_plan`.
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "ScheduleGates were evaluated for 1 systems, this plan has 2")]
     fn run_with_gates_rejects_gates_from_a_shorter_plan() {
         let mut res = Resources::new();
         res.insert(Log::default());
-        let bump = |name| Bump {
-            name,
-            access: SystemAccess::new().reads::<Log>(),
-            target: name,
-        };
+        let gates = bump_plan(&["a"]).evaluate_gates(&res);
+        bump_plan(&["a", "b"]).run_with_gates(&res, &gates);
+    }
 
-        let mut short = Schedule::new();
-        short.set_parallel(false);
-        short.add_system(bump("a"));
-        let gates = short.evaluate_gates(&res);
+    /// A plan with no per-system condition takes no bitset, so the bitset
+    /// cannot be what refuses an index past the evaluated plan: the count
+    /// bound must hold in release too, not only under the debug assertion
+    /// (E4 review, Core track). Exercised through `run_system` — the
+    /// per-system entry point of `run_with_gates` — because the whole-plan
+    /// call trips that assertion in debug before any system is reached.
+    #[test]
+    fn gates_without_a_bitset_still_refuse_indices_past_the_plan() {
+        let mut res = Resources::new();
+        res.insert(Log::default());
+        let gates = bump_plan(&["a"]).evaluate_gates(&res);
+        assert!(gates.permits());
+        assert!(
+            gates.systems.is_none(),
+            "a plan without conditions takes no bitset"
+        );
+        assert!(gates.permits_system(0), "the evaluated system runs");
+        for index in [1, GATE_WORD_BITS, GATE_WORD_BITS + 1, usize::MAX] {
+            assert!(
+                !gates.permits_system(index),
+                "index {index} is past the evaluated plan"
+            );
+        }
 
-        let mut long = Schedule::new();
-        long.set_parallel(false);
-        long.add_system(bump("a"));
-        long.add_system(bump("b"));
-        long.run_with_gates(&res, &gates);
+        let long = bump_plan(&["a", "b"]);
+        long.run_system(0, &res, &gates);
+        long.run_system(1, &res, &gates);
+        assert_eq!(*res.get::<Log>().unwrap().lock().unwrap(), vec!["a"]);
     }
 
     /// Strong Confluence: a parallel run produces the same result as a
