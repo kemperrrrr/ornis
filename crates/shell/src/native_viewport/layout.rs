@@ -27,6 +27,12 @@ pub struct ViewportPlacement {
     pub rect: PhysicalRect,
     /// View frame in points: `(x, y, width, height)`.
     pub frame: ViewFrame,
+    /// Validated device-pixel ratio the rectangle was measured at.
+    ///
+    /// Kept on the placement (rather than re-read from the page) so the
+    /// renderer's pointer scale is derived from the exact number the geometry
+    /// used: a camera reading a different ratio moves at the wrong speed.
+    pub scale: f32,
 }
 
 /// AppKit view frame in points (top-left origin, flipped parent).
@@ -51,11 +57,12 @@ impl ViewportPlacement {
     /// the window (a dock mid-animation, a stale layout after a window resize)
     /// is clipped here, not by the caller.
     pub fn new(rect: PhysicalRect, scale: f32, content_height: f64) -> Option<Self> {
-        let scale = f64::from(if scale.is_finite() && scale > 0.0 {
+        let ratio = if scale.is_finite() && scale > 0.0 {
             scale
         } else {
             1.0
-        });
+        };
+        let scale = f64::from(ratio);
         if rect.width == 0 || rect.height == 0 || content_height.is_nan() || content_height <= 0.0 {
             return None;
         }
@@ -83,6 +90,7 @@ impl ViewportPlacement {
                 height: ((visible * scale).round() as u32).clamp(1, rect.height),
             },
             frame,
+            scale: ratio,
         })
     }
 

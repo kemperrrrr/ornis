@@ -41,8 +41,8 @@ use ornis_shell::options::{OptionAction, USAGE};
 #[cfg(target_os = "macos")]
 use ornis_shell::scene_snapshot_json;
 use ornis_shell::{
-    AckOutcome, BridgeError, ShellCapabilities, ViewportMessage, WINDOW_HEIGHT, WINDOW_WIDTH,
-    ack_message_json, dispatch_script, events_message_json, full_window_bounds, init_script_for,
+    BridgeError, ShellCapabilities, ViewportMessage, WINDOW_HEIGHT, WINDOW_WIDTH, ack_message_json,
+    acknowledge, dispatch_script, events_message_json, full_window_bounds, init_script_for,
     next_event_sequence, parse_args, parse_incoming, parse_viewport_message, probe_page,
     resolve_editor_dir, start_url,
 };
@@ -51,6 +51,12 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes};
 use wry::{WebView, WebViewBuilder};
+
+/// Exit code for an unusable environment: no event loop, no window, no
+/// webview. Distinct from `2` (bad usage / missing editor dir) so a wrapper
+/// script can tell "the user pointed me at nothing" from "this host cannot
+/// run a window".
+const EXIT_ENVIRONMENT: i32 = 3;
 
 /// Cross-thread messages delivered to the event loop (all `WebView` calls
 /// stay on the main thread).
@@ -81,11 +87,7 @@ fn main() {
         Path::new(env!("CARGO_MANIFEST_DIR")),
     );
 
-    // Live ECS world on a dedicated thread (same entry point as
-    // `editor-only`): executes queued commands, publishes events.
-    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<UiCommand>();
-    let (ev_tx, ev_rx) = crossbeam_channel::unbounded::<GameEvent>();
-    let _world = ornis_app::session::run(cmd_rx, ev_tx);
+    let (cmd_tx, ev_rx) = ornis_shell::start_engine();
 
     if !options.webgpu_probe && !editor_root.is_dir() {
         eprintln!(
@@ -110,18 +112,21 @@ fn main() {
     }
 
     let mut loop_builder = EventLoop::<ShellEvent>::with_user_event();
-    let event_loop = loop_builder.build().expect("shell event loop");
-    let pump = event_loop.create_proxy();
-    std::thread::Builder::new()
-        .name("shell-event-pump".into())
-        .spawn(move || {
-            while let Ok(event) = ev_rx.recv() {
-                if pump.send_event(ShellEvent::Engine(event)).is_err() {
-                    break;
-                }
-            }
-        })
-        .expect("shell event pump thread");
+    // A shell that cannot open its event loop has nothing to fall back to, so
+    // this reports the cause and exits non-zero instead of panicking: a panic
+    // here prints a backtrace and, on release builds, an unhelpful message.
+    let Some(event_loop) = loop_builder.build().ok() else {
+        eprintln!("ornis-shell: cannot create the winit event loop");
+        std::process::exit(EXIT_ENVIRONMENT);
+    };
+    let proxy = event_loop.create_proxy();
+    let pumped = ornis_shell::spawn_event_pump(ev_rx, move |event| {
+        proxy.send_event(ShellEvent::Engine(event)).is_ok()
+    });
+    if let Err(error) = pumped {
+        eprintln!("ornis-shell: cannot start the event pump thread: {error}");
+        std::process::exit(EXIT_ENVIRONMENT);
+    }
 
     let mut app = ShellApp {
         proxy: event_loop.create_proxy(),
@@ -138,7 +143,10 @@ fn main() {
         #[cfg(target_os = "macos")]
         last_frame: Instant::now(),
     };
-    event_loop.run_app(&mut app).expect("shell event loop runs");
+    if let Err(error) = event_loop.run_app(&mut app) {
+        eprintln!("ornis-shell: event loop stopped: {error}");
+        std::process::exit(EXIT_ENVIRONMENT);
+    }
 }
 
 /// Winit application owning the native window and the embedded webview.
@@ -169,26 +177,20 @@ impl ShellApp {
     /// Shell-level messages (the viewport rectangle, forwarded input) never
     /// reach the engine queue: they are consumed here, because they describe
     /// this window rather than the scene.
+    // qual:allow(test_quality, untested) reason: "webview IPC edge; the routing (parse_viewport_message, scene_snapshot_json) and the ack decision (acknowledge) are host-tested, the eval/queue handoff needs a live webview"
     fn on_ipc(&mut self, body: String) {
         if let Some(message) = parse_viewport_message(&body) {
             self.on_viewport_message(message);
             return;
         }
         let post = parse_incoming(&body, &mut self.next_request);
-        let (request_id, queued) = post.into_queued();
-        let outcome = match queued {
-            Ok(command) => match self.cmd_tx.send(command) {
-                Ok(()) => AckOutcome::Accepted { request_id },
-                Err(_) => AckOutcome::Rejected {
-                    request_id,
-                    error: BridgeError::Disconnected.to_string(),
-                },
-            },
-            Err(error) => AckOutcome::Rejected {
-                request_id,
-                error: error.to_string(),
-            },
-        };
+        // The ack decision itself is `ornis_shell::acknowledge`, tested without
+        // an event loop; only the channel handoff crosses a thread here.
+        let outcome = acknowledge(post, |command| {
+            self.cmd_tx
+                .send(command)
+                .map_err(|_| BridgeError::Disconnected)
+        });
         self.eval(&dispatch_script(&ack_message_json(&outcome)));
     }
 
@@ -197,6 +199,7 @@ impl ShellApp {
     /// Without one (a plain embedded shell, or a host without the AppKit/Metal
     /// surface path) the page's posts are simply not needed — it only sends
     /// them because the shell advertised `ornisShell.nativeViewport`.
+    // qual:allow(test_quality, untested) reason: "window/AppKit edge; the bounds decision (BoundsUpdate::decide) and every geometry path are host-tested, this only reads the window's scale"
     fn on_viewport_message(&mut self, message: ViewportMessage) {
         #[cfg(not(target_os = "macos"))]
         let _ = message;
@@ -234,6 +237,7 @@ impl ShellApp {
     ///
     /// Scene snapshots also feed the native viewport: the same body the page
     /// polls is what the shell renders, so both viewports always agree.
+    // qual:allow(test_quality, untested) reason: "event-loop edge; the scene routing (scene_snapshot_json) and the sequence allocator (next_event_sequence) are host-tested, the eval into the webview needs a window"
     fn on_engine_event(&mut self, event: GameEvent) {
         // The viewport renders the same snapshot body the page receives, so it
         // is fed before the event is dispatched (no second snapshot channel).
@@ -246,27 +250,13 @@ impl ShellApp {
         self.eval(&dispatch_script(&events_message_json(&[(sequence, event)])));
     }
 
-    /// Runs JS in the page; failures (page gone) are ignored — the loop
-    /// keeps serving the engine either way.
-    fn eval(&self, script: &str) {
-        if let Some(webview) = &self.webview {
-            let _ = webview.evaluate_script(script);
-        }
-    }
-}
-
-impl ApplicationHandler<ShellEvent> for ShellApp {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        let window = event_loop
-            .create_window(
-                WindowAttributes::default()
-                    .with_title("Ornis Editor")
-                    .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT)),
-            )
-            .expect("shell window");
+    /// Builds the child webview and wires the `ornis://` handler and IPC.
+    ///
+    /// `None` when `wry` refuses the webview: without one there is no shell,
+    /// so the caller leaves the loop cleanly instead of panicking inside
+    /// `resumed`.
+    // qual:allow(test_quality, untested) reason: "wry webview construction; the init script, the response handler and the IPC parse it wires are all host-tested"
+    fn build_webview(&self, window: &Window) -> Option<WebView> {
         let root = Arc::clone(&self.editor_root);
         let capabilities = if self.native_viewport {
             ShellCapabilities::NATIVE_VIEWPORT
@@ -299,10 +289,47 @@ impl ApplicationHandler<ShellEvent> for ShellApp {
         // `view()` accessor on focus loss (`windowDidResignKey` abort,
         // winit#4203 / wry#1477). As a child, winit keeps its own view and
         // the crash path is gone; bounds are synced on resize below.
-        let webview = builder
+        match builder
             .with_bounds(full_window_bounds())
-            .build_as_child(&window)
-            .expect("shell webview");
+            .build_as_child(window)
+        {
+            Ok(webview) => Some(webview),
+            Err(error) => {
+                eprintln!("ornis-shell: cannot build the webview: {error}");
+                None
+            }
+        }
+    }
+
+    /// Runs JS in the page; failures (page gone) are ignored — the loop
+    /// keeps serving the engine either way.
+    fn eval(&self, script: &str) {
+        if let Some(webview) = &self.webview {
+            let _ = webview.evaluate_script(script);
+        }
+    }
+}
+
+impl ApplicationHandler<ShellEvent> for ShellApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        // Window creation failing is fatal but must not panic: the message
+        // names the cause and the exit code is distinct from a usage error.
+        let Ok(window) = event_loop.create_window(
+            WindowAttributes::default()
+                .with_title("Ornis Editor")
+                .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT)),
+        ) else {
+            eprintln!("ornis-shell: cannot create the editor window");
+            event_loop.exit();
+            return;
+        };
+        let Some(webview) = self.build_webview(&window) else {
+            event_loop.exit();
+            return;
+        };
 
         #[cfg(target_os = "macos")]
         if self.native_viewport {

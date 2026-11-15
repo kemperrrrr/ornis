@@ -124,17 +124,21 @@ impl ViewportFrame {
         self.plan.set_surface_size(size.0, size.1);
     }
 
-    /// Publishes the pointer scale for the drawable.
+    /// Publishes the pointer scale and resizes the drawable in one step.
     ///
     /// The drawable size is the page's rectangle times the backing scale, so
-    /// the caller always knows both numbers together — which is why this sits
-    /// next to [`Self::resize`] rather than on its own path.
-    pub fn set_pointer_scale(&mut self, scale: f32) {
+    /// the two always arrive together: one call keeps them in step and there is
+    /// no way to publish a scale for a size the surface does not have. This is
+    /// the path [`crate::native_viewport::ViewportHost`] calls after every
+    /// placement, so it is exercised on the first bounds post.
+    // qual:allow(test_quality, untested) reason: "wgpu-only; the scale sanitising (sanitize_pointer_scale) and the resize decision are pinned by host tests, resizing targets needs a device"
+    pub fn resize_scaled(&mut self, width: u32, height: u32, scale: f32) {
         self.world
             .engine_mut()
             .world_mut()
             .resources_mut()
             .insert(PointerDpr(sanitize_pointer_scale(scale)));
+        self.resize(width, height);
     }
 
     /// Applies one `/api/scene` snapshot.

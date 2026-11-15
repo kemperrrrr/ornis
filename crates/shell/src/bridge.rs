@@ -246,6 +246,32 @@ pub fn event_json(event: &GameEvent, sequence: EventSeq) -> serde_json::Value {
     value
 }
 
+/// The acknowledgement owed to the page for one parsed post.
+///
+/// `send` is the engine-queue handoff: the outcome is `accepted` only when the
+/// command actually reached the queue, so a disconnected engine and a malformed
+/// post stay distinct, typed outcomes. Pure (the channel is a callback) so the
+/// whole ack decision is testable without an event loop.
+pub fn acknowledge<F>(post: IncomingPost, send: F) -> AckOutcome
+where
+    F: FnOnce(UiCommand) -> Result<(), BridgeError>,
+{
+    let (request_id, queued) = post.into_queued();
+    match queued {
+        Ok(command) => match send(command) {
+            Ok(()) => AckOutcome::Accepted { request_id },
+            Err(error) => AckOutcome::Rejected {
+                request_id,
+                error: error.to_string(),
+            },
+        },
+        Err(error) => AckOutcome::Rejected {
+            request_id,
+            error: error.to_string(),
+        },
+    }
+}
+
 /// Allocates the transport `sequence` for one outgoing event.
 ///
 /// `next` is advanced and the sequence handed back, so the page always sees a
@@ -510,6 +536,46 @@ mod tests {
             message["events"][0]["ComponentUpdated"]["json_data"],
             "not-json"
         );
+    }
+
+    #[test]
+    fn acknowledgements_report_queue_reachability() {
+        let mut next = RequestId::new(1);
+        let accepted = acknowledge(
+            parse_incoming(r#"{"type":"ping","request_id":9}"#, &mut next),
+            |_| Ok(()),
+        );
+        assert_eq!(
+            accepted,
+            AckOutcome::Accepted {
+                request_id: RequestId::new(9)
+            }
+        );
+
+        // A disconnected engine is not the page's fault: the id still comes
+        // back, with the typed reason, so the page can retry the same post.
+        let mut next = RequestId::new(1);
+        let disconnected = acknowledge(
+            parse_incoming(r#"{"type":"ping","request_id":10}"#, &mut next),
+            |_| Err(BridgeError::Disconnected),
+        );
+        match disconnected {
+            AckOutcome::Rejected { request_id, error } => {
+                assert_eq!(request_id, RequestId::new(10));
+                assert_eq!(error, BridgeError::Disconnected.to_string());
+            }
+            AckOutcome::Accepted { .. } => panic!("a dropped command is not accepted"),
+        }
+
+        // A rejected post never reaches the queue at all.
+        let mut next = RequestId::new(1);
+        let mut sent = false;
+        let rejected = acknowledge(parse_incoming("not json", &mut next), |_| {
+            sent = true;
+            Ok(())
+        });
+        assert!(!sent, "invalid posts must not be queued");
+        assert!(matches!(rejected, AckOutcome::Rejected { .. }));
     }
 
     #[test]

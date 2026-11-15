@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use wry::http::Response;
+use wry::http::{Response, StatusCode};
 
 use crate::assets::read_asset;
 use crate::error::AssetError;
@@ -54,8 +54,14 @@ pub fn serve_response(root: &Path, url_path: &str) -> Response<Cow<'static, [u8]
     }
 }
 
-/// Builds one response; an invalid header can only come from a bug here, so the
-/// fallback is a plain 500 rather than a panic on the main thread.
+/// Builds one response, degrading without panicking.
+///
+/// `http::Response::builder` only rejects a malformed header value or status.
+/// Every value here is a compile-time constant from this module, so a failure
+/// would be a bug — but the handler runs on the webview's main thread, where a
+/// panic takes the whole shell down for a cosmetic problem. A bare
+/// [`Response::new`] (no headers at all) is always valid and still answers the
+/// page, which is the honest degradation.
 fn response(
     status: u16,
     content_type: &'static str,
@@ -67,10 +73,9 @@ fn response(
         .header("Access-Control-Allow-Origin", "*")
         .body(Cow::Owned(body))
         .unwrap_or_else(|_| {
-            Response::builder()
-                .status(STATUS_SERVER_ERROR)
-                .body(Cow::Borrowed(b"internal error".as_slice()))
-                .expect("fallback error response builds")
+            let mut fallback = Response::new(Cow::Borrowed(b"internal error".as_slice()));
+            *fallback.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            fallback
         })
 }
 

@@ -271,26 +271,32 @@ impl NativeViewport {
     /// Moving alone never reconfigures the swap chain (see
     /// [`ViewportPlacement::needs_surface_resize`]) — a dock drag must not
     /// reallocate GPU targets on every mouse move.
+    // qual:allow(test_quality, untested) reason: "applies PlacementStep to AppKit + wgpu; the step decision and the geometry are host-tested"
     pub fn set_placement(&mut self, placement: ViewportPlacement) {
         self.view.setHidden(false);
-        if let Some(previous) = self.placement {
-            if !previous.needs_frame_change(placement) && !previous.needs_surface_resize(placement)
-            {
-                return;
-            }
-            if !previous.needs_surface_resize(placement) {
+        match PlacementStep::decide(self.placement, placement) {
+            PlacementStep::Unchanged => {}
+            PlacementStep::MoveOnly => {
                 self.view.setFrame(frame_rect(placement));
                 self.placement = Some(placement);
-                return;
+            }
+            PlacementStep::Resize => {
+                self.view.setFrame(frame_rect(placement));
+                // One call keeps the drawable and the pointer scale in step:
+                // both come from the same page rectangle, and a camera that
+                // scaled by a stale ratio would move at the wrong speed after a
+                // DPI change.
+                self.frame.resize_scaled(
+                    placement.rect.width.max(1),
+                    placement.rect.height.max(1),
+                    placement.scale,
+                );
+                self.config.width = placement.rect.width.max(1);
+                self.config.height = placement.rect.height.max(1);
+                self.surface.configure(&self.device, &self.config);
+                self.placement = Some(placement);
             }
         }
-        self.view.setFrame(frame_rect(placement));
-        self.frame
-            .resize(placement.rect.width.max(1), placement.rect.height.max(1));
-        self.config.width = placement.rect.width.max(1);
-        self.config.height = placement.rect.height.max(1);
-        self.surface.configure(&self.device, &self.config);
-        self.placement = Some(placement);
     }
 
     /// Hides the view (the page collapsed the viewport, or fell back).
@@ -338,6 +344,40 @@ impl NativeViewport {
     /// Diagnostics of the last applied frame.
     pub fn stats(&self) -> FrameStats {
         self.frame.stats()
+    }
+}
+
+/// What a new placement requires from the AppKit view and the swap chain.
+///
+/// The interesting rule — "a move must not reallocate GPU targets" — is a pure
+/// decision over two placements, so it is testable without a window, a GPU or
+/// an `NSView`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementStep {
+    /// Same rectangle: nothing to do (a repeated bounds post).
+    Unchanged,
+    /// Moved, same size: only the view frame changes.
+    MoveOnly,
+    /// Size changed: view frame and swap chain both move.
+    Resize,
+}
+
+impl PlacementStep {
+    /// Decides the step between the last applied placement and a new one.
+    ///
+    /// `previous: None` means nothing is placed yet (first post after startup
+    /// or after the viewport was hidden), which is always a full `Resize`.
+    pub fn decide(previous: Option<ViewportPlacement>, next: ViewportPlacement) -> Self {
+        let Some(previous) = previous else {
+            return Self::Resize;
+        };
+        if previous.needs_surface_resize(next) {
+            Self::Resize
+        } else if previous.needs_frame_change(next) {
+            Self::MoveOnly
+        } else {
+            Self::Unchanged
+        }
     }
 }
 
