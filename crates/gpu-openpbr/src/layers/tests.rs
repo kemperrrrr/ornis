@@ -69,26 +69,30 @@ fn no_coat_leaves_the_base_undarkened() {
 }
 
 #[test]
-fn hdr_sanitize_keeps_finite_colors_and_drops_oversized_ones() {
+fn hdr_sanitize_keeps_finite_colors() {
     assert_eq!(
         lanes(sanitize_hdr(v3(0.5, 12.0, 300.0))),
         [0.5, 12.0, 300.0]
     );
-    // One lane past the limit zeroes the whole colour: the three per-channel
-    // factors multiply into a single mask. `1e21` rather than an infinity, so
-    // the assertion reads as the mask and not as IEEE `∞ · 0`.
-    assert_eq!(lanes(sanitize_hdr(v3(1e21, 12.0, 300.0))), [0.0; 3]);
 }
 
 #[test]
-fn hdr_sanitize_cannot_scrub_a_nan_lane() {
-    // The reference multiplies by the mask, and `NaN * 0` is `NaN`, so a NaN
-    // lane survives while the finite lanes are zeroed. The port keeps that
-    // behaviour bit for bit — changing it is a reference change, not a port
-    // one, and the pass parity gate would reject a silent divergence.
+fn hdr_sanitize_zeroes_one_bad_channel_and_keeps_its_siblings() {
+    // Per-channel selection: a magnitude past the limit zeroes that channel
+    // and nothing else. `1e21` rather than an infinity keeps the assertion
+    // about the select and not about IEEE `∞ · 0`.
+    assert_eq!(
+        lanes(sanitize_hdr(v3(1e21, 12.0, 300.0))),
+        [0.0, 12.0, 300.0]
+    );
+}
+
+#[test]
+fn hdr_sanitize_scrubs_a_nan_channel() {
+    // Masking could not: `NaN * 0` is `NaN`. Selecting the replacement returns
+    // `0.0` untouched, which is the point of the form.
     let sanitized = lanes(sanitize_hdr(v3(f32::NAN, 12.0, 300.0)));
-    assert!(sanitized[0].is_nan());
-    assert_eq!([sanitized[1], sanitized[2]], [0.0, 0.0]);
+    assert_eq!(sanitized, [0.0, 12.0, 300.0]);
 }
 
 #[test]
