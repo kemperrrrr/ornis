@@ -380,7 +380,7 @@ type ParseJsonFn = fn(&serde_json::Value) -> Result<Box<dyn Any>, RegistryError>
 
 fn register_lane_thunk<T>(store: &mut SmartStore)
 where
-    T: 'static + Send + Sync,
+    T: 'static + Clone + Send + Sync,
 {
     store.register::<T>();
 }

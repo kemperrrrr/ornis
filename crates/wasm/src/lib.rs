@@ -25,9 +25,9 @@ use ornis_editor::EditorMarks;
 #[cfg(test)]
 use ornis_editor::GizmoAxis;
 use ornis_editor::{
-    GizmoDrag, GizmoGrab, GizmoHandle, GizmoMode, GizmoRuntime, GizmoSpace, GizmoTarget, Hovered,
-    PlaneCamera, PressEdge, Selected, ViewportCamera, apply_gizmo_visibility, install_editor,
-    install_plane_camera, pick_gizmo, pick_ray, read_plane_camera, set_selection,
+    EditorMode, GizmoDrag, GizmoGrab, GizmoHandle, GizmoMode, GizmoRuntime, GizmoSpace,
+    GizmoTarget, Hovered, PlaneCamera, PressEdge, Selected, ViewportCamera, apply_gizmo_visibility,
+    install_editor, install_plane_camera, pick_gizmo, pick_ray, read_plane_camera, set_selection,
 };
 use ornis_render::{
     AntiAliasMode, CameraView, FrameUpload, OrbitCamera, PointerDpr, RenderContext, RenderFrame3D,
@@ -35,15 +35,25 @@ use ornis_render::{
 };
 
 mod scene_api;
+// Public so the `qual:api` marker on the `set_editor_mode` wasm-bindgen
+// export is nameable from outside the crate (a private module makes it an
+// ORPHAN_SUPPRESSION finding).
+pub mod mode;
+// Public so the `qual:api` marker on the `set_snap` wasm-bindgen export is
+// nameable from outside the crate (a private module makes it an
+// ORPHAN_SUPPRESSION finding).
+pub mod snap;
 // Public so the `qual:api` markers on the wasm-bindgen exports
 // (`set_viewport_mode`, `viewport_state_json`) are nameable from outside
 // the crate — a private module makes them ORPHAN_SUPPRESSION findings.
 pub mod viewport;
 
+use mode::{editor_mode, install_replica_chrome_gate, sync_editor_mode};
 use scene_api::{LiveEntityMeta, LiveScene};
+use snap::snap_settings;
 use viewport::{
     PENDING_MODE, VIEWPORT_MODE, apply_mode_request, apply_pending_gizmo, gizmo_mode, gizmo_space,
-    refresh_viewport_state_json, sync_picking_camera, take_pending_undo,
+    refresh_viewport_state_json, sync_picking_camera, take_pending_undo, visible_gizmo_mode,
 };
 
 /// Shared handle to the requestAnimationFrame closure (self-rescheduling
@@ -1128,6 +1138,10 @@ struct FrameState<'a> {
     last_outline_flags: Vec<u32>,
     /// Gizmo tool state, drag and one-step undo.
     gizmo: GizmoRuntime,
+    /// Authoritative mode observed on the previous frame; the gizmo undo is
+    /// reset when the mode returns to Edit (Stop) so a Paused drag cannot
+    /// write a simulated pose into the restored Edit world.
+    last_mode: EditorMode,
     /// Pointer press edge (only a fresh press may start a gizmo drag).
     press: PressEdge,
     input: Rc<RefCell<InputState>>,
@@ -1193,7 +1207,7 @@ impl<'a> FrameState<'a> {
         self.gizmo.cancel();
         self.set_gizmo_grab(false);
         if let Some(store) = self.render_world.engine_mut().world_mut().store_mut() {
-            apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+            apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
         }
         self.render_world.frame(0.0);
         let gpu = build_gpu_scene(&self.device, &self.render_world, &live.scene);
@@ -1345,6 +1359,11 @@ impl<'a> FrameState<'a> {
         if !take_pending_undo() {
             return;
         }
+        // Undo is editor chrome: in Play the server simulates and Stop
+        // discards its mutations, so a queued undo must not write a pose.
+        if !editor_mode().chrome_runs() {
+            return;
+        }
         // An undo during an active drag would restore the transform the
         // drag started from — but the drag continues and commits
         // afterwards, so the undo would be silently overwritten. Ignore it.
@@ -1375,7 +1394,7 @@ impl<'a> FrameState<'a> {
             if let Some(mut lane) = store.write_lane::<TransformDesc>() {
                 lane.insert(selected, transform);
             }
-            apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+            apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
             self.upload_replica_instances();
         }
     }
@@ -1384,6 +1403,18 @@ impl<'a> FrameState<'a> {
     /// one `set_component` commit on release.
     // qual:allow(test_quality, untested) reason: "press/move/release edge wiring; the math it calls is host-tested"
     fn update_gizmo(&mut self) {
+        // Play gates chrome off (E4): no drag begins, previews or commits.
+        // An in-flight drag is rolled back — its preview was never committed,
+        // so leaving it would strand the object in a pose the server discards
+        // on Stop.
+        if !editor_mode().chrome_runs() {
+            if self.gizmo.is_dragging() {
+                self.rollback_gizmo_preview();
+                self.gizmo.cancel();
+                self.set_gizmo_grab(false);
+            }
+            return;
+        }
         let (pressed, pointer) = {
             let engine = self.render_world.engine();
             let input = engine.world().resources().get::<InputState>();
@@ -1474,6 +1505,7 @@ impl<'a> FrameState<'a> {
         let Some(ray) = self.gizmo_ray(pointer) else {
             return;
         };
+        self.gizmo.set_snap(snap_settings());
         let Some(transform) = self.gizmo.preview_transform(&ray) else {
             return;
         };
@@ -1483,7 +1515,7 @@ impl<'a> FrameState<'a> {
         if let Some(mut lane) = store.write_lane::<TransformDesc>() {
             lane.insert(selected, transform);
         }
-        apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+        apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
         self.upload_replica_instances();
     }
 
@@ -1501,7 +1533,7 @@ impl<'a> FrameState<'a> {
             if let Some(mut lane) = store.write_lane::<TransformDesc>() {
                 lane.insert(selected, transform);
             }
-            apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+            apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
         }
     }
 
@@ -1526,7 +1558,7 @@ impl<'a> FrameState<'a> {
         let selected = self.gizmo.selected();
         // A click on a handle without motion commits nothing: the machine
         // promotes the undo candidate only for a drag that really moved.
-        let moved = self.gizmo.commit().is_some();
+        let moved = self.gizmo.commit(editor_mode()).is_some();
         let Some(selected) = selected else {
             self.set_gizmo_grab(false);
             return;
@@ -1634,6 +1666,34 @@ impl<'a> FrameState<'a> {
     }
 }
 
+/// Reconciles the gizmo with an authoritative mode change. Returning to
+/// Edit (Stop) abandons the drag and drops a *simulated* undo: a drag
+/// committed in Paused addresses the simulated world, so its one-step undo
+/// must not survive into the Edit world the snapshot restores (an in-flight
+/// preview is rolled back first). An undo committed in Edit names a pose of
+/// that snapshot and survives. Any mode change also re-lays the handles in
+/// the same frame — Play collapses them (chrome off), Edit/Paused shows the
+/// active tool again.
+// qual:allow(test_quality, untested) reason: "browser mode-edge wiring; the reset invariant is host-tested on GizmoRuntime"
+fn sync_gizmo_mode(frame: &mut FrameState<'_>) {
+    let mode = editor_mode();
+    if mode == frame.last_mode {
+        return;
+    }
+    frame.last_mode = mode;
+    if mode.is_edit() {
+        if frame.gizmo.is_dragging() {
+            frame.rollback_gizmo_preview();
+        }
+        frame.gizmo.reset();
+        frame.set_gizmo_grab(false);
+    }
+    if let Some(store) = frame.render_world.engine_mut().world_mut().store_mut() {
+        apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
+    }
+    frame.upload_replica_instances();
+}
+
 /// Log milestone frame counts: the very first frame and periodic heartbeats.
 fn log_frame_milestone(frame_count: u64, config: &wgpu::SurfaceConfiguration, instances: u32) {
     if frame_count == 1 {
@@ -1717,6 +1777,9 @@ fn init_editor_replica(
     // camera. `Perspective3d` stays the active mode, so orbit input works
     // exactly as before until `set_viewport_mode("plane2d")`.
     install_editor(render_world.engine_mut());
+    // Gate picking off in Play (E4): the replica mirrors the authoritative
+    // mode, so chrome stops when the server starts simulating.
+    install_replica_chrome_gate(render_world.engine_mut());
     {
         let engine = render_world.engine_mut();
         if let Some(orbit) = read_orbit_camera(engine) {
@@ -1740,7 +1803,7 @@ fn init_editor_replica(
     LAST_SELECTED.with(|cell| cell.borrow_mut().mirror(selected));
     // Show only the active tool's handle set from the first frame.
     if let Some(store) = render_world.engine_mut().world_mut().store_mut() {
-        apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+        apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
     }
     render_world.frame(0.0);
 }
@@ -1864,6 +1927,7 @@ fn spawn_render_loop(
         instance_entities: gpu_scene.extracted.instance_entities.clone(),
         last_outline_flags: Vec::new(),
         gizmo: GizmoRuntime::default(),
+        last_mode: EditorMode::Edit,
         press: PressEdge::default(),
         input,
         poster: InputPoster::new(),
@@ -1898,9 +1962,12 @@ fn spawn_render_loop(
         // stays a browser-only console edge.
         let size = (frame.config.width, frame.config.height);
         sync_picking_camera(frame.render_world.engine_mut(), size);
+        sync_gizmo_mode(&mut frame);
         frame.apply_gizmo_requests();
         frame.update_gizmo();
         frame.sync_selection();
+        // Refresh the mode resource the picking gate reads before the frame.
+        sync_editor_mode(frame.render_world.engine_mut());
         frame.render_world.frame(DT);
 
         // ── Live scene polling (~1/s) ────────────────────────────────

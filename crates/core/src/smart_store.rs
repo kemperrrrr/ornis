@@ -21,11 +21,14 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{RwLock, atomic::Ordering};
 
-use crossbeam_epoch::{Atomic, Guard, Owned, Shared, pin as epoch_pin};
+use crossbeam_epoch::{Atomic, Shared, pin as epoch_pin};
 
 use crate::cold_store::ColdComponentStore;
 use crate::component_store::ComponentStore;
 use crate::entity::{Entity, EntityAllocator};
+
+mod lock_free;
+use lock_free::LockFreeLaneInner;
 
 /// Shared read guard that recovers from a poisoned [`RwLock`].
 fn read_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
@@ -44,9 +47,14 @@ trait Lane: Send + Sync {
     fn is_lock_free(&self) -> bool {
         false
     }
+    /// Deep-copies the lane (storage and every component) into a fresh
+    /// type-erased lane. Backs [`SmartStore`]'s `Clone`: the clone shares no
+    /// locks or snapshot pointers with the source, so the two stores mutate
+    /// independently. Requires `T: Clone` at every impl.
+    fn clone_lane(&self) -> Box<dyn Lane>;
 }
 
-impl<T: 'static + Send + Sync> Lane for RwLock<ComponentStore<T>> {
+impl<T: 'static + Clone + Send + Sync> Lane for RwLock<ComponentStore<T>> {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -56,9 +64,13 @@ impl<T: 'static + Send + Sync> Lane for RwLock<ComponentStore<T>> {
             guard.remove(entity);
         }
     }
+
+    fn clone_lane(&self) -> Box<dyn Lane> {
+        Box::new(RwLock::new(read_lock(self).clone()))
+    }
 }
 
-impl<T: 'static + Send + Sync> Lane for RwLock<ColdComponentStore<T>> {
+impl<T: 'static + Clone + Send + Sync> Lane for RwLock<ColdComponentStore<T>> {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -68,10 +80,10 @@ impl<T: 'static + Send + Sync> Lane for RwLock<ColdComponentStore<T>> {
             guard.remove(entity);
         }
     }
-}
 
-struct LockFreeLaneInner<T: Clone + Send + Sync> {
-    store: Atomic<ComponentStore<T>>,
+    fn clone_lane(&self) -> Box<dyn Lane> {
+        Box::new(RwLock::new(read_lock(self).clone()))
+    }
 }
 
 /// Reclaim the live snapshot held in `store`, leaving null behind.
@@ -112,108 +124,6 @@ pub(crate) unsafe fn free_live_snapshot<T>(store: &mut Atomic<ComponentStore<T>>
     }
 }
 
-impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
-    fn new() -> Self {
-        Self {
-            store: Atomic::new(ComponentStore::new()),
-        }
-    }
-
-    fn read<'g>(&'g self, guard: &'g Guard) -> &'g ComponentStore<T> {
-        let shared = self.store.load(Ordering::Acquire, guard);
-        // SAFETY: `shared` was loaded under `guard`, which the caller holds
-        // for `'g`; the epoch reclaimer cannot free the snapshot while pinned.
-        unsafe { shared.deref() }
-    }
-
-    fn write(&self, mut f: impl FnMut(&mut ComponentStore<T>)) {
-        // CAS publish loop: `load -> clone -> store` without a CAS lets two
-        // writers read the same snapshot and both `defer_destroy` it (double
-        // free, UB). Only the thread whose `compare_exchange` succeeds owns
-        // the replaced snapshot and may retire it; losers drop their private
-        // clone inline and retry on the fresh snapshot. Success ordering is
-        // AcqRel (acquire the latest snapshot, release the publish);
-        // failure ordering is Acquire (reload the current pointer).
-        loop {
-            let guard = epoch_pin();
-            let shared = self.store.load(Ordering::Acquire, &guard);
-            // SAFETY: `shared` is pinned by `guard` for this iteration.
-            let mut new_store = unsafe { (*shared.deref()).clone() };
-            f(&mut new_store);
-            match self.store.compare_exchange(
-                shared,
-                Owned::new(new_store),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-                &guard,
-            ) {
-                Ok(_) => {
-                    // SAFETY: this thread replaced `shared`; no other thread
-                    // can retire it because its CAS on the same `shared`
-                    // pointer now fails. Epoch reclamation frees it once
-                    // readers drain.
-                    unsafe { guard.defer_destroy(shared) };
-                    break;
-                }
-                Err(_) => {
-                    // CAS lost: our `Owned` clone is dropped with the error;
-                    // the loop retries against the winning snapshot.
-                }
-            }
-        }
-    }
-}
-
-impl<T: 'static + Clone + Send + Sync> Lane for LockFreeLaneInner<T> {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn remove_entity(&self, entity: Entity) {
-        self.write(|store| {
-            store.remove(entity);
-        });
-    }
-
-    fn is_lock_free(&self) -> bool {
-        true
-    }
-}
-
-impl<T: Clone + Send + Sync> Drop for LockFreeLaneInner<T> {
-    // qual:allow(unsafe) reason: "Drop-only forwarder; the unsafe operations live in free_live_snapshot, which is the counted warning"
-    fn drop(&mut self) {
-        // SAFETY: `&mut self` proves exclusive access, and lock-free reads
-        // go through `with_lock_free_lane(&self, ..)`, whose snapshot cannot
-        // outlive the store — so no live reader of this snapshot exists and
-        // none can appear afterwards. `Drop` is the only caller allowed by
-        // `free_live_snapshot`.
-        unsafe { free_live_snapshot(&mut self.store) };
-    }
-}
-
-// Reserved: RAII read guard for lock-free lanes (experimental
-// "lock-free" feature). Holds an epoch guard alive while exposing the
-// snapshot of the store captured at read time.
-#[allow(dead_code)]
-pub struct LockFreeReadGuard<'g, T> {
-    store: &'g ComponentStore<T>,
-    _guard: Guard,
-}
-
-// Reserved: a lock-free read guard mirrored from `lock_free_store`.
-// Not wired into `SmartStore` yet (read_lane returns an RwLock guard);
-// kept for the experimental "lock-free" feature. Mutants are skipped:
-// nothing calls `deref` today, so a mutation here is untestable dead code.
-#[mutants::skip]
-impl<'g, T> std::ops::Deref for LockFreeReadGuard<'g, T> {
-    type Target = ComponentStore<T>;
-
-    fn deref(&self) -> &Self::Target {
-        self.store
-    }
-}
-
 /// Central ECS storage: one lane per component type plus entity
 /// allocation.
 ///
@@ -250,6 +160,28 @@ impl Default for SmartStore {
     }
 }
 
+impl Clone for SmartStore {
+    /// Deep-copies every hot and cold lane and the entity allocator. The
+    /// clone keeps the source's entity handles (ids and generations) and
+    /// free list, so a snapshot restored in place preserves allocation
+    /// state; no lock or epoch snapshot is shared with the source.
+    fn clone(&self) -> Self {
+        Self {
+            lanes: self
+                .lanes
+                .iter()
+                .map(|(tid, lane)| (*tid, lane.clone_lane()))
+                .collect(),
+            cold_lanes: self
+                .cold_lanes
+                .iter()
+                .map(|(tid, lane)| (*tid, lane.clone_lane()))
+                .collect(),
+            allocator: RwLock::new(read_lock(&self.allocator).clone()),
+        }
+    }
+}
+
 impl SmartStore {
     /// Creates an empty store with no lanes and a fresh entity allocator.
     pub fn new() -> Self {
@@ -259,7 +191,7 @@ impl SmartStore {
     /// Eagerly creates the hot lane for component type `T` (no-op if it
     /// already exists). Registration up front avoids surprise allocations
     /// inside systems.
-    pub fn register<T: 'static + Send + Sync>(&mut self) {
+    pub fn register<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.lanes
             .entry(tid)
@@ -278,7 +210,7 @@ impl SmartStore {
             .or_insert_with(|| Box::new(LockFreeLaneInner::<T>::new()));
     }
 
-    fn ensure_lane<T: 'static + Send + Sync>(&mut self) {
+    fn ensure_lane<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.lanes
             .entry(tid)
@@ -297,14 +229,14 @@ impl SmartStore {
     }
 
     /// Eagerly creates the cold lane for `T`. No-op if already present.
-    pub fn register_cold<T: 'static + Send + Sync>(&mut self) {
+    pub fn register_cold<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.cold_lanes
             .entry(tid)
             .or_insert_with(|| Box::new(RwLock::new(ColdComponentStore::<T>::new())));
     }
 
-    fn ensure_cold_lane<T: 'static + Send + Sync>(&mut self) {
+    fn ensure_cold_lane<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.cold_lanes
             .entry(tid)
@@ -313,7 +245,7 @@ impl SmartStore {
 
     /// Inserts a cold component for `entity`, creating the cold lane on
     /// first use.
-    pub fn insert_cold<T: 'static + Send + Sync>(&mut self, entity: Entity, component: T) {
+    pub fn insert_cold<T: 'static + Clone + Send + Sync>(&mut self, entity: Entity, component: T) {
         self.ensure_cold_lane::<T>();
         let tid = TypeId::of::<T>();
         if let Some(lane) = self.cold_lanes.get(&tid)
@@ -378,6 +310,18 @@ impl SmartStore {
     /// generation - i.e. the entity was created and not yet destroyed.
     pub fn is_alive(&self, entity: Entity) -> bool {
         read_lock(&self.allocator).is_alive(entity)
+    }
+
+    /// Advances this store's reusable entity generations past every handle
+    /// `live` issued, before `self` (an older snapshot) replaces it — see
+    /// [`EntityAllocator::advance_generations_past`]. Entities alive here
+    /// keep their handles; only ids this store may still hand out advance.
+    ///
+    /// Generations wrap at `u32::MAX`, so the guarantee holds until a single
+    /// slot has been recycled 2^32 times.
+    pub fn advance_generations_past(&self, live: &Self) {
+        let live_allocator = read_lock(&live.allocator).clone();
+        write_lock(&self.allocator).advance_generations_past(&live_allocator);
     }
 
     /// Inserts or replaces the hot component `T` for `entity`, creating
@@ -598,6 +542,36 @@ mod tests {
 
         let lane = store.read_lane::<f32>().unwrap();
         assert!(lane.get(e).is_none());
+    }
+
+    #[test]
+    fn clone_preserves_lanes_handles_and_independence() {
+        let mut store = SmartStore::new();
+        store.register_cold::<u32>();
+        store.register_lock_free::<u64>();
+        let a = store.create_entity();
+        let b = store.create_entity();
+        store.insert(a, 1.0_f32);
+        store.insert_cold(a, 7_u32);
+        store.insert(a, 5_u64);
+        store.destroy_entity(b);
+
+        let mut clone = store.clone();
+        assert!(clone.is_alive(a));
+        assert!(!clone.is_alive(b));
+        assert_eq!(clone.read_lane::<f32>().unwrap().get(a), Some(&1.0));
+        assert_eq!(clone.read_cold_lane::<u32>().unwrap().get(a), Some(&7));
+        assert_eq!(
+            clone.with_lock_free_lane::<u64, _>(|s| s.get(a).copied()),
+            Some(Some(5))
+        );
+        // Allocator state (free list + generations) clones identically.
+        assert_eq!(clone.create_entity().id(), store.create_entity().id());
+
+        // Independent storage: writing the clone never touches the source.
+        clone.insert(a, 9.0_f32);
+        assert_eq!(store.read_lane::<f32>().unwrap().get(a), Some(&1.0));
+        assert_eq!(clone.read_lane::<f32>().unwrap().get(a), Some(&9.0));
     }
 
     #[test]

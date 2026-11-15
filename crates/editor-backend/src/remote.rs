@@ -2654,6 +2654,118 @@ mod tests {
         );
     }
 
+    /// The rotate grid coerces the requested step (divisor of 360°, half-turn
+    /// at the coarse end), so the toolbar must show the effective step next
+    /// to the field and read it back from the replica rather than re-deriving
+    /// it in JS (E4 review, Editor 2).
+    #[test]
+    fn editor_v2_shows_the_effective_rotate_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../editor-v2");
+        let index = std::fs::read_to_string(root.join("index.html")).expect("editor-v2 index");
+        assert!(
+            index.contains("id=\"snap-rotate-effective\""),
+            "the effective rotate step must have a slot next to the step field"
+        );
+        let live = std::fs::read_to_string(root.join("live.js")).expect("editor-v2 live");
+        assert!(
+            live.contains("snap-rotate-effective") && live.contains("effectiveRotateStep()"),
+            "live.js must fill the slot from the replica's effective step"
+        );
+        let viewport =
+            std::fs::read_to_string(root.join("viewport.js")).expect("editor-v2 viewport");
+        assert!(
+            viewport.contains("snap_effective_rotate_deg"),
+            "viewport.js must expose the wasm effective-step export"
+        );
+    }
+
+    /// Snap can be enabled before the wasm module finishes loading: the click
+    /// only updates the JS mirror then, so the effective-step label reads back
+    /// `null` and stays empty until the next field edit. Boot re-applies the
+    /// mirror and must notify the toolbar afterwards, and the toolbar must
+    /// subscribe (E4 review, Editor 3).
+    #[test]
+    fn editor_v2_repaints_the_effective_rotate_step_after_boot() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../editor-v2");
+        let live = std::fs::read_to_string(root.join("live.js")).expect("editor-v2 live");
+        assert!(
+            live.contains("onReady(renderEffectiveRotateStep)"),
+            "live.js must repaint the effective step once the viewport is ready"
+        );
+        let viewport =
+            std::fs::read_to_string(root.join("viewport.js")).expect("editor-v2 viewport");
+        assert!(
+            viewport.contains("onReady(callback)"),
+            "window.OrnisViewport must expose the ready hook to the toolbar"
+        );
+        let ready = viewport
+            .split("function onViewportReady(callback)")
+            .nth(1)
+            .expect("viewport.js must define the ready hook");
+        assert!(
+            ready.contains("if (booted)"),
+            "subscribing after boot must run at once — there is no second boot"
+        );
+        let boot = viewport
+            .split("async function boot()")
+            .nth(1)
+            .expect("viewport.js must boot the wasm module");
+        let mirror = boot
+            .find("set_snap(")
+            .expect("boot must re-apply the snap mirror");
+        let notify = boot
+            .find("const callbacks = readyCallbacks;")
+            .expect("boot must run the ready subscribers");
+        assert!(
+            mirror < notify,
+            "the subscribers must run after the snap mirror is re-applied, \
+             otherwise the effective step is read back before it is set"
+        );
+    }
+
+    /// The `editor_v2_*` checks above read the sources; this one executes them.
+    /// `tests/viewport_ready.mjs` imports the real `viewport.js` against a stub
+    /// wasm package and runs the label renderer extracted from `live.js`, so
+    /// the onReady queue, the repaint, the subscriber error isolation and the
+    /// `null` contract are covered by behaviour, not by substrings (E4 review,
+    /// Editor 2).
+    ///
+    /// Node is preinstalled on the CI runners and already used by the `e2e`
+    /// stage; the harness needs no npm package. A box without Node skips, as
+    /// `e2e` does — but under CI a missing Node fails, so the check cannot
+    /// silently stop running there.
+    #[test]
+    fn editor_v2_viewport_ready_runs_in_node() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let harness = manifest.join("tests/viewport_ready.mjs");
+        assert!(harness.is_file(), "missing {}", harness.display());
+        let version = std::process::Command::new("node").arg("--version").output();
+        let Ok(version) = version else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must have Node to execute viewport_ready.mjs"
+            );
+            eprintln!("skip: no node on PATH, viewport.js behaviour not executed");
+            return;
+        };
+        assert!(version.status.success(), "node --version must succeed");
+        let out = std::process::Command::new("node")
+            .arg(&harness)
+            .current_dir(manifest.join("../.."))
+            .output()
+            .expect("run the viewport readiness harness");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "viewport_ready.mjs failed:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("OK: onReady queue"),
+            "the harness must report that its assertions ran:\n{stdout}\n{stderr}"
+        );
+    }
+
     // ── POST guards: Origin / Host / Content-Type / body limit ────────────
 
     #[test]

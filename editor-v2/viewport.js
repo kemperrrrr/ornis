@@ -10,6 +10,9 @@ import init, {
     set_viewport_mode,
     set_gizmo_mode,
     set_gizmo_space,
+    set_snap,
+    snap_effective_rotate_deg,
+    set_editor_mode,
     undo_gizmo,
     viewport_state_json,
 } from './pkg/ornis_wasm.js';
@@ -46,8 +49,11 @@ const currentMode = () => {
 };
 
 let booted = false;
+let readyCallbacks = [];
 let gizmoMode = 'move';
 let gizmoSpace = 'world';
+let editorMode = 'edit';
+let snap = { enabled: false, translate: 0.5, rotateDeg: 15, scale: 0.25 };
 
 if (btn3d) btn3d.addEventListener('click', () => applyMode('perspective3d'));
 if (btn2d) btn2d.addEventListener('click', () => applyMode('plane2d'));
@@ -70,6 +76,34 @@ function applyGizmoMode(mode) {
 function applyGizmoSpace(space) {
     gizmoSpace = space === 'local' ? 'local' : 'world';
     return booted ? set_gizmo_space(gizmoSpace) : false;
+}
+
+// The replica mirrors the authoritative play/edit mode so it can gate
+// picking and gizmo drag off in Play (E4). JS relays every mode_changed
+// here; the mirror is re-applied on boot if it changed before WASM ready.
+function applyEditorMode(mode) {
+    editorMode = mode === 'play' || mode === 'paused' ? mode : 'edit';
+    return booted ? set_editor_mode(editorMode) : false;
+}
+
+// Snap steps live in the same WASM thread-locals as the gizmo tool/space;
+// the controls keep a mirror and push the whole settings object on change.
+// A step of 0 (or negative) is meaningful — the replica leaves that channel
+// unquantized — so pass finite values through verbatim and only fall back
+// when the entry is not a number.
+function snapStep(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+}
+
+function applySnap(next) {
+    snap = {
+        enabled: !!next.enabled,
+        translate: snapStep(next.translate, 0.5),
+        rotateDeg: snapStep(next.rotateDeg, 15),
+        scale: snapStep(next.scale, 0.25),
+    };
+    return booted ? set_snap(snap.enabled, snap.translate, snap.rotateDeg, snap.scale) : false;
 }
 
 function undoGizmoDrag() {
@@ -129,6 +163,31 @@ const paintOverlay = () => {
 
 const overlayLoop = () => { paintOverlay(); requestAnimationFrame(overlayLoop); };
 
+// A control used before the wasm module is ready only updates the JS mirror,
+// so a read-back taken then is stale (the effective rotate step reads `null`).
+// Boot re-applies the mirrors first and only then runs the subscribers, which
+// is what lets the toolbar repaint against the applied settings. Subscribing
+// after boot runs immediately, so the order of the two modules cannot lose it.
+// A subscriber is toolbar code, not the renderer: its failure must neither
+// stop the remaining subscribers nor reach `boot().catch`, which would mark
+// the canvas "WebGPU init failed" while the renderer is running. Both paths
+// guard the call, so a subscriber behaves the same before and after boot.
+function runReadyCallback(callback) {
+    try {
+        callback();
+    } catch (err) {
+        console.error('[ornis-editor] ready subscriber failed:', err);
+    }
+}
+
+function onViewportReady(callback) {
+    if (booted) {
+        runReadyCallback(callback);
+        return;
+    }
+    readyCallbacks.push(callback);
+}
+
 async function boot() {
     console.log('[ornis-editor] loading WASM…');
     await init();
@@ -141,7 +200,12 @@ async function boot() {
     // the button shows Rotate while Move is actually active.
     set_gizmo_mode(gizmoMode);
     set_gizmo_space(gizmoSpace);
+    set_snap(snap.enabled, snap.translate, snap.rotateDeg, snap.scale);
+    set_editor_mode(editorMode);
     requestAnimationFrame(overlayLoop);
+    const callbacks = readyCallbacks;
+    readyCallbacks = [];
+    callbacks.forEach(runReadyCallback);
 }
 
 boot().catch((err) => {
@@ -166,6 +230,28 @@ window.OrnisViewport = {
     },
     setGizmoSpace(space) {
         return applyGizmoSpace(space);
+    },
+    setEditorMode(mode) {
+        return applyEditorMode(mode);
+    },
+    setSnap(next) {
+        return applySnap(next || {});
+    },
+    // The rotate grid coerces the requested step (divisor of 360°, half-turn
+    // at the coarse end); the toolbar reads the effective value back rather
+    // than duplicating the formula. `null` when the channel is unquantized —
+    // wasm-bindgen hands back `undefined` for a Rust `None`, so normalize here
+    // instead of leaving the documented contract to the caller's typeof check.
+    effectiveRotateStep() {
+        if (!booted) return null;
+        const step = snap_effective_rotate_deg();
+        return typeof step === 'number' ? step : null;
+    },
+    // Runs `callback` once boot has re-applied the toolbar mirrors (or
+    // immediately if it already has), so a read-back is not left stale by a
+    // control used before the wasm module was ready.
+    onReady(callback) {
+        onViewportReady(callback);
     },
     undoGizmo() {
         return undoGizmoDrag();

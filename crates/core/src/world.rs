@@ -148,6 +148,18 @@ impl<State: Phase> World<State> {
     pub fn run(&self, schedule: &Schedule) {
         schedule.run(&self.resources);
     }
+
+    /// Runs a schedule against decisions already taken at the frame boundary
+    /// ([`Schedule::evaluate_gates`]), so repeated runs within one frame — the
+    /// fixed ticks — reuse a single reading of the run conditions.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, when `gates` was evaluated for a plan with a different
+    /// system count (see [`Schedule::run_with_gates`]).
+    pub fn run_with_gates(&self, schedule: &Schedule, gates: &crate::ScheduleGates) {
+        schedule.run_with_gates(&self.resources, gates);
+    }
 }
 
 #[cfg(test)]

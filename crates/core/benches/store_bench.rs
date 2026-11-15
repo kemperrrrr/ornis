@@ -1,9 +1,10 @@
-//! Benchmarks for `ComponentStore` insert and iteration throughput.
+//! Benchmarks for `ComponentStore` insert and iteration throughput, and for
+//! the whole-store deep copy the editor takes when Play starts.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use rayon::iter::ParallelIterator;
 
-use ornis_core::{ComponentStore, Entity, EntityAllocator};
+use ornis_core::{ComponentStore, Entity, EntityAllocator, SmartStore};
 
 fn setup(
     count: usize,
@@ -83,6 +84,52 @@ fn bench_par_iterate(c: &mut Criterion) {
     });
 }
 
+/// Lane widths of the editor-shaped store: a 40-byte TRS, two 16-byte
+/// vectors and a body-sized 64-byte record.
+const TRS_WORDS: usize = 10;
+const VECTOR_WORDS: usize = 4;
+const BODY_WORDS: usize = 16;
+
+/// Scene sizes the Play-snapshot copy is measured at.
+const SNAPSHOT_SIZES: &[usize] = &[1_000, 10_000, 100_000];
+
+/// Cost of the deep copy `EditorSession::play` takes on the Edit→Play edge
+/// (E4 review): one clone per Play keypress, never on the tick path. The
+/// store is editor-shaped — six hot lanes covering the widths the real
+/// editor registers (a 40-byte TRS, two 16-byte vectors, a body-sized
+/// 64-byte record, two scalars), one cold lane and one lock-free lane, every
+/// lane populated for every entity.
+fn bench_play_snapshot_clone(c: &mut Criterion) {
+    let mut group = c.benchmark_group("play_snapshot_clone");
+    for &count in SNAPSHOT_SIZES {
+        let mut store = SmartStore::new();
+        store.register::<[f32; TRS_WORDS]>();
+        store.register::<[f32; VECTOR_WORDS]>();
+        store.register::<[u32; VECTOR_WORDS]>();
+        store.register::<[f32; BODY_WORDS]>();
+        store.register::<u64>();
+        store.register::<f32>();
+        store.register_cold::<u32>();
+        store.register_lock_free::<u16>();
+        for i in 0..count {
+            let e = store.create_entity();
+            store.insert(e, [1.0f32; TRS_WORDS]);
+            store.insert(e, [1.0f32; VECTOR_WORDS]);
+            store.insert(e, [1u32; VECTOR_WORDS]);
+            store.insert(e, [1.0f32; BODY_WORDS]);
+            store.insert(e, i as u64);
+            store.insert(e, i as f32);
+            store.insert_cold(e, i as u32);
+            store.write_lock_free_lane::<u16>(|lane| lane.insert(e, i as u16));
+        }
+        group.throughput(criterion::Throughput::Elements(count as u64));
+        group.bench_function(format!("entities_{count}"), |b| {
+            b.iter(|| std::hint::black_box(&store).clone());
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_insert,
@@ -90,5 +137,6 @@ criterion_group!(
     bench_par_iterate,
     bench_random_access,
     bench_intersection,
+    bench_play_snapshot_clone,
 );
 criterion_main!(benches);
