@@ -135,22 +135,27 @@ function hideNotice() {
 
 // The one error string that still means "no adapter": `ornis-wasm` maps a
 // failed `request_adapter` to exactly this text (`crates/wasm/src/lib.rs`,
-// `map_err(|_| JsValue::from_str("adapter not found"))`). Kept as an exact
+// `map_err(|_| JsValue::from_str(ADAPTER_NOT_FOUND))`). Kept as an exact
 // comparison rather than a regex/`includes` so new renderer messages cannot
 // drift into this branch by sharing a word — `device: adapter not found in
 // cache` is a real defect, not an environment limit.
 //
-// The Rust side pins the other half of this agreement:
-// `crates/wasm/src/lib.rs` has a test asserting that an unavailable adapter
-// produces exactly this string, so the two constants cannot drift apart
-// silently.
+// The two copies of this string cannot drift apart unnoticed: the Rust side has
+// `pub const ADAPTER_NOT_FOUND` and a test
+// (`the_page_recognises_exactly_this_adapter_message`) that compares this
+// declaration against it. That test pins the *literal*, not the runtime path —
+// it does not execute `map_err`, so changing the message the renderer actually
+// throws would need its own test on the Rust side.
 const ADAPTER_NOT_FOUND = 'adapter not found';
 
 // Adapter options the pre-flight check and the renderer must agree on: the
 // check is only meaningful if it asks for the same adapter the renderer will
-// use. `ornis-wasm` requests `PowerPreference::HighPerformance`
-// (`crates/wasm/src/lib.rs`), so the probe asks for that too — a cheap extra
-// adapter query is worth not checking one GPU and rendering on another.
+// use. `ornis-wasm` requests `POWER_PREFERENCE`
+// (`wgpu::PowerPreference::HighPerformance`, `crates/wasm/src/lib.rs`), so the
+// probe asks for that too — a cheap extra adapter query is worth not checking
+// one GPU and rendering on another. The Rust test
+// `the_page_requests_the_high_performance_adapter` derives the expected string
+// from that constant, so changing the preference breaks it.
 const ADAPTER_OPTIONS = { powerPreference: 'high-performance' };
 
 function webgpuMissing() {

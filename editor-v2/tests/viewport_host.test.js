@@ -71,14 +71,19 @@ export const viewport_state_json = () => JSON.stringify({ mode: 'perspective3d',
 // Renderer defects whose text *looks* like an environment problem. All of them
 // must keep the loud red canvas: matching on words is exactly the bug the
 // pre-flight check exists to avoid.
-//
-// The last entry is deliberately a *superset* of `ADAPTER_NOT_FOUND`: it would
-// match an `includes()` comparison, so it pins the check as an exact equality.
 const DEFECT_MESSAGES = [
   'WebGPU: device lost',
   'Texture format Rgba16Float not supported for storage',
   'WebGPU validation error: shader module invalid',
   'device lost (adapter limits exceeded)',
+];
+
+// Messages that *contain* `ADAPTER_NOT_FOUND` without being it. They are the
+// reason the page compares with `===`: an `includes()` check would classify all
+// three as an environment limit. Defined once and used from both tests below
+// (the combined defects sweep and the dedicated equality test) so the two
+// cannot drift apart.
+const ADAPTER_LOOKALIKES = [
   'device: adapter not found in cache',
   'adapter not found: retrying after device loss',
   'adapter not found (device was destroyed)',
@@ -775,14 +780,9 @@ test('only the exact "adapter not found" message is an environment limit', async
 
 test('a message merely containing "adapter not found" is a defect', async () => {
   // Pins the comparison as `===` rather than `includes`: if the check ever
-  // loosens, these three pass the substring test and must still be red. This is
-  // the mutation a reviewer applied by hand; here it fails a named test.
-  const lookalikes = [
-    'device: adapter not found in cache',
-    'adapter not found: retrying after device loss',
-    'adapter not found (device was destroyed)',
-  ];
-  for (const message of lookalikes) {
+  // loosens, these pass the substring test and must still be red. This is the
+  // mutation a reviewer applied by hand; here it fails a named test.
+  for (const message of ADAPTER_LOOKALIKES) {
     assert.notStrictEqual(
       message,
       ADAPTER_NOT_FOUND,

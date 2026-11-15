@@ -988,6 +988,18 @@ fn make_instance() -> wgpu::Instance {
 /// against this one, so the two cannot drift apart silently.
 pub const ADAPTER_NOT_FOUND: &str = "adapter not found";
 
+/// The adapter this crate renders on, and the one the page's pre-flight probe
+/// must ask for.
+///
+/// A pre-flight check is only meaningful if it selects the *same* adapter the
+/// renderer will use: asking for a different preference could validate the
+/// integrated GPU and then render on the discrete one (or fail on the latter).
+/// `editor-v2/viewport.js` keeps its own copy of the value (it is JS, not a
+/// wasm-bindgen export), and
+/// `the_page_requests_the_high_performance_adapter` compares the two so a
+/// change here cannot leave the page probing a different adapter.
+pub const POWER_PREFERENCE: wgpu::PowerPreference = wgpu::PowerPreference::HighPerformance;
+
 /// Everything the render loop needs from WebGPU initialization.
 struct GpuContext {
     // SAFETY invariant: the phantom window lifetime is pinned to `'static`;
@@ -1016,7 +1028,7 @@ async fn init_webgpu(
 
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: POWER_PREFERENCE,
             compatible_surface: Some(&surface),
             ..Default::default()
         })
@@ -2074,31 +2086,37 @@ mod integration_tests {
     /// both crates assert on.
     const FULL_CONTRACT: &str = include_str!("../../app/tests/fixtures/api_scene.json");
 
+    /// `editor-v2/viewport.js`, embedded at compile time.
+    ///
+    /// `include_str!` rather than a runtime `read_to_string`: the path is
+    /// resolved relative to this file, so the test works under `cargo test`
+    /// from any working directory *and* when the test binary runs on wasm32
+    /// (where `std::fs` has no real filesystem). It is also what keeps the
+    /// assertions below honest — see the adapter test.
+    const VIEWPORT_JS: &str = include_str!("../../../editor-v2/viewport.js");
+
     /// The adapter-failure message is a contract with the page, and the page
-    /// keeps its own copy of the string. This reads `editor-v2/viewport.js`
-    /// and asserts it declares `ADAPTER_NOT_FOUND = 'adapter not found'` — so a
-    /// rename on either side breaks a test instead of silently turning every
-    /// "no adapter" into a red canvas (or, worse, every adapter mention into a
-    /// help blurb).
+    /// keeps its own copy of the string. This asserts `viewport.js` declares
+    /// exactly the Rust constant — so a rename on either side breaks a test
+    /// instead of silently turning every "no adapter" into a red canvas (or,
+    /// worse, every adapter mention into a help blurb).
     #[test]
     fn the_page_recognises_exactly_this_adapter_message() {
-        let viewport = concat!(env!("CARGO_MANIFEST_DIR"), "/../../editor-v2/viewport.js");
-        let source = std::fs::read_to_string(viewport).expect("editor-v2/viewport.js must exist");
         let declaration = format!("const ADAPTER_NOT_FOUND = '{}';", ADAPTER_NOT_FOUND);
         assert!(
-            source.contains(&declaration),
+            VIEWPORT_JS.contains(&declaration),
             "viewport.js must declare {declaration:?} — the page matches this exact \
              string to detect an environment without WebGPU"
         );
         // And it must compare exactly, not by substring: `includes`/regex would
         // swallow real defects that merely mention an adapter.
         assert!(
-            source.contains("=== ADAPTER_NOT_FOUND"),
+            VIEWPORT_JS.contains("=== ADAPTER_NOT_FOUND"),
             "viewport.js must compare the adapter message with === (not includes/regex)"
         );
         assert!(
-            !source.contains(".includes(ADAPTER_NOT_FOUND)")
-                && !source.contains("test(ADAPTER_NOT_FOUND)"),
+            !VIEWPORT_JS.contains(".includes(ADAPTER_NOT_FOUND)")
+                && !VIEWPORT_JS.contains("test(ADAPTER_NOT_FOUND)"),
             "a substring or regex match would classify real defects as environment limits"
         );
     }
@@ -2106,20 +2124,31 @@ mod integration_tests {
     /// The adapter request the page makes before loading the module must ask
     /// for the same adapter this crate renders on, or the pre-flight check
     /// could validate one GPU while the renderer uses another.
+    ///
+    /// The comparison is against [`POWER_PREFERENCE`] itself, not against a
+    /// string copied into this test: a literal check would match its own text
+    /// through `include_str!` and could never fail. Changing
+    /// `POWER_PREFERENCE` to `LowPower` therefore breaks this test until the
+    /// page is updated with it.
     #[test]
     fn the_page_requests_the_high_performance_adapter() {
-        let viewport = concat!(env!("CARGO_MANIFEST_DIR"), "/../../editor-v2/viewport.js");
-        let source = std::fs::read_to_string(viewport).expect("editor-v2/viewport.js must exist");
+        // `wgpu::PowerPreference` is `#[non_exhaustive]` on native but
+        // exhaustive on wasm32, so the wildcard arm is only needed (and only
+        // warned about) on the host. `allow` keeps both targets warning-free
+        // while a future variant still fails loudly on the host that has one.
+        #[allow(unreachable_patterns)]
+        let expected = match POWER_PREFERENCE {
+            wgpu::PowerPreference::HighPerformance => "high-performance",
+            wgpu::PowerPreference::LowPower => "low-power",
+            // `None` means "no preference", which is not a value the page can
+            // meaningfully mirror; a future variant must extend this match.
+            wgpu::PowerPreference::None => "none",
+            _ => panic!("new PowerPreference variant: teach the page about it"),
+        };
+        let probe = format!("powerPreference: '{expected}'");
         assert!(
-            source.contains("powerPreference: 'high-performance'"),
-            "the pre-flight adapter query must ask for the high-performance adapter"
-        );
-        // The crate's own request is what the page's options mirror: if this
-        // ever stops being `HighPerformance`, the JS constant above is wrong.
-        assert!(
-            include_str!("lib.rs")
-                .contains("power_preference: wgpu::PowerPreference::HighPerformance"),
-            "this crate must still request the high-performance adapter"
+            VIEWPORT_JS.contains(&probe),
+            "the pre-flight adapter query must use {{ {probe} }}, matching POWER_PREFERENCE"
         );
     }
 
