@@ -179,6 +179,10 @@ button { font: inherit; color: inherit; }
 .center-top #toggle-right.docked { right: 6px; }
 .viewport { position: relative; flex: 1; min-height: 0; overflow: hidden;
   background: var(--viewport); }
+/* The viewport box is focusable (keyboard navigation reaches the engine only
+   while it holds focus). WebKit would otherwise draw its system blue ring, so
+   the focus indicator follows the palette instead. */
+.viewport:focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--accent); }
 .viewport-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .viewport-canvas.failed { background: #300; }
 /* `hidden` is a UA rule of the lowest specificity: a class rule with

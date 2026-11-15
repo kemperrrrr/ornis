@@ -45,13 +45,17 @@ export const viewport_state_json = () =>
   JSON.stringify({ mode: 'perspective3d', dpr: 1, grid: null });
 `;
 
-// A WebGPU-capable host whose "requestAdapter()" resolves null -- exactly what
-// Chrome on a box without the right flags does. This is an environment fact, so
-// it must land on the written notice (not the red canvas) even though
-// "navigator.gpu" exists.
-const WASM_STUB_NO_ADAPTER = `
+// `ornis-wasm` raises exactly this when `request_adapter` fails
+// (crates/wasm/src/lib.rs: `map_err(|_| JsValue::from_str("adapter not found"))`).
+// The page compares it verbatim, so the stub must use the real string.
+const ADAPTER_NOT_FOUND = 'adapter not found';
+
+// A host that *passes* the pre-flight adapter check but whose renderer then
+// reports "adapter not found" anyway (a race: the adapter disappeared between
+// the two calls). That exact string is still an environment limit.
+const WASM_STUB_ADAPTER_LOST = `
 export default async () => {
-  throw new Error('no adapter found (requestAdapter returned null)');
+  throw new Error(${JSON.stringify('adapter not found')});
 };
 export const start_renderer = async () => {};
 export const set_viewport_mode = () => true;
@@ -63,6 +67,16 @@ export const undo_gizmo = () => true;
 export const snap_effective_rotate_deg = () => 15;
 export const viewport_state_json = () => JSON.stringify({ mode: 'perspective3d', dpr: 1 });
 `;
+
+// Renderer defects whose text *looks* like an environment problem. All of them
+// must keep the loud red canvas: matching on words is exactly the bug the
+// pre-flight check exists to avoid.
+const DEFECT_MESSAGES = [
+  'WebGPU: device lost',
+  'Texture format Rgba16Float not supported for storage',
+  'WebGPU validation error: shader module invalid',
+  'device lost (adapter limits exceeded)',
+];
 
 // A genuine defect after a working adapter: shader compilation failed. This is
 // a bug, not an environment limit, so the loud red canvas must stay.
@@ -161,7 +175,7 @@ function control(selectors) {
 // Boots a fresh copy of `viewport.js` next to the stub WASM package with the
 // DOM/window stubs installed as globals (the module reads them as globals,
 // exactly like in a browser).
-async function bootPage({ shell, gpu = true, stub = WASM_STUB }) {
+async function bootPage({ shell, gpu = true, adapter = true, stub = WASM_STUB }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ornis-viewport-'));
   fs.mkdirSync(path.join(dir, 'pkg'));
   fs.writeFileSync(
@@ -226,7 +240,16 @@ async function bootPage({ shell, gpu = true, stub = WASM_STUB }) {
   // A webview without WebGPU has `navigator` but no `gpu` member. Node's own
   // `navigator` is getter-only, so the stub is defined, not assigned — and
   // defined again on restore for the same reason.
-  const navigatorStub = gpu ? { gpu: {} } : { userAgent: 'Mozilla/5.0 AppleWebKit' };
+  // `adapter` answers the page's pre-flight `requestAdapter()`: `true` gives an
+  // adapter object, `false` gives `null` (the "no usable GPU" case), `'throw'`
+  // rejects like an implementation that reports failure by throwing.
+  const requestAdapter = async () => {
+    if (adapter === 'throw') throw new Error('adapter request failed');
+    return adapter ? { name: 'stub adapter' } : null;
+  };
+  const navigatorStub = gpu
+    ? { gpu: { requestAdapter } }
+    : { userAgent: 'Mozilla/5.0 AppleWebKit' };
   Object.defineProperty(globalThis, 'navigator', {
     value: navigatorStub,
     configurable: true,
@@ -533,6 +556,77 @@ test('keys reach the engine only while the viewport has focus', async () => {
   }
 });
 
+test('a key released after focus left the viewport is still released', async () => {
+  // The blocker: hold W over the viewport, click into the inspector, release W.
+  // The key-up arrives with focus elsewhere; dropping it left `heldKeys` holding
+  // W forever, so the camera kept flying until the window lost focus.
+  const page = await bootPage({
+    shell: { nativeViewport: true, webgpuNotice: 'unused' },
+    gpu: false,
+  });
+  try {
+    const viewport = page.dom.viewport;
+    globalThis.document.activeElement = viewport;
+    page.dispatchWindow('keydown', { code: 'KeyW' });
+    assert.deepStrictEqual(page.posted.at(-1).data.pressed_keys, [17, 87]);
+
+    // Focus moves to the inspector (a control outside the viewport box)...
+    globalThis.document.activeElement = page.dom['mode-3d'].parent || page.dom['mode-3d'];
+    // ...and W is released there. The release must still reach the engine.
+    page.dispatchWindow('keyup', { code: 'KeyW' });
+    const released = page.posted.at(-1);
+    assert.strictEqual(released.type, 'viewport_input');
+    assert.deepStrictEqual(
+      released.data.pressed_keys,
+      [],
+      'a release is honoured regardless of where focus moved to',
+    );
+
+    // And nothing is left held: the next press is the only key down.
+    globalThis.document.activeElement = viewport;
+    page.dispatchWindow('keydown', { code: 'ArrowUp' });
+    assert.deepStrictEqual(
+      page.posted.at(-1).data.pressed_keys,
+      [38],
+      'W must not still count as held',
+    );
+  } finally {
+    page.restore();
+  }
+});
+
+test('focus leaving the viewport releases every held key', async () => {
+  const page = await bootPage({
+    shell: { nativeViewport: true, webgpuNotice: 'unused' },
+    gpu: false,
+  });
+  try {
+    const viewport = page.dom.viewport;
+    globalThis.document.activeElement = viewport;
+    page.dispatchWindow('keydown', { code: 'KeyW' });
+    page.dispatchWindow('keydown', { code: 'ArrowLeft' });
+    assert.deepStrictEqual(page.posted.at(-1).data.pressed_keys, [17, 87, 37]);
+
+    // A `focusout` that lands outside the box ends keyboard navigation: no
+    // key-up is coming, so the page releases everything itself.
+    viewport.dispatch('focusout', { relatedTarget: page.dom['mode-3d'] });
+    assert.deepStrictEqual(page.posted.at(-1).data.pressed_keys, []);
+
+    // Moving focus *within* the box must not release anything.
+    globalThis.document.activeElement = viewport;
+    page.dispatchWindow('keydown', { code: 'KeyS' });
+    assert.deepStrictEqual(page.posted.at(-1).data.pressed_keys, [31, 83]);
+    viewport.dispatch('focusout', { relatedTarget: viewport });
+    assert.deepStrictEqual(
+      page.posted.at(-1).data.pressed_keys,
+      [31, 83],
+      'an internal focus move keeps the held keys',
+    );
+  } finally {
+    page.restore();
+  }
+});
+
 test('a moved viewport box re-posts its bounds without a resize', async () => {
   // `ResizeObserver` only fires on a size change. A viewport that merely shifts
   // (top bar grows, a banner appears) would leave the native layer behind, so
@@ -602,13 +696,14 @@ test('a real init failure stays a loud red canvas, not the environment notice', 
 
 test('a null adapter is an environment limit, not a red canvas', async () => {
   // `navigator.gpu` exists but `requestAdapter()` resolves null — Chrome on a
-  // Linux box without the right flags. Nothing the user can fix in the editor,
-  // so the written notice is the honest answer; the red canvas would blame the
-  // renderer for the machine.
+  // Linux box without the right flags. The page now discovers this *before*
+  // fetching wasm, from the environment itself rather than from an error
+  // message, so the written notice is the honest answer and the renderer is
+  // never even blamed.
   const page = await bootPage({
     shell: { nativeViewport: false, webgpuNotice: 'no GPU here' },
     gpu: true,
-    stub: WASM_STUB_NO_ADAPTER,
+    adapter: false,
   });
   try {
     assert.strictEqual(
@@ -621,8 +716,83 @@ test('a null adapter is an environment limit, not a red canvas', async () => {
       !page.dom.canvas.classes.has('failed'),
       'a missing adapter is not a renderer defect',
     );
+    assert.deepStrictEqual(
+      page.calls,
+      [],
+      'the module is not even downloaded when there is no adapter',
+    );
   } finally {
     page.restore();
+  }
+});
+
+test('an adapter query that throws is treated as no adapter', async () => {
+  // Some implementations report failure by rejecting rather than resolving
+  // null; the page must reach the same conclusion either way.
+  const page = await bootPage({
+    shell: { nativeViewport: false, webgpuNotice: 'no GPU here' },
+    gpu: true,
+    adapter: 'throw',
+  });
+  try {
+    assert.strictEqual(page.dom['viewport-notice'].hidden, false);
+    assert.deepStrictEqual(page.calls, [], 'no download when the query throws');
+  } finally {
+    page.restore();
+  }
+});
+
+test('only the exact "adapter not found" message is an environment limit', async () => {
+  // The pre-flight check passed, yet the renderer still reports no adapter (it
+  // disappeared between the two calls). `ornis-wasm` emits this one exact
+  // string, so it is still environment — and it must be matched verbatim.
+  const page = await bootPage({
+    shell: { nativeViewport: false, webgpuNotice: 'no GPU here' },
+    gpu: true,
+    stub: WASM_STUB_ADAPTER_LOST,
+  });
+  try {
+    assert.strictEqual(
+      page.dom['viewport-notice'].hidden,
+      false,
+      `${ADAPTER_NOT_FOUND} is an environment limit`,
+    );
+    assert.ok(!page.dom.canvas.classes.has('failed'));
+  } finally {
+    page.restore();
+  }
+});
+
+test('renderer defects that mention WebGPU or adapters stay a red canvas', async () => {
+  // The bug this pins: a broad message regex turned real defects into a help
+  // blurb. Every one of these mentions WebGPU, an adapter, or "not supported"
+  // and must still be a loud failure.
+  for (const message of DEFECT_MESSAGES) {
+    const page = await bootPage({
+      shell: { nativeViewport: false, webgpuNotice: 'environment notice' },
+      gpu: true,
+      stub: `
+export default async () => {
+  throw new Error(${JSON.stringify(message)});
+};`,
+    });
+    try {
+      assert.ok(
+        page.dom.canvas.classes.has('failed'),
+        `must stay a red canvas: ${message}`,
+      );
+      assert.ok(
+        page.dom.canvas.title.startsWith('WebGPU init failed:'),
+        `title must report the defect: ${message}`,
+      );
+      assert.strictEqual(
+        page.dom['viewport-notice'].hidden,
+        true,
+        `the environment notice must not hide a defect: ${message}`,
+      );
+    } finally {
+      page.restore();
+    }
   }
 });
 

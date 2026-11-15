@@ -112,12 +112,16 @@ async function sandbox(failInit) {
         },
     };
     globalThis.window = { devicePixelRatio: 1 };
-    // The harness models a WebGPU-capable browser: the viewport only boots the
-    // wasm module when `navigator.gpu` exists (a WKWebView without it gets the
-    // written fallback, covered by editor-v2/tests/viewport_host.test.js).
-    // Node's own `navigator` is getter-only, hence `defineProperty`.
+    // The harness models a WebGPU-capable browser: the viewport boots the wasm
+    // module only when `navigator.gpu` exists *and* `requestAdapter()` yields an
+    // adapter (both are checked before the module is fetched; a WKWebView
+    // without them gets the written fallback, covered by
+    // editor-v2/tests/viewport_host.test.js). Node's own `navigator` is
+    // getter-only, hence `defineProperty`.
     Object.defineProperty(globalThis, 'navigator', {
-        value: { gpu: {} },
+        value: {
+            gpu: { requestAdapter: async () => ({ name: 'harness adapter' }) },
+        },
         configurable: true,
         writable: true,
     });

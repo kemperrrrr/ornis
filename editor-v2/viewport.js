@@ -118,25 +118,49 @@ function hideNotice() {
     if (canvasEl) canvasEl.hidden = false;
 }
 
-// `navigator.gpu` is the whole capability check: a present-but-useless adapter
-// is a different failure (the renderer reports it with its own message), while
-// a missing one means this webview cannot run the viewport at all. Checked
-// before the WASM module is even fetched.
+// ── WebGPU capability ─────────────────────────────────────────────────────
+// "This environment cannot do WebGPU" is decided by *fact*, never by matching
+// an error message: a renderer error that merely mentions WebGPU or an adapter
+// (a lost device, a validation error, "format … not supported") is a real
+// defect and must stay a loud red canvas. Only two things are environment
+// facts, and both are observable before rendering:
+//
+// 1. `navigator.gpu` does not exist — WKWebView today, and any browser without
+//    WebGPU enabled;
+// 2. `requestAdapter()` resolves `null` — Chrome on a box without a usable GPU
+//    or the right flags.
+//
+// Both are checked in `boot()` before the wasm module is fetched, so the
+// fallback costs no download and cannot be confused with a render failure.
+
+// The one error string that still means "no adapter": `ornis-wasm` maps a
+// failed `request_adapter` to exactly this text (`crates/wasm/src/lib.rs`,
+// `map_err(|_| JsValue::from_str("adapter not found"))`). Kept as an exact
+// comparison rather than a regex/`includes` so new renderer messages cannot
+// drift into this branch by sharing a word.
+const ADAPTER_NOT_FOUND = 'adapter not found';
+
 function webgpuMissing() {
     return !(typeof navigator !== 'undefined' && 'gpu' in navigator);
 }
 
-// Failure messages that mean "this environment cannot do WebGPU", as opposed to
-// "the renderer is broken". Chrome on a Linux box without the right flags
-// resolves `requestAdapter()` to `null` and wgpu surfaces that as an adapter or
-// device failure — an environment fact, like a missing `navigator.gpu`, so it
-// deserves the written notice rather than a red canvas. A *different* init error
-// (shader compilation, a lost device) is a real defect and keeps the red mark.
-const WEBGPU_ENVIRONMENT_FAILURE =
-    /navigator\.gpu|webgpu|adapter|requestAdapter|requestDevice|no suitable|not supported/i;
+// Resolves whether this browser can hand out an adapter. A throw (some
+// implementations reject instead of resolving `null`) is the same answer:
+// no usable adapter here.
+async function hasWebgpuAdapter() {
+    if (webgpuMissing()) return false;
+    try {
+        const adapter = await navigator.gpu.requestAdapter();
+        return !!adapter;
+    } catch (e) {
+        return false;
+    }
+}
 
-function isEnvironmentWebgpuFailure(message) {
-    return webgpuMissing() || WEBGPU_ENVIRONMENT_FAILURE.test(String(message || ''));
+// Whether a *thrown* init error is the "no adapter" case. Deliberately exact:
+// every other message is a renderer defect and stays a red canvas.
+function isAdapterNotFound(message) {
+    return String(message || '').trim() === ADAPTER_NOT_FOUND;
 }
 
 // ── native viewport client ────────────────────────────────────────────────
@@ -332,8 +356,9 @@ function startNativeViewport() {
                 wheel_delta: event.deltaY,
             });
         },
-        // Capture phase: a handler of the field itself still runs, but the
-        // filter above keeps the event away from the shell.
+        // Not a capture-phase listener: the filter above looks at
+        // `event.target`, so a wheel over a snap field never reaches the shell
+        // while the field's own handler and the default scroll still run.
         { passive: false },
     );
     viewportEl.addEventListener('contextmenu', (event) => {
@@ -341,24 +366,34 @@ function startNativeViewport() {
         event.preventDefault();
     });
 
-    // Keyboard follows focus, like any editor viewport: keys reach the engine
-    // only while focus is inside the viewport box, so typing in the inspector or
-    // a shortcut field never moves the camera. The box itself is made focusable
-    // so a click on the backing surface starts keyboard navigation.
+    // Keyboard follows focus, like any editor viewport: a key *press* reaches
+    // the engine only while focus is inside the viewport box, so typing in the
+    // inspector or a shortcut field never moves the camera. The box itself is
+    // made focusable so a click on the backing surface starts navigation.
     viewportEl.setAttribute('tabindex', '0');
     const focusInside = () => {
         const active = document.activeElement;
         return !!(viewportEl && active && viewportEl.contains(active));
     };
     const onKey = (event, pressed) => {
-        if (!focusInside()) return;
-        if (!isViewportSurfaceEvent(event)) return;
         const codes = gameKeyCodes(event.code);
         if (!codes || codes.length === 0) return;
-        event.preventDefault();
-        for (const code of codes) {
-            if (pressed) heldKeys.add(code);
-            else heldKeys.delete(code);
+        if (pressed) {
+            // Only a press needs the gate; a release must always be delivered
+            // (see below).
+            if (!focusInside() || !isViewportSurfaceEvent(event)) return;
+            event.preventDefault();
+            for (const code of codes) heldKeys.add(code);
+        } else {
+            // A release is honoured whenever the engine thinks the key is down,
+            // regardless of where focus is *now*. Otherwise: hold W in the
+            // viewport, click into the inspector, release W — the key-up would
+            // be dropped, `heldKeys` would keep W forever, and the camera would
+            // keep flying until the window lost focus.
+            let wasHeld = false;
+            for (const code of codes) wasHeld = heldKeys.delete(code) || wasHeld;
+            if (!wasHeld) return;
+            event.preventDefault();
         }
         postInput({
             pressed_keys: Array.from(heldKeys),
@@ -366,9 +401,18 @@ function startNativeViewport() {
         });
     };
     // The listener sits on the window so a key-up still arrives after focus
-    // moved; the guards above decide whether it belongs to the engine.
+    // moved; `onKey` above decides what each direction means.
     window.addEventListener('keydown', (event) => onKey(event, true));
     window.addEventListener('keyup', (event) => onKey(event, false));
+    // Focus moving out of the box ends keyboard navigation: release everything
+    // rather than waiting for key-ups that may land in another control.
+    viewportEl.addEventListener('focusout', (event) => {
+        // `focusout` also fires when focus moves *within* the box (canvas ->
+        // toolbar); only a move to somewhere outside ends navigation.
+        const next = event && event.relatedTarget;
+        if (next && viewportEl.contains(next)) return;
+        releaseAll();
+    });
     // Losing the window (tab switch) delivers no `keyup`/`pointerup`; without
     // this the shell keeps a key or button held forever.
     window.addEventListener('blur', releaseAll);
@@ -548,6 +592,14 @@ async function boot() {
         console.warn('[ornis-editor] WebGPU unavailable in this webview, viewport disabled');
         return;
     }
+    // An absent adapter is the other environment fact, and it is cheap to ask
+    // *before* downloading the module. Checking it here (rather than guessing
+    // from a later error message) is what keeps real renderer failures loud.
+    if (!(await hasWebgpuAdapter())) {
+        showNotice('no WebGPU adapter');
+        console.warn('[ornis-editor] no WebGPU adapter, viewport disabled');
+        return;
+    }
     console.log('[ornis-editor] loading WASM…');
     wasm = await import('./pkg/ornis_wasm.js');
     await wasm.default();
@@ -571,16 +623,15 @@ async function boot() {
 boot().catch((err) => {
     console.error('[ornis-editor] failed to start:', err);
     const message = (err && err.message) || String(err);
-    if (!nativeViewport && isEnvironmentWebgpuFailure(message)) {
-        // The environment cannot do WebGPU (no `navigator.gpu`, or an adapter
-        // that resolved null): the written notice beats a red canvas nobody can
-        // act on. `nativeViewport` is excluded because the shell's own failure
-        // to attach the layer says nothing about WebGPU.
-        showNotice(message);
+    // Only the exact "no adapter" string (what `ornis-wasm` emits when
+    // `request_adapter` fails) is treated as an environment limit. Everything
+    // else — a lost device, a validation error, an unsupported format — is a
+    // renderer defect and keeps the loud red canvas, even if the message
+    // mentions WebGPU or an adapter.
+    if (!nativeViewport && (webgpuMissing() || isAdapterNotFound(message))) {
+        showNotice(message || 'no WebGPU adapter');
         return;
     }
-    // WebGPU exists and the renderer still failed on a real defect (shader,
-    // device lost): keep the loud red canvas and its title.
     if (canvasEl) {
         canvasEl.classList.add('failed');
         canvasEl.title = 'WebGPU init failed: ' + message;
