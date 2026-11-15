@@ -34,6 +34,9 @@ pub mod ragdoll_proxy;
 pub mod ragdoll_runtime;
 pub mod ragdoll_sync;
 pub mod ragdoll_wiring;
+/// Client-side parser of the `/api/scene` snapshot contract (shared by the
+/// browser and the native viewport clients).
+pub mod scene_snapshot;
 /// Headless editor session: commands in, snapshots/events out.
 pub mod session;
 pub mod sync_harness;
@@ -42,6 +45,7 @@ pub use game_world::{
     EntityMut, GameWorld, ModelInstance, ModelSpawn, PlaybackError, ReplicaGameWorld, Spawn,
     SpawnModelError,
 };
+pub use scene_snapshot::{SceneSnapshot, SnapshotEntityMeta, parse_scene_json};
 pub use ornis_animation::{
     AnimEvent, Animator, AnimatorAccess, BasePull, ClipId, ControlRig, Effector, JointMask, MaskId,
     SkelLayer, SkelLayerStack, SkelPlayer, SkelTree, SyncMark, TreeCmp, TreeCond, TreeNodeDef,

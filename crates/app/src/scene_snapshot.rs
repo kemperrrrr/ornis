@@ -1,6 +1,13 @@
-//! Client-side mirror of the `/api/scene` JSON contract served by the
-//! remote editor (see `src/remote.rs`). Kept free of web-sys/wgpu types so
-//! it compiles — and is unit-tested — on native targets.
+//! Client-side parser of the `/api/scene` JSON contract.
+//!
+//! The contract is served by `editor_backend::remote` and consumed by every
+//! viewport client: the browser/WASM viewport (`crates/wasm`) and the native
+//! viewport inside `ornis-shell`. It lives in `ornis-app` because this crate
+//! is also the one that *writes* the server-side snapshot
+//! ([`EditorSession::scene_json`](crate::session::EditorSession::scene_json)),
+//! so one crate owns both halves and the two viewport clients cannot drift.
+//! Kept free of web-sys/wgpu/winit types so it compiles — and is
+//! unit-tested — on every target, including hosts without a display.
 //!
 //! Since the D2 rewrite (audit 2026-08-22 §6.2) the contract is generic:
 //! every entity carries a `components` map keyed by the registry name,
@@ -18,6 +25,50 @@ use ornis_assets::scene::{
 };
 use ornis_editor::{EditorMarks, GizmoHandle};
 use serde::Deserialize;
+
+/// Client-side scene snapshot: the renderable scene plus the transport
+/// metadata of the `/api/scene` reply.
+#[derive(Debug, Clone)]
+pub struct SceneSnapshot {
+    /// Authoritative server-side scene version.
+    pub version: u64,
+    /// Transport sequence assigned by the editor backend.
+    pub sequence: u64,
+    /// Renderable scene description reconstructed from the snapshot.
+    pub scene: Scene,
+    /// Server identity and editor marks, in the same order as
+    /// [`scene.entities`](Scene::entities). The replica applies the marks
+    /// to its local handles and uses the ids to address the server.
+    pub meta: Vec<SnapshotEntityMeta>,
+}
+
+/// Per-entity data the render path does not consume but the replica needs:
+/// the authoritative handle and the editor marks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct SnapshotEntityMeta {
+    /// Authoritative entity id; `None` when the snapshot omitted it.
+    #[serde(default)]
+    pub id: Option<u32>,
+    /// Authoritative entity generation; `None` when the snapshot omitted it.
+    #[serde(default)]
+    pub generation: Option<u32>,
+    /// Editor marks (`selected`/`hovered`/`editor_only`) from the server.
+    #[serde(default)]
+    pub editor: EditorMarks,
+    /// Gizmo handle identity for E3 chrome (absent on scene entities).
+    #[serde(default)]
+    pub gizmo: Option<GizmoHandle>,
+}
+
+impl SnapshotEntityMeta {
+    /// Authoritative `(id, generation)` handle, only when the snapshot
+    /// carried both halves. A partial or missing identity is not an
+    /// address: the replica must not send commands for such an entity.
+    #[must_use]
+    pub fn server_handle(&self) -> Option<(u32, u32)> {
+        self.id.zip(self.generation)
+    }
+}
 
 /// Root object of the `/api/scene` response. Unknown fields
 /// (`entity_count`, entity `id`/`generation`, …) are ignored by serde.
@@ -74,55 +125,8 @@ pub struct RenderComponents {
     pub gizmo: Option<GizmoHandle>,
 }
 
-/// A successfully parsed `/api/scene` payload converted into the render
-/// crate's scene description. The WASM runtime inserts it into the shared
-/// [`ReplicaGameWorld`](ornis_app::ReplicaGameWorld) before ECS extraction
-/// and GPU upload. Both `version` and `sequence` stay plain `u64` on the
-/// transport; the typed [`SceneVersion`](ornis_core::SceneVersion) is only
-/// used inside the world.
-pub struct LiveScene {
-    /// Authoritative server-side scene version.
-    pub version: u64,
-    /// Transport sequence assigned by the editor backend.
-    pub sequence: u64,
-    /// Renderable scene description reconstructed from the snapshot.
-    pub scene: Scene,
-    /// Server identity and editor marks, in the same order as
-    /// [`scene.entities`](Scene::entities). The replica applies the marks
-    /// to its local handles and uses the ids to address the server.
-    pub meta: Vec<LiveEntityMeta>,
-}
-
-/// Per-entity data the render path does not consume but the replica needs:
-/// the authoritative handle and the editor marks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-pub struct LiveEntityMeta {
-    /// Authoritative entity id; `None` when the snapshot omitted it.
-    #[serde(default)]
-    pub id: Option<u32>,
-    /// Authoritative entity generation; `None` when the snapshot omitted it.
-    #[serde(default)]
-    pub generation: Option<u32>,
-    /// Editor marks (`selected`/`hovered`/`editor_only`) from the server.
-    #[serde(default)]
-    pub editor: EditorMarks,
-    /// Gizmo handle identity for E3 chrome (absent on scene entities).
-    #[serde(default)]
-    pub gizmo: Option<GizmoHandle>,
-}
-
-impl LiveEntityMeta {
-    /// Authoritative `(id, generation)` handle, only when the snapshot
-    /// carried both halves. A partial or missing identity is not an
-    /// address: the replica must not send commands for such an entity.
-    #[must_use]
-    pub fn server_handle(&self) -> Option<(u32, u32)> {
-        self.id.zip(self.generation)
-    }
-}
-
 impl ApiScene {
-    fn into_live(self) -> LiveScene {
+    fn into_snapshot(self) -> SceneSnapshot {
         let mut entities = Vec::with_capacity(self.entities.len());
         let mut meta = Vec::with_capacity(self.entities.len());
         for entity in self.entities {
@@ -138,14 +142,14 @@ impl ApiScene {
                 mesh: components.mesh,
                 material: components.material,
             });
-            meta.push(LiveEntityMeta {
+            meta.push(SnapshotEntityMeta {
                 id,
                 generation,
                 editor,
                 gizmo: components.gizmo,
             });
         }
-        LiveScene {
+        SceneSnapshot {
             version: self.version,
             sequence: self.sequence,
             scene: Scene {
@@ -163,13 +167,18 @@ impl ApiScene {
 /// Parse a `/api/scene` JSON body. Returns `Err` for malformed JSON and —
 /// intentionally — for the reduced server variant without per-entity
 /// `components`, so the caller reports the error instead of rendering.
-pub fn parse_scene_json(json: &str) -> Result<LiveScene, serde_json::Error> {
-    Ok(serde_json::from_str::<ApiScene>(json)?.into_live())
+pub fn parse_scene_json(json: &str) -> Result<SceneSnapshot, serde_json::Error> {
+    Ok(serde_json::from_str::<ApiScene>(json)?.into_snapshot())
 }
 
-#[cfg(test)]
-/// The full contract payload, in the canonical generic form.
-pub(crate) const FULL_CONTRACT: &str = r#"{
+/// The canonical `/api/scene` payload: one lit sphere with a camera, one
+/// light and an ambient term.
+///
+/// Public (not `cfg(test)`) because two crates assert against it: the client
+/// parser here and the WASM viewport's end-to-end gate, which renders this
+/// exact contract headlessly. One literal, so the contract cannot drift
+/// between them.
+pub const FULL_CONTRACT: &str = r#"{
     "version": 5, "sequence": 12, "entity_count": 2,
     "entities": [{
         "id": 4, "generation": 2,
@@ -199,7 +208,7 @@ mod tests {
         assert_eq!(live.scene.entities.len(), 1);
         assert_eq!(
             live.meta,
-            vec![LiveEntityMeta {
+            vec![SnapshotEntityMeta {
                 id: Some(4),
                 generation: Some(2),
                 editor: EditorMarks {
@@ -288,7 +297,7 @@ mod tests {
         let handles: Vec<_> = live
             .meta
             .iter()
-            .map(LiveEntityMeta::server_handle)
+            .map(SnapshotEntityMeta::server_handle)
             .collect();
         assert_eq!(handles, vec![None, Some((0, 0)), None, None]);
         assert_eq!(live.meta[0].id, None);
@@ -339,7 +348,7 @@ mod tests {
         // Missing identity/marks default instead of failing the parse.
         assert_eq!(
             live.meta,
-            vec![LiveEntityMeta::default(), LiveEntityMeta::default()]
+            vec![SnapshotEntityMeta::default(), SnapshotEntityMeta::default()]
         );
         assert!(
             live.meta.iter().all(|meta| meta.server_handle().is_none()),

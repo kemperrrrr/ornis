@@ -16,11 +16,18 @@
 //! [`GameEvent`](editor_backend::ipc::GameEvent)s flow back with a transport
 //! `sequence` cursor. All of that is pure functions in [`bridge`], unit
 //! tested without opening a window; the `wry` wiring lives in the binary.
+//!
+//! The shell-level channel is [`viewport_ipc`]: the page reports its
+//! viewport rectangle (`viewport_bounds`) and forwards pointer/wheel/key
+//! state over it (`viewport_input`). Both are pure parses here, so the native
+//! viewport prototype (`--native-viewport`) shares the exact protocol the
+//! browser page already speaks and CI tests it without a GPU.
 
 pub mod assets;
 pub mod bridge;
 pub mod error;
 pub mod probe;
+pub mod viewport_ipc;
 
 pub use assets::{
     AssetResponse, content_type_for, read_asset, request_file_path, resolve_editor_dir, start_url,
@@ -31,3 +38,7 @@ pub use bridge::{
 };
 pub use error::{AssetError, BridgeError};
 pub use probe::probe_page;
+pub use viewport_ipc::{
+    MAX_PRESSED, MAX_SCALE, MAX_VIEWPORT_EDGE, MIN_SCALE, MIN_VIEWPORT_EDGE, PhysicalRect,
+    ViewportBounds, ViewportInput, ViewportMessage, parse_viewport_message,
+};
