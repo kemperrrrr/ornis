@@ -101,8 +101,8 @@ pub use builtin::{
 };
 pub use elements::{AtomicU32, Vec4U32};
 pub use math::{
-    abs, acos, atan2, clamp, cos, cross_lane, dot2, dot3, exp2, fract, homogeneous_divide, length3,
-    log2, mix, normalize_lane, pow, sign, sin, smoothstep, sqrt,
+    abs, acos, atan2, clamp, cos, cross_lane, dot2, dot3, exp, exp2, fract, homogeneous_divide,
+    length3, ln, log2, mix, normalize_lane, pow, sign, sin, smoothstep, sqrt, tan,
 };
 pub use ornis_gpu_shader_macros::gpu_entry;
 pub use resource::Storage;
@@ -110,25 +110,6 @@ pub use texture::{DepthTexture2d, Sampler, Texture2d, Texture2dU32};
 pub use uniform::{GpuStruct, Uniform};
 pub use vec3::Vec3;
 pub use workgroup::{WorkgroupAtomicU32, WorkgroupU32, workgroup_barrier};
-
-/// Base-e exponential, lowered to WGSL `exp`.
-///
-/// `no_std` has no `f32::exp`, and a software series would not match the GPU
-/// instruction. On the host this diverges: a kernel crate is type-checked
-/// there, not executed.
-#[inline(always)]
-#[must_use]
-pub fn exp(value: f32) -> f32 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        crate::abi::exp(value)
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = value;
-        host_unavailable()
-    }
-}
 
 /// Field tag of an `f32` in `ornis_gpu.types` (mirrors `ornis_gpu_abi`).
 pub const TYPE_TAG_F32: u8 = 1;
@@ -150,17 +131,4 @@ pub const TYPE_TAG_STRUCT: u8 = 7;
 #[inline(always)]
 pub(crate) fn host_unavailable() -> ! {
     host::unavailable()
-}
-
-/// Square root for the host reference path.
-///
-/// `no_std` has no `f32::sqrt`; the host build only exists so kernel crates can
-/// be type-checked and unit-tested, and the test harness links `std`, which
-/// provides the intrinsic. On `wasm32` the same operation is the
-/// `gpu_length3_xyz` import instead, so this function is never in a shader.
-#[cfg(not(target_arch = "wasm32"))]
-#[inline(always)]
-pub(crate) fn host_sqrt(value: f32) -> f32 {
-    extern crate std;
-    std::primitive::f32::sqrt(value)
 }

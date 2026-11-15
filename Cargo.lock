@@ -2922,6 +2922,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ornis-gpu-openpbr"
+version = "0.1.0"
+dependencies = [
+ "ornis-gpu-shader",
+]
+
+[[package]]
 name = "ornis-gpu-quad"
 version = "0.1.0"
 dependencies = [
@@ -2932,6 +2939,7 @@ dependencies = [
 name = "ornis-gpu-shader"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "ornis-gpu-shader-macros",
  "trybuild",
 ]
@@ -3047,6 +3055,8 @@ dependencies = [
  "ornis-assets",
  "ornis-core",
  "ornis-gpu-cluster",
+ "ornis-gpu-openpbr",
+ "ornis-gpu-shader",
  "ornis-macros",
  "ornis-mesh-editor",
  "ornis-schedule",

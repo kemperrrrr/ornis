@@ -1,0 +1,14 @@
+[package]
+name = "ornis-gpu-openpbr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OpenPBR shading math for the llvm2gpu path, shared by the forward-PBR, lighting and textured material passes"
+
+[dependencies]
+ornis-gpu-shader = { path = "../gpu-shader", version = "0.1.0" }
+
+[lints]
+workspace = true

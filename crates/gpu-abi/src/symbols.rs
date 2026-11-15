@@ -332,6 +332,16 @@ pub const GPU_ATAN2: &str = "gpu_atan2";
 /// from the instruction the DSL path used, so the operation is an import.
 pub const GPU_SMOOTHSTEP: &str = "gpu_smoothstep";
 
+/// `(param f32) (result f32)` — `tan(value)`, one WGSL `tan`.
+pub const GPU_TAN: &str = "gpu_tan";
+
+/// `(param f32) (result f32)` — `ln(value)`, the natural logarithm, one WGSL
+/// `log`.
+pub const GPU_LN: &str = "gpu_ln";
+
+/// `(param f32) (result f32)` — `exp(value)`, one WGSL `exp`.
+pub const GPU_EXP: &str = "gpu_exp";
+
 /// Compute entry. Optional: a module without this export still lowers.
 ///
 /// The translator binds the function's single `i32` parameter to
