@@ -96,6 +96,10 @@ unsafe extern "C" {
     fn gpu_sin(value: f32) -> f32;
     #[link_name = "gpu_acos"]
     fn gpu_acos(value: f32) -> f32;
+    #[link_name = "gpu_tan"]
+    fn gpu_tan(value: f32) -> f32;
+    #[link_name = "gpu_ln"]
+    fn gpu_ln(value: f32) -> f32;
     #[link_name = "gpu_cross3_lane"]
     fn gpu_cross3_lane(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, lane: u32) -> f32;
     #[link_name = "gpu_normalize3_lane"]
@@ -392,6 +396,18 @@ pub(crate) fn sin(value: f32) -> f32 {
 #[inline(always)]
 pub(crate) fn acos(value: f32) -> f32 {
     call!(gpu_acos(value))
+}
+
+/// Tangent.
+#[inline(always)]
+pub(crate) fn tan(value: f32) -> f32 {
+    call!(gpu_tan(value))
+}
+
+/// Natural logarithm.
+#[inline(always)]
+pub(crate) fn ln(value: f32) -> f32 {
+    call!(gpu_ln(value))
 }
 
 /// Lane `lane` of `cross(a, b)`.

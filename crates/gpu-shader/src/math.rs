@@ -7,9 +7,64 @@
 //! The `wasm32` arm is a direct `#[inline(always)]` call. A function pointer
 //! would survive into the kernel's LLVM IR, and the translator only sees calls
 //! written in the entry.
+//!
+//! Off `wasm32` the same functions evaluate for real through [`libm`]: the host
+//! build of a shader crate is the reference the GPU parity gates compare
+//! against, so it has to return values rather than panic. The two arms round
+//! independently — a parity gate compares them with a tolerance, it never
+//! expects a bit-exact match.
+
+/// Coefficients of the Hermite smoothstep curve, `3t² - 2t³`.
+const SMOOTHSTEP_CUBIC: f32 = 3.0;
+/// Coefficient of the cubic term, `-2t³`.
+const SMOOTHSTEP_CUBIC_NEGATIVE: f32 = -2.0;
+
+/// Host-side implementations shared by the arithmetic functions below.
+///
+/// `wasm32` has none of these: every shader operation is an import there.
+#[cfg(not(target_arch = "wasm32"))]
+mod host {
+    /// `-1`, `0` or `1`, the WGSL `sign` of `value`.
+    #[inline(always)]
+    pub(super) fn sign(value: f32) -> f32 {
+        if value > 0.0 {
+            1.0
+        } else if value < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Fractional part, `value - floor(value)`.
+    #[inline(always)]
+    pub(super) fn fract(value: f32) -> f32 {
+        value - libm::floorf(value)
+    }
+
+    /// `start + (end - start) * factor`.
+    #[inline(always)]
+    pub(super) fn mix(start: f32, end: f32, factor: f32) -> f32 {
+        start + (end - start) * factor
+    }
+
+    /// `smoothstep(low, high, x)`.
+    ///
+    /// The Hermite curve, not the instruction the GPU calls: the gate's
+    /// tolerance absorbs the difference.
+    #[inline(always)]
+    pub(super) fn smoothstep(low: f32, high: f32, x: f32) -> f32 {
+        let span = high - low;
+        if span == 0.0 {
+            return 0.0;
+        }
+        let t = ((x - low) / span).clamp(0.0, 1.0);
+        t * t * (super::SMOOTHSTEP_CUBIC + super::SMOOTHSTEP_CUBIC_NEGATIVE * t)
+    }
+}
 
 macro_rules! unary {
-    ($(#[$meta:meta])* $name:ident) => {
+    ($(#[$meta:meta])* $name:ident => $host:path) => {
         $(#[$meta])*
         #[inline(always)]
         #[must_use]
@@ -20,8 +75,7 @@ macro_rules! unary {
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let _ = value;
-                crate::host_unavailable()
+                $host(value)
             }
         }
     };
@@ -29,35 +83,47 @@ macro_rules! unary {
 
 unary!(
     /// `log2(value)`.
-    log2
+    log2 => libm::log2f
 );
 unary!(
     /// `exp2(value)`.
-    exp2
+    exp2 => libm::exp2f
+);
+unary!(
+    /// Natural logarithm, `ln(value)` — one WGSL `log`.
+    ln => libm::logf
+);
+unary!(
+    /// `exp(value)` — one WGSL `exp`.
+    exp => libm::expf
 );
 unary!(
     /// Absolute value, one WGSL `abs`.
-    abs
+    abs => libm::fabsf
 );
 unary!(
     /// Sign of `value`: `-1`, `0`, or `1`.
-    sign
+    sign => host::sign
 );
 unary!(
     /// Cosine.
-    cos
+    cos => libm::cosf
 );
 unary!(
     /// Sine.
-    sin
+    sin => libm::sinf
+);
+unary!(
+    /// Tangent.
+    tan => libm::tanf
 );
 unary!(
     /// Arccosine.
-    acos
+    acos => libm::acosf
 );
 unary!(
     /// Fractional part of `value`.
-    fract
+    fract => host::fract
 );
 
 /// `sqrt(value)` — one WGSL `sqrt`.
@@ -73,8 +139,7 @@ pub fn sqrt(value: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = value;
-        crate::host_unavailable()
+        libm::sqrtf(value)
     }
 }
 
@@ -91,8 +156,7 @@ pub fn smoothstep(low: f32, high: f32, x: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (low, high, x);
-        crate::host_unavailable()
+        host::smoothstep(low, high, x)
     }
 }
 
@@ -109,8 +173,7 @@ pub fn pow(base: f32, exponent: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (base, exponent);
-        crate::host_unavailable()
+        libm::powf(base, exponent)
     }
 }
 
@@ -124,8 +187,7 @@ pub fn atan2(y: f32, x: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (y, x);
-        crate::host_unavailable()
+        libm::atan2f(y, x)
     }
 }
 
@@ -139,8 +201,13 @@ pub fn clamp(value: f32, low: f32, high: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (value, low, high);
-        crate::host_unavailable()
+        if value < low {
+            low
+        } else if value > high {
+            high
+        } else {
+            value
+        }
     }
 }
 
@@ -154,8 +221,7 @@ pub fn mix(start: f32, end: f32, factor: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (start, end, factor);
-        crate::host_unavailable()
+        host::mix(start, end, factor)
     }
 }
 
@@ -174,7 +240,7 @@ pub fn dot2(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        ay.mul_add(by, ax * bx)
+        libm::fmaf(ay, by, ax * bx)
     }
 }
 
@@ -202,8 +268,7 @@ pub fn dot3(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (ax, ay, az, bx, by, bz);
-        crate::host_unavailable()
+        libm::fmaf(ay, by, libm::fmaf(ax, bx, az * bz))
     }
 }
 
@@ -217,8 +282,7 @@ pub fn length3(x: f32, y: f32, z: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (x, y, z);
-        crate::host_unavailable()
+        libm::sqrtf(x * x + y * y + z * z)
     }
 }
 
@@ -234,8 +298,11 @@ pub fn cross_lane<const LANE: u32>(ax: f32, ay: f32, az: f32, bx: f32, by: f32, 
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (ax, ay, az, bx, by, bz);
-        crate::host_unavailable()
+        match LANE {
+            0 => ay * bz - az * by,
+            1 => az * bx - ax * bz,
+            _ => ax * by - ay * bx,
+        }
     }
 }
 
@@ -250,7 +317,11 @@ pub fn normalize_lane<const LANE: u32>(x: f32, y: f32, z: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (x, y, z);
-        crate::host_unavailable()
+        let inverse = 1.0 / libm::sqrtf(x * x + y * y + z * z);
+        match LANE {
+            0 => x * inverse,
+            1 => y * inverse,
+            _ => z * inverse,
+        }
     }
 }

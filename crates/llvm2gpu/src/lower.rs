@@ -5620,10 +5620,15 @@ fn unary_math(callee: &str) -> Option<naga::MathFunction> {
         ("acos", naga::MathFunction::Acos),
         ("sin", naga::MathFunction::Sin),
         ("cos", naga::MathFunction::Cos),
+        // `gpu_exp2` starts with `gpu_exp`, so the symbol spelling goes after
+        // the generic `exp2`/`log2` below it is matched first.
         ("exp2", naga::MathFunction::Exp2),
         ("exp", naga::MathFunction::Exp),
         ("log2", naga::MathFunction::Log2),
         ("log", naga::MathFunction::Log),
+        (ornis_gpu_abi::symbols::GPU_EXP, naga::MathFunction::Exp),
+        (ornis_gpu_abi::symbols::GPU_LN, naga::MathFunction::Log),
+        (ornis_gpu_abi::symbols::GPU_TAN, naga::MathFunction::Tan),
         ("sign", naga::MathFunction::Sign),
         ("abs", naga::MathFunction::Abs),
     ];
@@ -5871,6 +5876,20 @@ fn operand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unary_math_maps_the_sdk_symbols() {
+        use ornis_gpu_abi::symbols::{GPU_EXP, GPU_LN, GPU_SQRT, GPU_TAN};
+        assert_eq!(unary_math(GPU_SQRT), Some(naga::MathFunction::Sqrt));
+        assert_eq!(unary_math(GPU_TAN), Some(naga::MathFunction::Tan));
+        assert_eq!(unary_math(GPU_LN), Some(naga::MathFunction::Log));
+        assert_eq!(unary_math(GPU_EXP), Some(naga::MathFunction::Exp));
+        // `gpu_exp2` starts with `gpu_exp`: the generic spelling has to win,
+        // otherwise every `exp2` in a shader becomes an `exp`.
+        assert_eq!(unary_math("gpu_exp2"), Some(naga::MathFunction::Exp2));
+        assert_eq!(unary_math("gpu_log2"), Some(naga::MathFunction::Log2));
+        assert_eq!(unary_math("llvm.sqrt.f32"), Some(naga::MathFunction::Sqrt));
+    }
 
     #[test]
     fn vec3_uniform_struct_uses_wgsl_offsets() {
