@@ -19,6 +19,13 @@ const liveSource = readFileSync(join(editorDir, 'live.js'), 'utf8');
 // of 360° and the coarse end is clamped to a half-turn. `undefined` for an
 // unquantized channel is deliberate — that is what wasm-bindgen hands back for
 // a Rust `None`, so the null contract of effectiveRotateStep is really tested.
+// The formula is copied by hand and this harness covers the JS wiring, not the
+// grid: a change to the Rust side would not fail here. It is owned by
+// `effective_rotate_deg_reports_the_grid_in_use`,
+// `rotate_step_is_coerced_to_a_divisor_of_a_full_turn` and
+// `a_rotate_step_wider_than_a_half_turn_still_turns` (crates/editor/src/snap.rs)
+// plus `effective_rotate_step_is_readable_from_the_browser`
+// (crates/wasm/src/snap.rs) — keep this stub in step with them.
 function stubSource(failInit) {
     const initBody = failInit
         ? "throw new Error('WebGPU adapter unavailable');"
@@ -69,10 +76,18 @@ function makeEl() {
     return el;
 }
 
+// Scratch directories are registered as they are created and removed on exit,
+// so a failing assertion does not leave ornis-viewport-* behind in os.tmpdir().
+const dirs = [];
+process.on('exit', () => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+});
+
 // Each sandbox gets its own directory so the module is imported fresh: boot()
 // runs once per module instance, and the failure path needs a second one.
 async function sandbox(failInit) {
     const dir = mkdtempSync(join(tmpdir(), 'ornis-viewport-'));
+    dirs.push(dir);
     mkdirSync(join(dir, 'pkg'));
     writeFileSync(join(dir, 'pkg', 'ornis_wasm.js'), stubSource(failInit));
     copyFileSync(join(editorDir, 'viewport.js'), join(dir, 'viewport.js'));
@@ -137,10 +152,8 @@ function captureErrors() {
     return { seen, restore: () => { console.error = realError; } };
 }
 
-const dirs = [];
 // ── healthy boot: queue order, repaint, subscriber isolation ───────────────
 const s = await sandbox(false);
-dirs.push(s.dir);
 const { api, wasm } = s;
 assert.equal(typeof api.onReady, 'function', 'onReady must be exposed');
 assert.equal(api.effectiveRotateStep(), null, 'before boot the read-back is null');
@@ -206,7 +219,6 @@ assert.ok(
 
 // ── a real init failure still marks the canvas ─────────────────────────────
 const bad = await sandbox(true);
-dirs.push(bad.dir);
 await settle(() => bad.canvas.added.includes('failed'));
 assert.ok(bad.canvas.added.includes('failed'), 'a genuine init failure marks the canvas');
 assert.ok(
@@ -215,5 +227,4 @@ assert.ok(
 );
 assert.equal(bad.api.effectiveRotateStep(), null, 'without a replica there is no grid');
 
-for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 console.log('OK: onReady queue, effective-step repaint and error isolation verified in Node');
