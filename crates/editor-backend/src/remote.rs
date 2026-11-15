@@ -2723,6 +2723,49 @@ mod tests {
         );
     }
 
+    /// The `editor_v2_*` checks above read the sources; this one executes them.
+    /// `tests/viewport_ready.mjs` imports the real `viewport.js` against a stub
+    /// wasm package and runs the label renderer extracted from `live.js`, so
+    /// the onReady queue, the repaint, the subscriber error isolation and the
+    /// `null` contract are covered by behaviour, not by substrings (E4 review,
+    /// Editor 2).
+    ///
+    /// Node is preinstalled on the CI runners and already used by the `e2e`
+    /// stage; the harness needs no npm package. A box without Node skips, as
+    /// `e2e` does — but under CI a missing Node fails, so the check cannot
+    /// silently stop running there.
+    #[test]
+    fn editor_v2_viewport_ready_runs_in_node() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let harness = manifest.join("tests/viewport_ready.mjs");
+        assert!(harness.is_file(), "missing {}", harness.display());
+        let version = std::process::Command::new("node").arg("--version").output();
+        let Ok(version) = version else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must have Node to execute viewport_ready.mjs"
+            );
+            eprintln!("skip: no node on PATH, viewport.js behaviour not executed");
+            return;
+        };
+        assert!(version.status.success(), "node --version must succeed");
+        let out = std::process::Command::new("node")
+            .arg(&harness)
+            .current_dir(manifest.join("../.."))
+            .output()
+            .expect("run the viewport readiness harness");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "viewport_ready.mjs failed:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("OK: onReady queue"),
+            "the harness must report that its assertions ran:\n{stdout}\n{stderr}"
+        );
+    }
+
     // ── POST guards: Origin / Host / Content-Type / body limit ────────────
 
     #[test]

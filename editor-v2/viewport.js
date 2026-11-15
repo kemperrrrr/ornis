@@ -168,9 +168,21 @@ const overlayLoop = () => { paintOverlay(); requestAnimationFrame(overlayLoop); 
 // Boot re-applies the mirrors first and only then runs the subscribers, which
 // is what lets the toolbar repaint against the applied settings. Subscribing
 // after boot runs immediately, so the order of the two modules cannot lose it.
+// A subscriber is toolbar code, not the renderer: its failure must neither
+// stop the remaining subscribers nor reach `boot().catch`, which would mark
+// the canvas "WebGPU init failed" while the renderer is running. Both paths
+// guard the call, so a subscriber behaves the same before and after boot.
+function runReadyCallback(callback) {
+    try {
+        callback();
+    } catch (err) {
+        console.error('[ornis-editor] ready subscriber failed:', err);
+    }
+}
+
 function onViewportReady(callback) {
     if (booted) {
-        callback();
+        runReadyCallback(callback);
         return;
     }
     readyCallbacks.push(callback);
@@ -193,7 +205,7 @@ async function boot() {
     requestAnimationFrame(overlayLoop);
     const callbacks = readyCallbacks;
     readyCallbacks = [];
-    callbacks.forEach((callback) => callback());
+    callbacks.forEach(runReadyCallback);
 }
 
 boot().catch((err) => {
@@ -227,9 +239,13 @@ window.OrnisViewport = {
     },
     // The rotate grid coerces the requested step (divisor of 360°, half-turn
     // at the coarse end); the toolbar reads the effective value back rather
-    // than duplicating the formula. `null` when the channel is unquantized.
+    // than duplicating the formula. `null` when the channel is unquantized —
+    // wasm-bindgen hands back `undefined` for a Rust `None`, so normalize here
+    // instead of leaving the documented contract to the caller's typeof check.
     effectiveRotateStep() {
-        return booted ? snap_effective_rotate_deg() : null;
+        if (!booted) return null;
+        const step = snap_effective_rotate_deg();
+        return typeof step === 'number' ? step : null;
     },
     // Runs `callback` once boot has re-applied the toolbar mirrors (or
     // immediately if it already has), so a read-back is not left stale by a
