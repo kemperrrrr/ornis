@@ -95,8 +95,9 @@ impl ViewportBounds {
     /// Rejects non-finite values (a `1e40` post parses as infinity), edges
     /// outside [`MIN_VIEWPORT_EDGE`]..=[`MAX_VIEWPORT_EDGE`] and ratios outside
     /// [`MIN_SCALE`]..=[`MAX_SCALE`]. Negative origins are legal (a dock can
-    /// slide the box left before the layout settles) and are clamped by
-    /// [`ViewportBounds::clamped_to`].
+    /// slide the box left before the layout settles) and are clamped to the
+    /// window when the placement is applied
+    /// ([`ViewportPlacement::new`](crate::ViewportPlacement::new)).
     pub fn new(x: f32, y: f32, width: f32, height: f32, scale: f32) -> Option<Self> {
         let finite = x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite();
         let sized = (MIN_VIEWPORT_EDGE..=MAX_VIEWPORT_EDGE).contains(&width)
