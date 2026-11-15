@@ -19,9 +19,8 @@ use ornis_app::{ReplicaGameWorld, SceneSnapshot, SnapshotEntityMeta};
 use ornis_core::InputState;
 use ornis_editor::{Hovered, Selected, install_editor};
 use ornis_render::{
-    AaWiring, AntiAliasMode, Bloom, CameraView, FrameUpload, OrbitCamera, PointerDpr,
-    RenderContext, RenderFrame3D, RenderLights, Renderer3D, Technique, camera_view_projection,
-    read_orbit_camera,
+    AaWiring, AntiAliasMode, Bloom, FrameUpload, OrbitCamera, PointerDpr, RenderContext,
+    RenderFrame3D, RenderLights, Renderer3D, Technique, camera_view_projection, read_orbit_camera,
 };
 
 /// Outline flag for a selected instance (the WASM viewport's mapping).
@@ -123,6 +122,19 @@ impl ViewportFrame {
         self.size = size;
         self.renderer.resize(&self.device, size.0, size.1);
         self.plan.set_surface_size(size.0, size.1);
+    }
+
+    /// Publishes the pointer scale for the drawable.
+    ///
+    /// The drawable size is the page's rectangle times the backing scale, so
+    /// the caller always knows both numbers together — which is why this sits
+    /// next to [`Self::resize`] rather than on its own path.
+    pub fn set_pointer_scale(&mut self, scale: f32) {
+        self.world
+            .engine_mut()
+            .world_mut()
+            .resources_mut()
+            .insert(PointerDpr(sanitize_pointer_scale(scale)));
     }
 
     /// Applies one `/api/scene` snapshot.
@@ -227,26 +239,6 @@ impl ViewportFrame {
         );
     }
 
-    /// Publishes the scale that turns pointer deltas into CSS-anchored camera
-    /// motion (`PointerDpr`); non-finite or non-positive values reset to `1.0`.
-    pub fn set_pointer_scale(&mut self, scale: f32) {
-        let scale = if scale.is_finite() && scale > 0.0 {
-            scale
-        } else {
-            1.0
-        };
-        self.world
-            .engine_mut()
-            .world_mut()
-            .resources_mut()
-            .insert(PointerDpr(scale));
-    }
-
-    /// The replica's current orbit camera view (diagnostics and tests).
-    pub fn camera_view(&self) -> Option<CameraView> {
-        read_orbit_camera(self.world.engine()).map(|camera| camera.view_parameters())
-    }
-
     /// Diagnostics for the shell's status line.
     pub fn stats(&self) -> FrameStats {
         FrameStats {
@@ -258,6 +250,24 @@ impl ViewportFrame {
     /// Current drawable size, device pixels.
     pub fn size(&self) -> (u32, u32) {
         self.size
+    }
+}
+
+/// Outline flag for one instance: selection outranks hover.
+fn outline_flag(is_selected: bool, is_hovered: bool) -> u32 {
+    match (is_selected, is_hovered) {
+        (true, _) => OUTLINE_SELECTED,
+        (false, true) => OUTLINE_HOVERED,
+        (false, false) => 0,
+    }
+}
+
+/// A usable pointer scale: non-finite and non-positive ratios mean "unscaled".
+fn sanitize_pointer_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
     }
 }
 
@@ -276,13 +286,37 @@ fn outline_flags(world: &ReplicaGameWorld, upload: &FrameUpload) -> Vec<u32> {
         .map(|entity| {
             let is_selected = selected.as_ref().is_some_and(|lane| lane.contains(*entity));
             let is_hovered = hovered.as_ref().is_some_and(|lane| lane.contains(*entity));
-            match (is_selected, is_hovered) {
-                (true, _) => OUTLINE_SELECTED,
-                (false, true) => OUTLINE_HOVERED,
-                (false, false) => 0,
-            }
+            outline_flag(is_selected, is_hovered)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    // GPU-only surface: these assertions run on macOS, where the surface and
+    // the Metal device exist (CI is Linux, so the module is compiled out
+    // there). They pin the policies this file owns rather than pixels — pixel
+    // parity is the render crate's own gate.
+    use super::*;
+
+    #[test]
+    fn pointer_scale_rejects_degenerate_ratios() {
+        // The value only has to be a sane divisor for pointer deltas; a bad
+        // ratio must not scale the camera by infinity.
+        for bad in [f32::NAN, f32::INFINITY, 0.0, -1.0] {
+            assert_eq!(sanitize_pointer_scale(bad), 1.0, "scale {bad}");
+        }
+        assert_eq!(sanitize_pointer_scale(2.0), 2.0);
+    }
+
+    #[test]
+    fn outline_flags_follow_selection_then_hover() {
+        // Selected wins over hovered: the outline is one flag per instance.
+        assert_eq!(outline_flag(true, true), OUTLINE_SELECTED);
+        assert_eq!(outline_flag(true, false), OUTLINE_SELECTED);
+        assert_eq!(outline_flag(false, true), OUTLINE_HOVERED);
+        assert_eq!(outline_flag(false, false), 0);
+    }
 }
 
 /// Mirrors the snapshot's editor marks onto the freshly rebuilt replica.

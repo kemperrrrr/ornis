@@ -246,6 +246,17 @@ pub fn event_json(event: &GameEvent, sequence: EventSeq) -> serde_json::Value {
     value
 }
 
+/// Allocates the transport `sequence` for one outgoing event.
+///
+/// `next` is advanced and the sequence handed back, so the page always sees a
+/// strictly increasing cursor (it resumes `/api/events?after=` from it). The
+/// reserved `0` is skipped exactly like the inbound request ids.
+pub fn next_event_sequence(next: &mut EventSeq) -> EventSeq {
+    let sequence = EventSeq::new(next.get().max(1));
+    *next = EventSeq::new(sequence.get().saturating_add(1));
+    sequence
+}
+
 /// Serializes an event batch for the host → page channel:
 /// `{"kind": "events", "events": [{…event, "sequence"}, …]}`.
 pub fn events_message_json(batch: &[(EventSeq, GameEvent)]) -> String {
@@ -499,6 +510,17 @@ mod tests {
             message["events"][0]["ComponentUpdated"]["json_data"],
             "not-json"
         );
+    }
+
+    #[test]
+    fn event_sequences_are_monotonic_and_skip_zero() {
+        let mut next = EventSeq::new(0);
+        assert_eq!(next_event_sequence(&mut next), EventSeq::new(1));
+        assert_eq!(next_event_sequence(&mut next), EventSeq::new(2));
+        // A saturated cursor must not wrap back to an already-seen sequence.
+        let mut saturated = EventSeq::new(u64::MAX);
+        assert_eq!(next_event_sequence(&mut saturated), EventSeq::new(u64::MAX));
+        assert_eq!(next_event_sequence(&mut saturated), EventSeq::new(u64::MAX));
     }
 
     #[test]

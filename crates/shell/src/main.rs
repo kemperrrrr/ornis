@@ -28,39 +28,29 @@
 //! ```
 #![warn(missing_docs)]
 
-use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::time::Instant;
 
 use crossbeam_channel::Sender;
-#[cfg(target_os = "macos")]
-use editor_backend::ipc::EditorCommand;
 use editor_backend::ipc::{EventSeq, GameEvent, RequestId, UiCommand};
 #[cfg(target_os = "macos")]
 use ornis_shell::native_viewport::ViewportHost;
+use ornis_shell::options::{OptionAction, USAGE};
+#[cfg(target_os = "macos")]
+use ornis_shell::scene_snapshot_json;
 use ornis_shell::{
-    AckOutcome, AssetError, BridgeError, ShellCapabilities, ViewportMessage, ack_message_json,
-    dispatch_script, events_message_json, init_script_for, parse_incoming, parse_viewport_message,
-    probe_page, read_asset, resolve_editor_dir, start_url,
+    AckOutcome, BridgeError, ShellCapabilities, ViewportMessage, WINDOW_HEIGHT, WINDOW_WIDTH,
+    ack_message_json, dispatch_script, events_message_json, full_window_bounds, init_script_for,
+    next_event_sequence, parse_args, parse_incoming, parse_viewport_message, probe_page,
+    resolve_editor_dir, start_url,
 };
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes};
 use wry::{WebView, WebViewBuilder};
-
-/// Initial window size (px).
-const WINDOW_WIDTH: u32 = 1280;
-/// Initial window size (px).
-const WINDOW_HEIGHT: u32 = 800;
-/// Longest frame step fed to the viewport simulation (s).
-///
-/// Same clamp as the engine's own frame delta: a hitch must not fast-forward
-/// the scene, and a stalled window must not make the camera jump.
-#[cfg(target_os = "macos")]
-const MAX_FRAME_DT: f32 = 1.0 / 15.0;
 
 /// Cross-thread messages delivered to the event loop (all `WebView` calls
 /// stay on the main thread).
@@ -72,43 +62,19 @@ enum ShellEvent {
     Engine(GameEvent),
 }
 
-/// Parsed CLI options (see the module docs for usage).
-struct Options {
-    editor_dir: Option<String>,
-    webgpu_probe: bool,
-    native_viewport: bool,
-}
-
-fn parse_options() -> Options {
-    let mut args = std::env::args().skip(1);
-    let mut options = Options {
-        editor_dir: None,
-        webgpu_probe: false,
-        native_viewport: false,
-    };
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            // Skip the conventional separator (`cargo run -p … -- <flags>`).
-            "--" => {}
-            "--editor-dir" => {
-                options.editor_dir = args.next();
-            }
-            "--webgpu-probe" => options.webgpu_probe = true,
-            "--native-viewport" => options.native_viewport = true,
-            "--help" | "-h" => {
-                println!(
-                    "ornis-shell: native editor window\n\n  --editor-dir <path>   frontend root (default: ORNIS_EDITOR_DIR or <workspace>/editor-v2)\n  --webgpu-probe        load the inline WebGPU capability page instead of the editor\n  --native-viewport     render the viewport natively with wgpu under the webview (macOS)"
-                );
-                std::process::exit(0);
-            }
-            _ => eprintln!("ornis-shell: ignoring unknown argument {arg}"),
-        }
-    }
-    options
-}
-
 fn main() {
-    let options = parse_options();
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let outcome = parse_args(&argv);
+    for warning in &outcome.warnings {
+        eprintln!("ornis-shell: {warning}");
+    }
+    let options = match outcome.action {
+        OptionAction::Run(options) => options,
+        OptionAction::Help => {
+            println!("{USAGE}");
+            std::process::exit(0);
+        }
+    };
     let editor_root = resolve_editor_dir(
         options.editor_dir.as_deref(),
         std::env::var("ORNIS_EDITOR_DIR").ok().as_deref(),
@@ -226,25 +192,28 @@ impl ShellApp {
         self.eval(&dispatch_script(&ack_message_json(&outcome)));
     }
 
-    /// Applies a viewport message to the native viewport (a no-op without one).
-    #[cfg(target_os = "macos")]
+    /// Applies a viewport message to the native viewport.
+    ///
+    /// Without one (a plain embedded shell, or a host without the AppKit/Metal
+    /// surface path) the page's posts are simply not needed — it only sends
+    /// them because the shell advertised `ornisShell.nativeViewport`.
     fn on_viewport_message(&mut self, message: ViewportMessage) {
-        let scale = self.scale_factor();
-        let Some(viewport) = self.viewport.as_mut() else {
-            return;
-        };
-        match message {
-            ViewportMessage::Bounds(rect) => {
-                viewport.set_bounds(rect, scale);
+        #[cfg(not(target_os = "macos"))]
+        let _ = message;
+        #[cfg(target_os = "macos")]
+        {
+            let (scale, height) = (self.scale_factor(), self.content_height());
+            let Some(viewport) = self.viewport.as_mut() else {
+                return;
+            };
+            match message {
+                ViewportMessage::Bounds(rect) => {
+                    viewport.set_bounds(rect, scale, height);
+                }
+                ViewportMessage::Input(input) => viewport.apply_input(&input),
             }
-            ViewportMessage::Input(input) => viewport.apply_input(&input),
         }
     }
-
-    /// Applies a viewport message on hosts without a native viewport: the page
-    /// still posts them, and ignoring them is the correct answer.
-    #[cfg(not(target_os = "macos"))]
-    fn on_viewport_message(&mut self, _message: ViewportMessage) {}
 
     /// Current device-pixel ratio of the window.
     #[cfg(target_os = "macos")]
@@ -252,23 +221,28 @@ impl ShellApp {
         self.window.as_ref().map_or(1.0, Window::scale_factor) as f32
     }
 
+    /// Window content height in points, for clipping stale viewport rectangles.
+    #[cfg(target_os = "macos")]
+    fn content_height(&self) -> f64 {
+        self.window.as_ref().map_or(0.0, |window| {
+            let size = window.inner_size();
+            f64::from(size.height) / f64::from(window.scale_factor())
+        })
+    }
+
     /// Forwards one engine event to the page with a transport sequence.
     ///
     /// Scene snapshots also feed the native viewport: the same body the page
     /// polls is what the shell renders, so both viewports always agree.
     fn on_engine_event(&mut self, event: GameEvent) {
+        // The viewport renders the same snapshot body the page receives, so it
+        // is fed before the event is dispatched (no second snapshot channel).
         #[cfg(target_os = "macos")]
-        if let GameEvent::CustomEvent {
-            cmd_type,
-            json_data,
-        } = &event
-            && *cmd_type == EditorCommand::Custom("scene".into())
-            && let Some(viewport) = self.viewport.as_mut()
+        if let (Some(json), Some(viewport)) = (scene_snapshot_json(&event), self.viewport.as_mut())
         {
-            viewport.apply_scene_json(json_data);
+            viewport.apply_scene_json(json);
         }
-        let sequence = EventSeq::new(self.next_event.get().max(1));
-        self.next_event = EventSeq::new(sequence.get().saturating_add(1));
+        let sequence = next_event_sequence(&mut self.next_event);
         self.eval(&dispatch_script(&events_message_json(&[(sequence, event)])));
     }
 
@@ -278,26 +252,6 @@ impl ShellApp {
         if let Some(webview) = &self.webview {
             let _ = webview.evaluate_script(script);
         }
-    }
-
-    /// Draws one native viewport frame.
-    #[cfg(target_os = "macos")]
-    fn draw_viewport(&mut self) {
-        let elapsed = self.last_frame.elapsed().as_secs_f32();
-        self.last_frame = Instant::now();
-        let Some(viewport) = self.viewport.as_mut() else {
-            return;
-        };
-        viewport.render(elapsed.clamp(0.0, MAX_FRAME_DT));
-    }
-}
-
-/// Full-window bounds for the child webview (position origin, initial
-/// size; kept in sync with the window in `window_event` below).
-fn full_window_bounds() -> wry::Rect {
-    wry::Rect {
-        position: wry::dpi::LogicalPosition::new(0, 0).into(),
-        size: wry::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT).into(),
     }
 }
 
@@ -322,7 +276,9 @@ impl ApplicationHandler<ShellEvent> for ShellApp {
         let mut builder = WebViewBuilder::new()
             .with_initialization_script(init_script_for(capabilities))
             .with_custom_protocol("ornis".into(), move |_, request| {
-                serve_asset(&root, request.uri().path())
+                // The handler is a pure library function (status, content
+                // type, CORS header), tested without a window.
+                ornis_shell::serve_response(&root, request.uri().path())
             });
         // The viewport layer shows through the page's transparent viewport
         // box, so the webview itself must not paint an opaque background.
@@ -394,21 +350,17 @@ impl ApplicationHandler<ShellEvent> for ShellApp {
                         size: wry::dpi::LogicalSize::new(size.width, size.height).into(),
                     });
                 }
-                #[cfg(target_os = "macos")]
-                {
-                    let height = f64::from(size.height) / f64::from(self.scale_factor());
-                    if let Some(viewport) = self.viewport.as_mut() {
-                        // The page re-posts its rectangle; until then the old
-                        // one is clipped to the new height so it cannot render
-                        // outside the window.
-                        viewport.set_content_height(height);
-                    }
-                }
             }
             // Only the native viewport redraws on demand; the webview paints
             // itself. Without this the layer would only update on events.
             #[cfg(target_os = "macos")]
-            WindowEvent::RedrawRequested => self.draw_viewport(),
+            WindowEvent::RedrawRequested => {
+                let elapsed = self.last_frame.elapsed().as_secs_f32();
+                self.last_frame = Instant::now();
+                if let Some(viewport) = self.viewport.as_mut() {
+                    viewport.render(ornis_shell::native_viewport::clamp_frame_step(elapsed));
+                }
+            }
             _ => {}
         }
     }
@@ -422,41 +374,5 @@ impl ApplicationHandler<ShellEvent> for ShellApp {
         {
             window.request_redraw();
         }
-    }
-}
-
-/// Serves one `ornis://` request from the editor root on disk.
-///
-/// Missing or escaping paths answer 404 (the HTTP static server likewise
-/// never distinguishes them), unreadable files 500.
-fn serve_asset(root: &Path, url_path: &str) -> wry::http::Response<Cow<'static, [u8]>> {
-    fn response(
-        status: u16,
-        content_type: &'static str,
-        body: Vec<u8>,
-    ) -> wry::http::Response<Cow<'static, [u8]>> {
-        wry::http::Response::builder()
-            .status(status)
-            .header("Content-Type", content_type)
-            .header("Access-Control-Allow-Origin", "*")
-            .body(Cow::Owned(body))
-            .unwrap_or_else(|_| {
-                wry::http::Response::builder()
-                    .status(500)
-                    .body(Cow::Borrowed(b"internal error".as_slice()))
-                    .expect("fallback error response builds")
-            })
-    }
-
-    match read_asset(root, url_path) {
-        Ok(asset) => response(200, asset.content_type, asset.bytes),
-        Err(AssetError::NotFound { .. } | AssetError::Forbidden { .. }) => {
-            response(404, "text/plain; charset=utf-8", b"404 Not Found".to_vec())
-        }
-        Err(AssetError::Io { .. }) => response(
-            500,
-            "text/plain; charset=utf-8",
-            b"500 Cannot Read Asset".to_vec(),
-        ),
     }
 }

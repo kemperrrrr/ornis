@@ -17,7 +17,26 @@
 //! built before this protocol keeps working.
 
 use editor_backend::BrowserInput;
+use editor_backend::ipc::GameEvent;
 use serde::Deserialize;
+
+/// Window size the shell opens with, in logical pixels.
+pub const WINDOW_WIDTH: u32 = 1280;
+/// Window size the shell opens with, in logical pixels.
+pub const WINDOW_HEIGHT: u32 = 800;
+
+/// Bounds of the child webview: the whole window, origin at the top-left.
+///
+/// A child view does not track its parent, so the shell re-applies this on
+/// every `Resized` (see the binary). The rectangle is in logical pixels: wry
+/// converts with the window's scale factor, which is why the shell never
+/// multiplies by DPI itself.
+pub fn full_window_bounds() -> wry::Rect {
+    wry::Rect {
+        position: wry::dpi::LogicalPosition::new(0, 0).into(),
+        size: wry::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT).into(),
+    }
+}
 
 /// Smallest viewport edge the shell accepts, in CSS pixels. A collapsed box
 /// (`display:none`, a drag that temporarily zeroes the dock) hides the native
@@ -110,28 +129,6 @@ impl ViewportBounds {
             height: ((self.height * self.scale).round() as u32).max(1),
         }
     }
-
-    /// Intersects the rectangle with a `window_width`×`window_height` CSS-pixel
-    /// window; `None` when nothing visible remains.
-    ///
-    /// The page can legitimately report a box that overhangs the window (a
-    /// dock animation, a stale layout after a window resize). Rendering the
-    /// overhang would place device pixels outside the surface, so the shell
-    /// clips instead of trusting the post.
-    pub fn clamped_to(self, window_width: f32, window_height: f32) -> Option<Self> {
-        if !(window_width.is_finite() && window_height.is_finite()) {
-            return None;
-        }
-        let left = self.x.max(0.0);
-        let top = self.y.max(0.0);
-        let right = (self.x + self.width).min(window_width);
-        let bottom = (self.y + self.height).min(window_height);
-        let (width, height) = (right - left, bottom - top);
-        if !(width.is_finite() && height.is_finite()) {
-            return None;
-        }
-        Self::new(left, top, width, height, self.scale)
-    }
 }
 
 /// One forwarded input snapshot (`POST /api/input` shape).
@@ -184,6 +181,28 @@ impl ViewportInput {
         })
     }
 }
+
+/// The scene snapshot carried by one engine event, if it is one.
+///
+/// The engine publishes `CustomEvent { cmd_type: "scene" }` on every mutation
+/// (the same event the page polls `/api/scene` for), so the native viewport
+/// renders exactly the body the page would have received — one scene source,
+/// two renderers, no second snapshot channel to keep in sync.
+///
+/// Pure so the routing rule itself is testable without a window: the shell
+/// only has to hand the result to whatever renders.
+pub fn scene_snapshot_json(event: &GameEvent) -> Option<&str> {
+    match event {
+        GameEvent::CustomEvent {
+            cmd_type,
+            json_data,
+        } if cmd_type.as_str() == SCENE_EVENT_TAG => Some(json_data),
+        _ => None,
+    }
+}
+
+/// `cmd_type` tag of the authoritative scene snapshot event.
+pub const SCENE_EVENT_TAG: &str = "scene";
 
 /// A parsed shell-level message from the page.
 #[derive(Debug, Clone, PartialEq)]
@@ -321,23 +340,38 @@ mod tests {
     }
 
     #[test]
-    fn clamping_clips_an_overhanging_box_to_the_window() {
-        let bounds = ViewportBounds::new(-40.0, -10.0, 300.0, 200.0, 1.0).expect("valid bounds");
-        let clipped = bounds.clamped_to(200.0, 100.0).expect("overlap remains");
-        assert_eq!(
-            clipped.physical(),
-            PhysicalRect {
-                x: 0,
-                y: 0,
-                width: 200,
-                height: 100
-            }
-        );
-        // Fully outside the window: hidden, never a negative-size surface.
-        let outside = ViewportBounds::new(400.0, 400.0, 100.0, 100.0, 1.0).expect("valid bounds");
-        assert_eq!(outside.clamped_to(200.0, 200.0), None);
-        // A zero-size window (minimized) hides the viewport too.
-        assert_eq!(bounds.clamped_to(0.0, 0.0), None);
+    fn window_bounds_cover_the_whole_initial_window() {
+        let bounds = full_window_bounds();
+        assert_eq!(bounds.position.to_logical::<u32>(1.0).x, 0);
+        assert_eq!(bounds.position.to_logical::<u32>(1.0).y, 0);
+        assert_eq!(bounds.size.to_logical::<u32>(1.0).width, WINDOW_WIDTH);
+        assert_eq!(bounds.size.to_logical::<u32>(1.0).height, WINDOW_HEIGHT);
+        // Logical, not physical: on a 2x display wry scales it itself, so the
+        // webview still covers the window rather than its top-left quadrant.
+        assert_eq!(bounds.size.to_logical::<u32>(2.0).width, WINDOW_WIDTH);
+    }
+
+    #[test]
+    fn only_the_scene_event_routes_to_the_native_viewport() {
+        let scene = GameEvent::CustomEvent {
+            cmd_type: "scene".into(),
+            json_data: r#"{"version":3}"#.into(),
+        };
+        assert_eq!(scene_snapshot_json(&scene), Some(r#"{"version":3}"#));
+        // Every other engine event stays page-only.
+        for event in [
+            GameEvent::CustomEvent {
+                cmd_type: "status".into(),
+                json_data: "{}".into(),
+            },
+            GameEvent::EntityCreated { entity_id: 1 },
+            GameEvent::EventGap {
+                after: editor_backend::EventSeq::new(1),
+                oldest: editor_backend::EventSeq::new(5),
+            },
+        ] {
+            assert_eq!(scene_snapshot_json(&event), None, "{event:?}");
+        }
     }
 
     #[test]

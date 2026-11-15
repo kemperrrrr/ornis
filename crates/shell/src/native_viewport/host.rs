@@ -24,6 +24,27 @@ use super::layout::ViewportPlacement;
 use super::platform::{NativeViewport, ViewportError};
 use crate::{PhysicalRect, ViewportInput};
 
+/// Longest frame step fed to the viewport simulation, in seconds.
+///
+/// Same idea as the engine's own `clamp_frame_dt`: a hitch (window drag, tab
+/// switch back) must not fast-forward the scene, and a long stall must not make
+/// the orbit camera jump. One frame at 15 fps is the ceiling.
+pub const MAX_FRAME_STEP: f32 = 1.0 / 15.0;
+
+/// Clamps a measured frame interval into the range the simulation accepts.
+///
+/// Non-finite input (a clock that went backwards, a NaN from a broken timer)
+/// becomes `0.0` rather than propagating: the scene simply does not advance for
+/// that frame. Negative values are impossible in practice but treated the same
+/// way, because `Duration::as_secs_f32` on a huge interval can round to
+/// infinity and poison the whole camera path.
+pub fn clamp_frame_step(elapsed_secs: f32) -> f32 {
+    if !elapsed_secs.is_finite() || elapsed_secs <= 0.0 {
+        return 0.0;
+    }
+    elapsed_secs.min(MAX_FRAME_STEP)
+}
+
 /// Why the shell could not enable the native viewport.
 ///
 /// The shell treats all of these the same way — keep the page, show its
@@ -59,6 +80,7 @@ impl ViewportHost {
     ///
     /// [`HostError::NoView`] when the webview has no AppKit sibling to order
     /// against; otherwise the GPU refusal from [`NativeViewport::new`].
+    // qual:allow(unsafe) reason: "AppKit object graph access — each block below carries its own SAFETY note; there is no safe wrapper for view/subview pointers"
     pub fn attach(webview: &wry::WebView, scale: f64) -> Result<Self, HostError> {
         // `WryWebView` is wry's `WKWebView` subclass; only the `NSView` half is
         // needed (parent, sibling, window).
@@ -90,13 +112,21 @@ impl ViewportHost {
         })
     }
 
-    /// Applies a page-reported rectangle (device pixels) and returns whether
-    /// the drawable was (re)configured.
+    /// Applies a page-reported rectangle (device pixels) measured inside a
+    /// window whose content view is `content_height` points tall.
     ///
-    /// A rectangle that no longer intersects the window hides the viewport
-    /// instead of configuring an empty surface — a collapsed or scrolled-away
-    /// box is a normal state, not an error.
-    pub fn set_bounds(&mut self, rect: PhysicalRect, scale: f32) -> bool {
+    /// Both numbers come from the same moment — the page posts after layout,
+    /// the binary knows the window size — so the host keeps no stale height
+    /// state. A rectangle that no longer intersects the window (a collapsed
+    /// dock, a scrolled-away box, a shrunken window) hides the viewport rather
+    /// than configuring an empty surface: that is a normal state, not an error.
+    ///
+    /// Returns whether the drawable was (re)configured, so the caller can tell
+    /// a move-only update from a real resize.
+    pub fn set_bounds(&mut self, rect: PhysicalRect, scale: f32, content_height: f64) -> bool {
+        if content_height > 0.0 && !content_height.is_nan() {
+            self.content_height = content_height;
+        }
         let Some(placement) = ViewportPlacement::new(rect, scale, self.content_height) else {
             self.viewport.hide();
             self.placement = None;
@@ -108,21 +138,6 @@ impl ViewportHost {
         self.viewport.set_placement(placement);
         self.placement = Some(placement);
         resized
-    }
-
-    /// Keeps the placement valid when the window resizes: the page re-posts its
-    /// rectangle, and until it does the last one is clipped to the new height.
-    pub fn set_content_height(&mut self, height: f64) {
-        if height.is_nan() || height <= 0.0 {
-            return;
-        }
-        self.content_height = height;
-        if let Some(placement) = self.placement
-            && let Some(clipped) = ViewportPlacement::new(placement.rect, 1.0, height)
-        {
-            self.viewport.set_placement(clipped);
-            self.placement = Some(clipped);
-        }
     }
 
     /// Forwards one validated input snapshot.
@@ -149,19 +164,9 @@ impl ViewportHost {
         self.viewport.render(delta)
     }
 
-    /// Whether an input snapshot changes nothing the viewport draws.
+    /// Diagnostics of the last applied frame (status line, logs).
     pub fn stats(&self) -> FrameStats {
         self.viewport.stats()
-    }
-}
-
-/// AppKit view of the window, for hosts that need it directly.
-pub fn window_view(window: &winit::window::Window) -> Option<NonNull<NSView>> {
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let handle = window.window_handle().ok()?;
-    match handle.as_raw() {
-        RawWindowHandle::AppKit(appkit) => Some(appkit.ns_view.cast()),
-        _ => None,
     }
 }
 
@@ -178,6 +183,19 @@ mod tests {
         assert_eq!(error.to_string(), "window has no AppKit view");
         let wrapped = HostError::from(ViewportError::NoAdapter);
         assert!(wrapped.to_string().contains("no wgpu adapter"));
+    }
+
+    #[test]
+    fn frame_steps_are_clamped_and_non_finite_input_is_dropped() {
+        // A normal 60 fps frame passes through untouched.
+        assert!((clamp_frame_step(1.0 / 60.0) - 1.0 / 60.0).abs() < f32::EPSILON);
+        // A hitch is capped, not fast-forwarded.
+        assert_eq!(clamp_frame_step(5.0), MAX_FRAME_STEP);
+        assert_eq!(clamp_frame_step(MAX_FRAME_STEP), MAX_FRAME_STEP);
+        // Degenerate clocks advance nothing.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0] {
+            assert_eq!(clamp_frame_step(bad), 0.0, "elapsed {bad}");
+        }
     }
 
     #[test]

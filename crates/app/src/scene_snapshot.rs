@@ -171,34 +171,18 @@ pub fn parse_scene_json(json: &str) -> Result<SceneSnapshot, serde_json::Error> 
     Ok(serde_json::from_str::<ApiScene>(json)?.into_snapshot())
 }
 
-/// The canonical `/api/scene` payload: one lit sphere with a camera, one
-/// light and an ambient term.
-///
-/// Public (not `cfg(test)`) because two crates assert against it: the client
-/// parser here and the WASM viewport's end-to-end gate, which renders this
-/// exact contract headlessly. One literal, so the contract cannot drift
-/// between them.
-pub const FULL_CONTRACT: &str = r#"{
-    "version": 5, "sequence": 12, "entity_count": 2,
-    "entities": [{
-        "id": 4, "generation": 2,
-        "editor": {"editor_only": false, "selected": true, "hovered": true},
-        "components": {
-            "Name": "Red Sphere",
-            "Transform": {"translation":[-5.6,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
-            "Mesh": {"Sphere": {"radius":1.0,"segments":32,"rings":24}},
-            "Material": {"Dielectric": {"base_color":[0.8,0.2,0.2],"roughness":0.5}}
-        }
-    }],
-    "lights": [{"Directional": {"direction":[1,1,1],"intensity":0.6,"color":[1,1,1]}}],
-    "camera": {"position":[0,2.5,9],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0},
-    "ambient": [0.10,0.10,0.15]
-}"#;
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ornis_core::units::{Clamped01, PositiveF32};
+
+    /// The canonical `/api/scene` payload: one lit sphere with a camera, one
+    /// light and an ambient term.
+    ///
+    /// Lives as data (`tests/fixtures/api_scene.json`) rather than a Rust
+    /// literal so the WASM viewport's headless end-to-end gate can assert
+    /// against the *same bytes* — one copy, no drift between the two crates.
+    pub(crate) const FULL_CONTRACT: &str = include_str!("../tests/fixtures/api_scene.json");
 
     #[test]
     fn parses_full_contract() {

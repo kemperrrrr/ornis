@@ -58,6 +58,127 @@ pub enum ViewportError {
     },
 }
 
+/// GPU half of the viewport: the surface for one view plus the device, queue,
+/// swap-chain configuration and frame state that draw into it.
+///
+/// Split from [`NativeViewport`] so neither the AppKit setup nor the adapter
+/// negotiation is one long function; the fields are private and move together.
+struct Gpu {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    frame: ViewportFrame,
+}
+
+impl Gpu {
+    /// Creates the Metal surface for `view`, negotiates a device over it and
+    /// builds the frame state. The 1×1 seed configuration is replaced by the
+    /// first page-reported placement.
+    ///
+    /// # Safety
+    ///
+    /// `view` must be a live `NSView` on the main thread that outlives the
+    /// returned surface.
+    // qual:allow(unsafe) reason: "Metal surface creation takes a raw NSView handle by contract; the block below cannot be made safe and carries its SAFETY note"
+    unsafe fn for_view(view: &NSView) -> Result<Self, ViewportError> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::METAL,
+            flags: wgpu::InstanceFlags::empty(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            display: None,
+        });
+        // SAFETY: the caller guarantees `view` is live and outlives the
+        // surface. `Layer::from_ns_view` (inside wgpu) makes the view
+        // layer-backed and attaches its `CAMetalLayer` as the root layer.
+        let surface = unsafe {
+            let handle = AppKitWindowHandle::new(NonNull::from(view).cast());
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(RawDisplayHandle::AppKit(AppKitDisplayHandle::new())),
+                raw_window_handle: RawWindowHandle::AppKit(handle),
+            })
+        }
+        .map_err(|e| ViewportError::Surface {
+            reason: e.to_string(),
+        })?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+            apply_limit_buckets: false,
+        }))
+        .map_err(|_| ViewportError::NoAdapter)?;
+        let mut limits = adapter.limits();
+        limits.max_storage_buffers_per_shader_stage = MAX_STORAGE_BUFFERS_PER_STAGE;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("shell viewport device"),
+            required_features: ornis_render::texture_upload::texture_compression_features(
+                adapter.features(),
+            ),
+            required_limits: limits,
+            memory_hints: wgpu::MemoryHints::Performance,
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            trace: wgpu::Trace::Off,
+        }))
+        .map_err(|e| ViewportError::NoDevice {
+            reason: e.to_string(),
+        })?;
+        let format = choose_format(&surface.get_capabilities(&adapter).formats);
+        let config = swap_chain_config(format, 1, 1);
+        surface.configure(&device, &config);
+        let frame = ViewportFrame::new(
+            device.clone(),
+            queue.clone(),
+            SurfaceSpec {
+                format,
+                width: 1,
+                height: 1,
+            },
+        );
+        Ok(Self {
+            surface,
+            device,
+            queue,
+            config,
+            frame,
+        })
+    }
+}
+
+/// Swap-chain format: sRGB first (the renderer's output is sRGB-encoded), then
+/// whatever the surface offers, then the platform default.
+fn choose_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
+    formats
+        .iter()
+        .copied()
+        .find(wgpu::TextureFormat::is_srgb)
+        .or_else(|| formats.first().copied())
+        .unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb)
+}
+
+/// Swap-chain configuration for one drawable size.
+///
+/// Present mode follows [`ornis_render::surface_present_mode`], so the viewport
+/// obeys `ORNIS_NO_VSYNC` exactly like the runner's own window.
+fn swap_chain_config(
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> wgpu::SurfaceConfiguration {
+    wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: width.max(1),
+        height: height.max(1),
+        present_mode: ornis_render::surface_present_mode(),
+        alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+        color_space: wgpu::SurfaceColorSpace::Auto,
+    }
+}
+
 /// Native viewport: one layer-backed `NSView` below the webview plus the GPU
 /// state that draws into it.
 pub struct NativeViewport {
@@ -93,6 +214,7 @@ impl NativeViewport {
     /// `parent` and `sibling` must be live `NSView`s on the main thread that
     /// share a window, and `parent` must outlive the returned viewport (the
     /// view is inserted into it).
+    // qual:allow(unsafe) reason: "AppKit object graph only exposes raw view pointers; each block below carries its own SAFETY note"
     pub unsafe fn new(
         parent: NonNull<NSView>,
         sibling: Option<NonNull<NSView>>,
@@ -129,89 +251,16 @@ impl NativeViewport {
         let anchor = sibling.map(|sibling| unsafe { sibling.as_ref() });
         parent.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, anchor);
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
-            flags: wgpu::InstanceFlags::empty(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            backend_options: wgpu::BackendOptions::default(),
-            display: None,
-        });
-        // SAFETY: `view` is a live `NSView` retained by `self.view` and by the
-        // parent's subview list; the surface therefore never outlives it.
-        // `Layer::from_ns_view` (inside wgpu) makes the view layer-backed and
-        // attaches its `CAMetalLayer` as the root layer.
-        let surface = unsafe {
-            let handle = AppKitWindowHandle::new(NonNull::from(&*view).cast());
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: Some(RawDisplayHandle::AppKit(AppKitDisplayHandle::new())),
-                raw_window_handle: RawWindowHandle::AppKit(handle),
-            })
-        }
-        .map_err(|e| ViewportError::Surface {
-            reason: e.to_string(),
-        })?;
-
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: Some(&surface),
-            apply_limit_buckets: false,
-        }))
-        .map_err(|_| ViewportError::NoAdapter)?;
-
-        let mut limits = adapter.limits();
-        limits.max_storage_buffers_per_shader_stage = MAX_STORAGE_BUFFERS_PER_STAGE;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("shell viewport device"),
-            required_features: ornis_render::texture_upload::texture_compression_features(
-                adapter.features(),
-            ),
-            required_limits: limits,
-            memory_hints: wgpu::MemoryHints::Performance,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            trace: wgpu::Trace::Off,
-        }))
-        .map_err(|e| ViewportError::NoDevice {
-            reason: e.to_string(),
-        })?;
-
-        let capabilities = surface.get_capabilities(&adapter);
-        let format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(wgpu::TextureFormat::is_srgb)
-            .or_else(|| capabilities.formats.first().copied())
-            .unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: 1,
-            height: 1,
-            present_mode: ornis_render::surface_present_mode(),
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-        };
-        surface.configure(&device, &config);
-        let frame = ViewportFrame::new(
-            device.clone(),
-            queue.clone(),
-            SurfaceSpec {
-                format,
-                width: 1,
-                height: 1,
-            },
-        );
-
+        // SAFETY: `view` is a live, layer-backed `NSView` that outlives the
+        // surface (it is `self.view` and a subview of `parent`).
+        let gpu = unsafe { Gpu::for_view(&view)? };
         Ok(Self {
             view,
-            surface,
-            device,
-            queue,
-            config,
-            frame,
+            surface: gpu.surface,
+            device: gpu.device,
+            queue: gpu.queue,
+            config: gpu.config,
+            frame: gpu.frame,
             placement: None,
         })
     }
@@ -242,14 +291,6 @@ impl NativeViewport {
         self.config.height = placement.rect.height.max(1);
         self.surface.configure(&self.device, &self.config);
         self.placement = Some(placement);
-    }
-
-    /// Follows the window's backing-scale change (moving between displays).
-    pub fn set_scale(&mut self, scale: f64) {
-        if !scale.is_finite() || scale <= 0.0 {
-            return;
-        }
-        self.frame.set_pointer_scale(scale as f32);
     }
 
     /// Hides the view (the page collapsed the viewport, or fell back).
@@ -328,6 +369,35 @@ mod tests {
         assert!(surface.to_string().contains("boom"));
         assert_ne!(ViewportError::NoAdapter, surface);
         assert_ne!(ViewportError::OffMainThread, surface);
+    }
+
+    #[test]
+    fn format_selection_prefers_srgb_then_falls_back() {
+        use wgpu::TextureFormat;
+        // The renderer writes sRGB-encoded colour, so an sRGB swap chain is
+        // the correct default.
+        assert_eq!(
+            choose_format(&[TextureFormat::Bgra8Unorm, TextureFormat::Bgra8UnormSrgb]),
+            TextureFormat::Bgra8UnormSrgb
+        );
+        // No sRGB on offer: take what the surface has.
+        assert_eq!(
+            choose_format(&[TextureFormat::Rgba8Unorm]),
+            TextureFormat::Rgba8Unorm
+        );
+        // No formats at all: the platform default, never a panic.
+        assert_eq!(choose_format(&[]), TextureFormat::Bgra8UnormSrgb);
+    }
+
+    #[test]
+    fn swap_chain_config_never_has_a_zero_edge() {
+        let config = swap_chain_config(wgpu::TextureFormat::Bgra8UnormSrgb, 0, 0);
+        assert_eq!((config.width, config.height), (1, 1));
+        // Present mode is the shared policy (`ORNIS_NO_VSYNC` opt-out), not a
+        // second opinion invented here.
+        assert_eq!(config.present_mode, ornis_render::surface_present_mode());
+        assert_eq!(config.alpha_mode, wgpu::CompositeAlphaMode::Auto);
+        assert_eq!(config.desired_maximum_frame_latency, 2);
     }
 
     #[test]

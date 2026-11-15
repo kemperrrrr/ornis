@@ -3108,7 +3108,6 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "objc2-web-kit",
  "ornis-app",
- "ornis-assets",
  "ornis-core",
  "ornis-editor",
  "ornis-render",

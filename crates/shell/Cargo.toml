@@ -10,7 +10,8 @@ description = "Desktop shell for the Ornis editor: native window (wry webview) o
 [dependencies]
 editor-backend = { path = "../editor-backend", version = "0.1.0" }
 ornis-app = { path = "../app", version = "0.1.0" }
-ornis-assets = { path = "../assets", version = "0.1.0" }
+# Native viewport: the replica world's camera/pointer resources, the editor
+# marks the outline is drawn from, and the frame path itself.
 ornis-core = { path = "../core", version = "0.1.0" }
 ornis-editor = { path = "../editor", version = "0.1.0" }
 ornis-render = { path = "../render", version = "0.1.0" }

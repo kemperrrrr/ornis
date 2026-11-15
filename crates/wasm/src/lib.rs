@@ -2055,6 +2055,12 @@ mod integration_tests {
     use super::*;
     use ornis_render::MaterialIdx;
 
+    /// The `/api/scene` contract payload, shared with the parser's own tests
+    /// through one data file (`crates/app/tests/fixtures/api_scene.json`): the
+    /// JSON → lanes → `frame_upload` chain is pinned against the same bytes
+    /// both crates assert on.
+    const FULL_CONTRACT: &str = include_str!("../../app/tests/fixtures/api_scene.json");
+
     /// The off-browser fallback of `device_pixel_ratio`: host builds never
     /// touch `web_sys::window()` (it panics on non-wasm targets), so the
     /// wire and the surface math see the documented `1.0`.
@@ -2131,8 +2137,8 @@ mod integration_tests {
 
     #[test]
     fn live_snapshot_crosses_serialization_boundary_into_shared_game_world() {
-        let live = ornis_app::parse_scene_json(ornis_app::scene_snapshot::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         let mut render_world = ReplicaGameWorld::from_scene_replica(&live.scene);
 
         assert_eq!(render_world.entity_count(), live.scene.entities.len());
@@ -2157,8 +2163,8 @@ mod integration_tests {
 
     #[test]
     fn live_marks_mirror_selection_and_map_server_ids() {
-        let live = ornis_app::parse_scene_json(ornis_app::scene_snapshot::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         let mut render_world = ReplicaGameWorld::new_replica();
         install_editor(render_world.engine_mut());
         render_world.replace_scene(&live.scene);
@@ -2255,8 +2261,8 @@ mod integration_tests {
 
     /// A replica with one entity pre-selected and pre-hovered.
     fn selected_replica() -> (ReplicaGameWorld, Entity) {
-        let live = ornis_app::parse_scene_json(ornis_app::scene_snapshot::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         let mut render_world = ReplicaGameWorld::new_replica();
         install_editor(render_world.engine_mut());
         render_world.replace_scene(&live.scene);
@@ -2449,8 +2455,8 @@ mod integration_tests {
 
     #[test]
     fn outline_flags_map_selection_and_hover_to_instances() {
-        let live = ornis_app::parse_scene_json(ornis_app::scene_snapshot::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         let mut render_world = ReplicaGameWorld::new_replica();
         install_editor(render_world.engine_mut());
         render_world.replace_scene(&live.scene);
@@ -2530,8 +2536,8 @@ mod integration_tests {
         // This pins the same chain headlessly instead — `/api/scene` JSON
         // → `ReplicaGameWorld::replace_scene` → `frame` → `frame_upload`
         // (`frame_upload`), with lights published as the shared resource.
-        let live = ornis_app::parse_scene_json(ornis_app::scene_snapshot::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         let mut render_world = ReplicaGameWorld::new_replica();
         render_world.replace_scene(&live.scene);
         assert_eq!(render_world.entity_count(), live.scene.entities.len());
@@ -2690,8 +2696,8 @@ mod integration_tests {
         // Headless half of the pixel e2e: pins the exact extraction bytes
         // for `FULL_CONTRACT` (JSON → lanes → `frame_upload`), so any drift
         // in the scene→ECS→GPU chain fails here without a browser.
-        let live = ornis_app::parse_scene_json(ornis_app::scene_snapshot::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         assert_eq!(live.version, 5);
         assert_eq!(live.sequence, 12);
 
@@ -2753,8 +2759,8 @@ mod integration_tests {
     fn snapshot_versioning_replaces_without_stale_instances() {
         // v5 → v6 moves the extraction; downgrades are rejected; an empty
         // scene clears instances so no stale upload survives.
-        let live = ornis_app::parse_scene_json(ornis_app::scene_snapshot::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         assert_eq!(live.version, 5);
         let mut render_world = ReplicaGameWorld::new_replica();
         render_world.replace_scene(&live.scene);
@@ -2792,7 +2798,7 @@ mod integration_tests {
         // The parser returns `Err` (never panics) for every malformed leg:
         // truncation at any point, empty/foreign shapes, NUL bytes, wrong
         // types, the `camera: null` placeholder, and trailing garbage.
-        let full = ornis_app::scene_snapshot::FULL_CONTRACT;
+        let full = FULL_CONTRACT;
         for pct in [10, 25, 50, 75, 90, 95] {
             let cut = full.len() * pct / 100;
             assert!(
@@ -2870,8 +2876,8 @@ mod integration_tests {
         };
         // Enabled path pins the contract input the harness renders, so
         // contract drift still fails the test even before any pixels.
-        let live = ornis_app::parse_scene_json(ornis_app::scene_snapshot::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         assert_eq!(live.version, 5);
         assert_eq!(live.scene.entities.len(), 1);
         eprintln!("browser_pixel_e2e enabled with browser={browser}");

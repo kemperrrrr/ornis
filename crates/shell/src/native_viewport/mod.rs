@@ -8,12 +8,14 @@
 //!
 //! Split by design, because CI has no GPU and no window:
 //!
-//! * [`layout`] — where the layer goes and how big its drawable is. Pure
-//!   integer math over [`PhysicalRect`](crate::PhysicalRect); unit-tested.
-//! * [`frame`] — the scene→GPU frame state (replica world, renderer, plan,
-//!   camera). Needs a `wgpu::Device`, so it lives behind `#[cfg(target_os =
-//!   "macos")]` like the surface it drives.
-//! * `platform` — the AppKit `NSView`/`CAMetalLayer` plumbing.
+//! * [`layout`] — where the view goes and how big its drawable is. Pure
+//!   arithmetic over [`PhysicalRect`](crate::PhysicalRect); unit-tested.
+//! * `frame` (macOS) — the scene→GPU frame state (replica world, renderer,
+//!   plan, camera). Needs a `wgpu::Device`, so it lives behind `#[cfg(target_os
+//!   = "macos")]` like the surface it drives.
+//! * `platform` (macOS) — the AppKit `NSView`/`CAMetalLayer` plumbing.
+//! * `host` (macOS) — attaching, placing and feeding the viewport from the
+//!   shell binary.
 //!
 //! Only macOS has the surface path here: the problem being solved is
 //! WKWebView-on-macOS, and a Linux/Windows child-window equivalent is a
@@ -33,7 +35,7 @@ pub mod platform;
 #[cfg(target_os = "macos")]
 pub use frame::{FrameStats, SurfaceSpec, ViewportFrame};
 #[cfg(target_os = "macos")]
-pub use host::{HostError, ViewportHost};
+pub use host::{HostError, MAX_FRAME_STEP, ViewportHost, clamp_frame_step};
 pub use layout::{ViewFrame, ViewportPlacement};
 #[cfg(target_os = "macos")]
 pub use platform::{NativeViewport, ViewportError};

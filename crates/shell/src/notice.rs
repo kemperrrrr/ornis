@@ -8,7 +8,8 @@
 //!
 //! The text travels in the initialization script (`window.ornisShell`), so
 //! one Rust constant is the single source of truth and the page can never
-//! drift into a stale instruction. [`init_script`] embeds it; the tests below
+//! drift into a stale instruction. `crate::bridge::init_script_for` embeds it;
+//! the tests below
 //! pin the wording and the page's use of it without a window or a GPU.
 //!
 //! In native-viewport mode the message is not used: the shell renders the
@@ -61,6 +62,10 @@ impl ShellCapabilities {
     }
 }
 
+/// Highest code point that must be `\u`-escaped in a JS/JSON string (the C0
+/// control range: `\u0000`..=`\u001f`).
+const LAST_CONTROL_CHAR: u32 = 0x1f;
+
 /// Double-quoted JSON string literal for `value`.
 ///
 /// Only the escapes a JS/JSON string needs are emitted; the notice text is
@@ -76,7 +81,9 @@ fn json_string(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) <= LAST_CONTROL_CHAR => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
             c => out.push(c),
         }
     }
