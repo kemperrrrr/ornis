@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.7385598244212772,
-  "iosp_score": 0.9670873546151942,
+  "quality_score": 0.7420882637984147,
+  "iosp_score": 0.9674776867587724,
   "violations": 266,
-  "total": 12336,
+  "total": 12501,
   "complexity_warnings": 78,
   "magic_number_warnings": 158,
   "nesting_depth_warnings": 20,
@@ -11,7 +11,7 @@
   "unsafe_warnings": 12,
   "error_handling_warnings": 22,
   "duplicate_groups": 94,
-  "dead_code_warnings": 420,
+  "dead_code_warnings": 418,
   "dead_type_warnings": 0,
   "fragment_groups": 718,
   "boilerplate_warnings": 329,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 23,
-  "total_findings": 2888,
+  "total_findings": 2886,
   "violation_details": [
     {
       "name": "showcase_engine",
@@ -53,12 +53,12 @@
     {
       "name": "EditorSession::default",
       "file": "crates/app/src/session.rs",
-      "line": 319
+      "line": 355
     },
     {
       "name": "install_object_animation",
       "file": "crates/app/src/lib.rs",
-      "line": 121
+      "line": 123
     },
     {
       "name": "PhysicsRuntime::sync_soft_in",
@@ -123,12 +123,12 @@
     {
       "name": "setup",
       "file": "crates/core/benches/store_bench.rs",
-      "line": 8
+      "line": 9
     },
     {
       "name": "free_live_snapshot",
       "file": "crates/core/src/smart_store.rs",
-      "line": 97
+      "line": 109
     },
     {
       "name": "Color::hex",
@@ -138,7 +138,7 @@
     {
       "name": "main",
       "file": "crates/shell/src/main.rs",
-      "line": 67
+      "line": 65
     },
     {
       "name": "AssetServer::load",
