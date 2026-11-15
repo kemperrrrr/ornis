@@ -87,20 +87,44 @@ pub fn ggx_ndf_aniso(no_h: f32, h: Vec3, t: Vec3, b: Vec3, alpha_u: f32, alpha_v
     1.0 / (PI * alpha_u * alpha_v * denom * denom)
 }
 
-/// Map (roughness, anisotropy) to the `alpha_u`/`alpha_v` pair used by the
-/// anisotropic NDF and visibility terms.
+/// `alpha_u` of the anisotropic NDF: roughness squared, stretched along the
+/// tangent by the anisotropy.
+///
+/// Split from [`openpbr_anisotropy`] because a shader-side caller needs the two
+/// alphas as scalars: a `(f32, f32)` return is an aggregate in LLVM IR, and an
+/// aggregate is a struct the translator would have to take apart again.
 #[inline(always)]
 #[must_use]
-pub fn openpbr_anisotropy(roughness: f32, anisotropy: f32) -> (f32, f32) {
+pub fn anisotropy_alpha_u(roughness: f32, anisotropy: f32) -> f32 {
     let r2 = roughness * roughness;
     let aniso_inv = 1.0 - anisotropy;
     let aniso_inv_sq = aniso_inv * aniso_inv;
     let denom = aniso_inv_sq + 1.0;
     let fraction = 2.0 / denom;
     let sqrt_frac = sqrt(fraction);
-    let alpha_u = r2 * sqrt_frac;
-    let alpha_v = aniso_inv * alpha_u;
-    (alpha_u, alpha_v)
+    r2 * sqrt_frac
+}
+
+/// `alpha_v` of the anisotropic NDF: `alpha_u` squeezed across the bitangent.
+#[inline(always)]
+#[must_use]
+pub fn anisotropy_alpha_v(roughness: f32, anisotropy: f32) -> f32 {
+    (1.0 - anisotropy) * anisotropy_alpha_u(roughness, anisotropy)
+}
+
+/// Map (roughness, anisotropy) to the `alpha_u`/`alpha_v` pair used by the
+/// anisotropic NDF and visibility terms.
+///
+/// Host-side convenience over [`anisotropy_alpha_u`]/[`anisotropy_alpha_v`];
+/// the multiplicities are the same, so the pair and the two scalars agree bit
+/// for bit.
+#[inline(always)]
+#[must_use]
+pub fn openpbr_anisotropy(roughness: f32, anisotropy: f32) -> (f32, f32) {
+    (
+        anisotropy_alpha_u(roughness, anisotropy),
+        anisotropy_alpha_v(roughness, anisotropy),
+    )
 }
 
 /// Smith height-correlated GGX visibility term (isotropic), the
