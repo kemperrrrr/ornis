@@ -174,7 +174,7 @@ impl QualityFlags {
         // artifact: cull, clusters, gtao, histogram, adapt, ssao, gtao 4x,
         // ssao 4x, the AO blur, and the translated post passes (composite, hdr,
         // fog 1x/4x, bloom, aa edge, aa taa 1x/4x, gbuffer, gbuffer vertex-only).
-        let shader_checks = 18 * usize::from(self.ci && self.enabled("build-shaders"));
+        let shader_checks = 20 * usize::from(self.ci && self.enabled("build-shaders"));
         stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
@@ -2169,6 +2169,20 @@ fn ci_stages(stages: &mut StageList<'_>) {
         Some("vs_main"),
         "crates/render/src/shaders/gbuffer_vertex_generated.wgsl",
         "cargo xtask build-shaders --check (gbuffer vertex-only WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-outline"),
+        Some("vs_main"),
+        "crates/render/src/shaders/outline_vertex_generated.wgsl",
+        "cargo xtask build-shaders --check (outline vertex WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-outline"),
+        Some("fs_main"),
+        "crates/render/src/shaders/outline_fragment_generated.wgsl",
+        "cargo xtask build-shaders --check (outline fragment WGSL drift)",
     );
     check_shader_artifact_listed(
         stages,

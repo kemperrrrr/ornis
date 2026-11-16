@@ -137,13 +137,13 @@ impl OutlineGpu {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &vertex,
-                entry_point: Some(shaders::outline_generated::vs_main::entry_point()),
+                entry_point: Some(shaders::outline_generated::VS_ENTRY),
                 buffers: &[Some(Vertex::desc())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &fragment,
-                entry_point: Some(shaders::outline_generated::fs_main::entry_point()),
+                entry_point: Some(shaders::outline_generated::FS_ENTRY),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: None,
