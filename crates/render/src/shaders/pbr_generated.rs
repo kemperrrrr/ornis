@@ -22,7 +22,7 @@ pub const FS_ENTRY: &str = "fs_main";
 
 /// Forward-PBR vertex shader: instance transforms + world position.
 ///
-/// Delegates to [`gbuffer_generated::wgsl_vertex_source`] — both passes use the
+/// Delegates to [`super::gbuffer_generated::wgsl_vertex_source`] — both passes use the
 /// same instance transform, and the g-buffer's is already translated.
 pub fn wgsl_vertex_source() -> String {
     super::gbuffer_generated::wgsl_vertex_source()
