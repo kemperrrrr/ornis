@@ -7,7 +7,7 @@
 //! textures with the material UV (`input.uv`) and folds the texels into
 //! the scalar factors before the shared layer evaluators run.
 //!
-//! The legacy forward entry ([`crate::shaders::pbr_generated::fs_main`])
+//! The untextured forward entry ([`crate::shaders::pbr_generated::FS_ENTRY`])
 //! is untouched: textured materials are a new path (new resource table,
 //! new pipeline built by
 //! [`Renderer3D::ensure_textured_forward`](crate::renderer::Renderer3D::ensure_textured_forward)),
