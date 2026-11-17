@@ -224,3 +224,37 @@ pub fn mismatched_pixels(reference: &[u8], candidate: &[u8]) -> usize {
         .filter(|(a, b)| a.iter().zip(b.iter()).any(|(&a, &b)| a.abs_diff(b) > 1))
         .count()
 }
+
+/// IEEE-754 binary16 encoding of `value` (round to nearest even).
+pub fn half(value: f32) -> [u8; 2] {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xFF) as i32 - 127 + 15;
+    let mantissa = bits & 0x007F_FFFF;
+    let encoded = if exponent <= 0 {
+        sign
+    } else if exponent >= 0x1F {
+        sign | 0x7C00
+    } else {
+        sign | ((exponent as u16) << 10) | ((mantissa >> 13) as u16)
+    };
+    encoded.to_le_bytes()
+}
+
+/// Decode one little-endian IEEE-754 binary16.
+pub fn half_to_f32(bytes: &[u8]) -> f32 {
+    let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
+    let exponent = i32::from((bits >> 10) & 0x1F);
+    let fraction = f32::from(bits & 0x03FF) / 1024.0;
+    let magnitude = match exponent {
+        0 => fraction * 2.0f32.powi(-14),
+        0x1F if fraction == 0.0 => f32::INFINITY,
+        0x1F => f32::NAN,
+        _ => (1.0 + fraction) * 2.0f32.powi(exponent - 15),
+    };
+    if bits & 0x8000 == 0 {
+        magnitude
+    } else {
+        -magnitude
+    }
+}

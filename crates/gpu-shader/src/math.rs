@@ -125,6 +125,14 @@ unary!(
     /// Fractional part of `value`.
     fract => host::fract
 );
+unary!(
+    /// Largest integer not greater than `value`, one WGSL `floor`.
+    floor => libm::floorf
+);
+unary!(
+    /// Smallest integer not less than `value`, one WGSL `ceil`.
+    ceil => libm::ceilf
+);
 
 /// `sqrt(value)` — one WGSL `sqrt`.
 ///
@@ -382,6 +390,10 @@ mod tests {
         close(sign(0.0), 0.0);
         close(sign(3.0), 1.0);
         close(fract(2.25), 0.25);
+        close(floor(2.75), 2.0);
+        close(floor(-0.25), -1.0);
+        close(ceil(2.25), 3.0);
+        close(ceil(-0.25), -0.0);
         close(log2(8.0), 3.0);
         close(exp2(3.0), 8.0);
         close(ln(1.0), 0.0);

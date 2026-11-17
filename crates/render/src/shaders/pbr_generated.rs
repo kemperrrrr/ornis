@@ -1,461 +1,36 @@
-//! Forward-PBR shader generated from Rust (Render path 2).
+//! Forward-PBR pass: translated from Rust through LLVM IR.
 //!
-//! Canonical source is the Rust code in this module: the full OpenPBR
-//! fragment skeleton (layer evaluators + `fs_main`) lives here as a Rust
-//! string, and the BRDF math kernels are spliced in from
-//! [`crate::shaders::math`] (single source of truth via `#[kernel]`).
-//! The former handwritten `shaders/wgsl/pbr_*.wgsl` sources were deleted
-//! after the `#[stage]` translation of `fs_main`; the
-//! `fs_main_matches_legacy_shape` test pins the entry shape.
+//! The shader lives in `crates/gpu-pbr`: one fragment entry that reads the
+//! material record, walks the punctual lights, sums the OpenPBR layers and adds
+//! the ambient, emissive and image-based terms. The layer maths it calls is
+//! `ornis-gpu-openpbr`, the same ported functions the other passes use.
 //!
-//! Note: the vertex stage is shared with the g-buffer pass (same instance
-//! transform), so [`wgsl_vertex_source`] reuses
-//! [`crate::shaders::gbuffer_generated::wgsl_vertex_source`] instead of
-//! duplicating it.
+//! The vertex stage is shared with the g-buffer pass — the two chains transform
+//! an instance identically — so [`wgsl_vertex_source`] reuses the g-buffer's
+//! vertex-only module instead of duplicating it.
+//!
+//! `xtask build-shaders --package ornis-gpu-pbr --entry fs_main` writes the
+//! checked-in `pbr_generated.wgsl`; `--check` in CI catches drift.
 
-use super::interface::GbufferFragmentInput as FragmentInput;
-use super::{
-    ComparisonSampler, DepthTextureArray, DepthTextureCubeArray, OPENPBR_WGSL_NAME, Resource,
-    ResourceKind, Sampler, ShaderModule, Texture2d, TextureCube, helpers, openpbr_material_decl,
-    wgsl_decl,
-};
+use super::{OPENPBR_WGSL_NAME, Resource, ResourceKind};
 use crate::renderer::{
-    CameraUniform, ClusterParams, ClusterSpan, CsmBlock, CsmVp, GpuLight, LightingUniform,
-    PerObjectGpu,
+    CameraUniform, ClusterParams, ClusterSpan, GpuLight, LightingUniform, PerObjectGpu,
 };
-use crate::shaders::{gbuffer_generated, math};
-use ornis_core::material::OpenPBRMaterial;
-use ornis_macros::stage;
+
+/// Fragment entry point of the translated module.
+pub const FS_ENTRY: &str = "fs_main";
 
 /// Forward-PBR vertex shader: instance transforms + world position.
 ///
-/// Delegates to [`gbuffer_generated::wgsl_vertex_source`] — the two legacy
-/// vertex files are byte-identical. Entry point name `vs_main` is kept for
-/// compatibility with `create_pbr_pass`.
+/// Delegates to [`gbuffer_generated::wgsl_vertex_source`] — both passes use the
+/// same instance transform, and the g-buffer's is already translated.
 pub fn wgsl_vertex_source() -> String {
-    gbuffer_generated::wgsl_vertex_source()
+    super::gbuffer_generated::wgsl_vertex_source()
 }
 
-/// Group-0 `@binding` indices the forward-PBR fragment stage declares.
-///
-/// Bindings 7–10 are the split-sum IBL set (prefilter, irradiance, BRDF LUT,
-/// sampler) added with the image-based light path. Bindings 12–15 are the
-/// clustered-lighting set (#130): params, storage, index list, grid.
-const PBR_FRAGMENT_BINDINGS: &[u32] = &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-
-/// Forward-PBR fragment shader: full OpenPBR evaluation.
-///
-/// Assembled as `{skeleton}\\n{kernels}`, exactly like the legacy
-/// `shaders::pbr_fragment()`; entry point `fs_main` is kept.
+/// The generated forward-PBR fragment module.
 pub fn wgsl_source() -> String {
-    let kernels = [
-        math::luminance::wgsl_source(),
-        math::fresnel0_from_ior::wgsl_source(),
-        math::fresnel_schlick::wgsl_source(),
-        math::fresnel_schlick_vec::wgsl_source(),
-        math::fresnel_f82_tint::wgsl_source(),
-        math::ggx_ndf::wgsl_source(),
-        math::ggx_ndf_aniso::wgsl_source(),
-        math::openpbr_anisotropy::wgsl_source(),
-        math::smith_ggx_correlated::wgsl_source(),
-        math::smith_ggx_aniso::wgsl_source(),
-        math::oren_nayar_brdf::wgsl_source(),
-        math::base_diffuse_energy::wgsl_source(),
-        math::thin_film_weight_mix::wgsl_source(),
-        math::coated_emission::wgsl_source(),
-        math::coat_base_darkening::wgsl_source(),
-        math::coat_blend_darkened::wgsl_source(),
-        math::thin_film_modulation::wgsl_source(),
-        math::sheen_brdf::wgsl_source(),
-        math::transmission_color_to_extinction::wgsl_source(),
-        math::subsurface_brdf::wgsl_source(),
-        math::srgb_to_linear::wgsl_source(),
-        math::evaluate_ibl::wgsl_source(),
-    ];
-    let module = ShaderModule::new()
-        .decl(CameraUniform::WGSL_SOURCE)
-        .decl(wgsl_decl(GpuLight::WGSL_SOURCE))
-        .decl(wgsl_decl(CsmVp::WGSL_SOURCE))
-        .decl(wgsl_decl(CsmBlock::WGSL_SOURCE))
-        .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
-        .decl(wgsl_decl(ClusterParams::WGSL_SOURCE))
-        .decl(wgsl_decl(ClusterSpan::WGSL_SOURCE))
-        .decl(openpbr_material_decl())
-        .resources(&PBR_RESOURCES, PBR_FRAGMENT_BINDINGS)
-        .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
-        .consts(helpers::wgsl_consts())
-        .consts(math::wgsl_consts())
-        .helper(helpers::wgsl_shared_helpers())
-        .entry(fs_main::wgsl_source())
-        .helpers(kernels);
-    module.emit()
-}
-
-/// Forward-PBR fragment entry, translated by [`stage`](ornis_macros::stage):
-/// full OpenPBR evaluation over the light array. DSL-only —
-/// `camera`/`lighting`/`materials` globals declared via `#[wgsl(global)]`.
-/// Layer evaluators
-/// stay handwritten below and are called by name.
-/// Forward-PBR resources as a context bundle (`ctx.materials`, …).
-#[allow(dead_code)]
-#[derive(ornis_macros::ShaderContext)]
-pub(crate) struct PbrContext {
-    pub materials: Vec<OpenPBRMaterial>,
-    pub camera: CameraUniform,
-    pub lighting: LightingUniform,
-    pub shadow_tex: DepthTextureArray,
-    pub shadow_sampler: ComparisonSampler,
-    pub shadow_cube_tex: DepthTextureCubeArray,
-    pub prefilter_cube: TextureCube,
-    pub irradiance_cube: TextureCube,
-    pub brdf_lut: Texture2d,
-    pub ibl_sampler: Sampler,
-    pub csm_tex: DepthTextureArray,
-    pub cluster_params: ClusterParams,
-    pub clustered_lights: Vec<GpuLight>,
-    pub cluster_light_indices: Vec<u32>,
-    pub cluster_grid: Vec<ClusterSpan>,
-}
-
-#[stage(fragment)]
-fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0, glam::Vec4> {
-    let mat = ctx.materials[input.material_index];
-    let n = normalize(input.world_normal);
-    let v = normalize(ctx.camera.camera_pos.xyz - input.world_position);
-    let nov = max(dot(n, v), EPS);
-    let t = normalize(input.world_tangent);
-    let b = cross(n, t);
-    let base_weight = mat.base_params.x;
-    let base_color = mat.base_color.rgb;
-    let metalness = mat.base_params.z;
-    let diffuse_roughness = mat.base_params.y;
-    let specular_weight = mat.specular_params.x;
-    let specular_roughness = specular_aa_roughness(mat.specular_params.y, n);
-    let specular_ior = mat.specular_params.z;
-    let specular_anisotropy = mat.specular_params.w;
-    let specular_edge_tint = mat.specular_color.rgb;
-    let transmission_weight = mat.transmission_params.x;
-    let transmission_depth = mat.transmission_params.y;
-    let transmission_dispersion_scale = mat.transmission_params.z;
-    let transmission_dispersion_abbe = mat.transmission_params.w;
-    let transmission_color = mat.transmission_color.rgb;
-    let transmission_scatter = mat.transmission_scatter.rgb;
-    let transmission_scatter_anisotropy = mat.transmission_scatter.a;
-    let subsurface_weight = mat.subsurface_params.x;
-    let subsurface_radius = mat.subsurface_params.y;
-    let subsurface_radius_scale_r = mat.subsurface_params.z;
-    let subsurface_scatter_anisotropy = mat.subsurface_params.w;
-    let subsurface_color = mat.subsurface_color.rgb;
-    let subsurface_radius_scale_g = mat.subsurface_radius_scale_gb.x;
-    let subsurface_radius_scale_b = mat.subsurface_radius_scale_gb.y;
-    let fuzz_weight = mat.fuzz_params.x;
-    let fuzz_roughness = mat.fuzz_params.y;
-    let fuzz_color = mat.fuzz_color.rgb;
-    let coat_weight = mat.coat_params.x;
-    let coat_roughness = mat.coat_params.y;
-    let coat_anisotropy = mat.coat_params.z;
-    let coat_darkening = mat.coat_params.w;
-    let coat_color = mat.coat_color.rgb;
-    let coat_ior = mat.coat_ior.x;
-    let thin_film_weight = mat.thin_film_params.x;
-    let thin_film_thickness_um = mat.thin_film_params.y;
-    let thin_film_ior = mat.thin_film_params.z;
-    let emission_luminance = mat.emission_params.x;
-    let emission_color = mat.emission_color.rgb;
-    let opacity = mat.geometry_params.x;
-    let thin_walled = mat.geometry_params.y;
-    let mut lo = Vec3::new(0.0, 0.0, 0.0);
-    let thin_film_mod = thin_film_weight_mix(
-        thin_film_weight,
-        thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0),
-    );
-    let coat_darken = evaluate_coat_darkening(
-        coat_weight,
-        coat_darkening,
-        coat_ior,
-        metalness,
-        base_color,
-        base_weight,
-        specular_weight,
-        subsurface_weight,
-        subsurface_color,
-    );
-    // Clustered window (#130): head slots read the uniform-window records
-    // from the cluster light storage (byte-identical to
-    // `lighting.lights`), cluster slots index this pixel's cluster
-    // list. `span.y` is zero while clustering is off, so the window is
-    // exactly the legacy `light_count` loop.
-    let span = cluster_light_span(input.world_position);
-    let total = ctx.lighting.light_count + span.y;
-    for k in 0u..total {
-        let mut light = ctx.clustered_lights[k];
-        if k >= ctx.lighting.light_count {
-            light = ctx.clustered_lights
-                [ctx.cluster_light_indices[span.x + (k - ctx.lighting.light_count)]];
-        }
-        let kind = light.kind.x;
-        // Point/spot: vector from the surface to the light + range cutoff.
-        // Directionals keep the legacy infinite-light path (pixel-identical).
-        let to_light = light.position.xyz - input.world_position;
-        let dist = length(to_light);
-        let l_point = to_light / max(dist, EPS);
-        let use_point = step(POINT_OR_SPOT_KIND_EDGE, kind);
-        let l_dir = normalize(mix(normalize(light.direction.xyz), l_point, use_point));
-        // smoothstep(edge0 == edge1) is undefined in WGSL — widen the
-        // cutoff edge by 1%: coshaped but defined on every driver.
-        let edge0 = light.params.x * RANGE_CUTOFF_INNER_FRACTION;
-        let range_cut = mix(
-            1.0,
-            1.0 - smoothstep(edge0, light.params.x, dist),
-            use_point,
-        );
-        let l = l_dir;
-        let h = normalize(v + l + Vec3::new(0.0, 0.0, EPS));
-        let light_color = light.color.rgb;
-        let intensity = light.color.w;
-        // Spot cone (kind == 2): full inside inner, soft edge to outer.
-        let cos_theta = dot(
-            normalize(light.direction.xyz),
-            normalize(input.world_position - light.position.xyz),
-        );
-        let cone = mix(
-            1.0,
-            smoothstep(light.params.z, light.params.y, cos_theta),
-            step(SPOT_KIND_EDGE, kind),
-        );
-        let attenuation = mix(1.0, 1.0 / max(dist * dist, EPS), use_point);
-        let mut radiance = light_color * intensity * attenuation * range_cut * cone;
-        // Point lights (kind == 1) sample the cube pool; dir/spot use
-        // the 2D layers. `params.w` indexes the active pool.
-        let is_point = step(POINT_OR_SPOT_KIND_EDGE, kind) * (1.0 - step(SPOT_KIND_EDGE, kind));
-        // CSM directional path (#121): `params.x` carries the cascade
-        // count and the cascades ride in `lighting.csm` (pool `csm_tex`).
-        let is_csm =
-            (1.0 - step(POINT_OR_SPOT_KIND_EDGE, kind)) * step(CSM_ACTIVE_EDGE, light.params.x);
-        if is_csm > LIGHT_SELECTOR_SPLIT {
-            let vis = csm_visibility(
-                input.world_position,
-                ctx.camera.camera_pos.xyz,
-                ctx.lighting.csm,
-                ctx.csm_tex,
-                ctx.shadow_sampler,
-            );
-            radiance = radiance * vis;
-        }
-        // Shadow: project into the light's clip space and compare
-        // against its map layer (hardware 2x2 PCF via the comparison
-        // sampler). Unshadowed lights keep `params.w = -1.0` and skip
-        // the lookup; single-mip depth needs no LOD, so the branch is
-        // safe in non-uniform control flow.
-        if light.params.w >= 0.0 {
-            if is_point <= LIGHT_SELECTOR_SPLIT {
-                let shadow_clip = light.shadow_vp
-                    * Vec4::new(
-                        input.world_position.x,
-                        input.world_position.y,
-                        input.world_position.z,
-                        1.0,
-                    );
-                let shadow_ndc = shadow_clip.xyz / shadow_clip.w;
-                // V is mirrored: rasterization puts NDC y+1 at texture
-                // row 0 while `shadow_uv` v=0 reads from the top, so an
-                // unmirrored lookup samples the mirrored texel (shadows
-                // land overturned — darkness tests are blind to it).
-                let shadow_uv = Vec2::new(
-                    shadow_ndc.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
-                    NDC_TO_UV_HALF - shadow_ndc.y * NDC_TO_UV_HALF,
-                );
-                radiance = radiance
-                    * textureSampleCompare(
-                        ctx.shadow_tex,
-                        ctx.shadow_sampler,
-                        shadow_uv,
-                        i32(light.params.w),
-                        shadow_ndc.z - SHADOW_REF_BIAS,
-                    );
-            }
-            if is_point > LIGHT_SELECTOR_SPLIT {
-                // Cube sample: the hardware picks the face from the
-                // fragment→light vector's major axis; the reference is
-                // the 90°-perspective depth for that axis
-                // (`SHADOW_CUBE_NEAR`, far = light range — the same
-                // formula the face renders use, so no VP uniform).
-                let to_frag = input.world_position - light.position.xyz;
-                let major = max(max(abs(to_frag.x), abs(to_frag.y)), abs(to_frag.z));
-                let far = max(light.params.x, 1.0);
-                let denom = far - SHADOW_CUBE_NEAR;
-                let cube_ref =
-                    (far / denom) - (SHADOW_CUBE_NEAR * far) / (denom * major) - SHADOW_REF_BIAS;
-                radiance = radiance
-                    * textureSampleCompare(
-                        ctx.shadow_cube_tex,
-                        ctx.shadow_sampler,
-                        to_frag,
-                        i32(light.params.w),
-                        cube_ref,
-                    );
-            }
-        }
-        let nol = max(dot(n, l), EPS);
-        let noh = max(dot(n, h), EPS);
-        let voh = max(dot(v, h), EPS);
-        if nol <= EPS {
-            continue;
-        }
-        let base_bsdf = evaluate_base_layer(
-            n,
-            v,
-            l,
-            h,
-            nov,
-            nol,
-            noh,
-            voh,
-            mat,
-            base_weight,
-            base_color,
-            metalness,
-            diffuse_roughness,
-            specular_weight,
-            specular_roughness,
-            specular_ior,
-            specular_anisotropy,
-            specular_edge_tint,
-            t,
-            b,
-            thin_film_mod,
-        ) * coat_darken;
-        let coat_bsdf = evaluate_coat_layer(
-            n,
-            v,
-            l,
-            h,
-            nov,
-            nol,
-            noh,
-            voh,
-            mat,
-            coat_weight,
-            coat_roughness,
-            coat_anisotropy,
-            coat_darkening,
-            coat_ior,
-            coat_color,
-            metalness,
-            base_color,
-            base_weight,
-            specular_weight,
-            subsurface_weight,
-            subsurface_color,
-            t,
-            b,
-        );
-        let fuzz_bsdf = evaluate_fuzz_layer(
-            n,
-            v,
-            l,
-            h,
-            nov,
-            nol,
-            noh,
-            voh,
-            fuzz_weight,
-            fuzz_roughness,
-            fuzz_color,
-        );
-        let trans_bsdf = evaluate_transmission_layer(
-            n,
-            v,
-            l,
-            h,
-            nov,
-            nol,
-            noh,
-            voh,
-            mat,
-            transmission_weight,
-            transmission_depth,
-            transmission_dispersion_scale,
-            transmission_dispersion_abbe,
-            transmission_color,
-            transmission_scatter,
-            transmission_scatter_anisotropy,
-            specular_ior,
-            specular_roughness,
-            specular_anisotropy,
-            thin_walled,
-        );
-        let ss_bsdf = evaluate_subsurface_layer(
-            n,
-            v,
-            l,
-            nov,
-            nol,
-            subsurface_weight,
-            subsurface_radius,
-            subsurface_radius_scale_r,
-            subsurface_radius_scale_g,
-            subsurface_radius_scale_b,
-            subsurface_scatter_anisotropy,
-            subsurface_color,
-        );
-        let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;
-        lo = lo + layer_bsdf * radiance * nol;
-    }
-    let ambient =
-        ctx.lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
-    let emission = evaluate_emission(
-        emission_luminance,
-        emission_color,
-        coat_weight,
-        coat_color,
-        nov,
-    );
-    let f0_dielectric = fresnel0_from_ior(specular_ior);
-    let f0 = mix(
-        Vec3::new(f0_dielectric, f0_dielectric, f0_dielectric),
-        base_color * base_weight,
-        metalness,
-    );
-    let reflect_dir = n * (2.0 * dot(n, v)) - v;
-    let prefiltered = textureSampleLevel(
-        ctx.prefilter_cube,
-        ctx.ibl_sampler,
-        reflect_dir,
-        specular_roughness * ctx.lighting.ibl_max_mip,
-    );
-    let irradiance = textureSample(ctx.irradiance_cube, ctx.ibl_sampler, n);
-    let lut = textureSample(
-        ctx.brdf_lut,
-        ctx.ibl_sampler,
-        Vec2::new(nov, specular_roughness),
-    );
-    let ibl = evaluate_ibl(
-        prefiltered.rgb,
-        irradiance.rgb,
-        lut.r,
-        lut.g,
-        f0,
-        base_color * (1.0 - metalness),
-        ctx.lighting.ibl_weight,
-    );
-    // Unlit sprites (geometry `params[2]`, see `ShadingMode`): radiance is
-    // the emission alone — no BRDF, light, shadow or IBL term. `select`
-    // keeps the lit sum bit-identical when the flag is off. The threshold
-    // is `UNLIT_THRESHOLD` (shared with `ornis_core::material`, emitted
-    // into WGSL via `helpers::wgsl_consts`).
-    let full = ambient + lo + emission + ibl;
-    let color = sanitize_hdr(select(
-        full,
-        emission,
-        mat.geometry_params.z >= UNLIT_THRESHOLD,
-    ));
-    return glam::Vec4::new(color, opacity);
-}
-
-/// Static view for naga validation in tests.
-pub fn wgsl_source_static() -> String {
-    wgsl_source()
+    include_str!("pbr_generated.wgsl").to_string()
 }
 
 /// Resource layout of the forward-PBR pass (vertex 0–1, fragment 0, 2–3).
@@ -614,59 +189,82 @@ mod tests {
         assert_valid_wgsl("pbr_fragment", &wgsl_source());
     }
 
+    /// The fragment module declares every binding the layout names, and the
+    /// vertex module is the g-buffer's.
     #[test]
     fn pbr_generated_contains_expected_bindings() {
-        // The vertex stage is the translated g-buffer kernel now: it reads
-        // `per_objects` word by word, so the binding is an `array<u32>` and the
-        // name is the generated one.
         let vs = wgsl_vertex_source();
-        assert!(vs.contains("@group(0) @binding(1)"), "{vs}");
-        assert!(vs.contains("fn vs_main("));
-        assert!(!vs.contains("fn fs_main("), "vertex-only module");
+        assert_eq!(vs, super::super::gbuffer_generated::wgsl_vertex_source());
         let fs = wgsl_source();
-        assert!(fs.contains("@group(0) @binding(3) var<uniform> lighting"));
         assert!(fs.contains("fn fs_main("));
-        assert!(fs.contains("fn evaluate_base_layer"));
-        assert!(!fs.contains("aces_tonemap("));
+        assert!(!fs.contains("fn vs_main("), "fragment-only module");
+        for binding in [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
+            assert!(
+                fs.contains(&format!("@group(0) @binding({binding})")),
+                "binding {binding} is declared"
+            );
+        }
     }
 
-    /// The translated fragment entry must keep the legacy shape: same
-    /// signature, same layer-evaluator calls, same light loop with the
-    /// early-out. (Byte-parity no longer applies — the generated entry is
-    /// single-line with normalized int suffixes.)
+    /// The uniform blocks land on the host byte offsets.
+    ///
+    /// The pixel gate renders both shaders from the same buffers, so a layout
+    /// error cancels out there; this test is what pins the ABI. `Lighting`
+    /// carries `array<Light, 8>`, which pushes `light_count` from byte 20 to
+    /// 1168, and `csm` follows at 1184 — the same numbers
+    /// `crate::renderer::LightingUniform` describes.
     #[test]
-    fn fs_main_matches_legacy_shape() {
-        let entry = fs_main::wgsl_source();
-        assert!(entry.starts_with("@fragment\nfn fs_main(input: FragmentInput)"));
-        assert!(entry.contains("-> @location(0) vec4<f32>"));
-        assert!(entry.contains("let mat = materials[input.material_index];"));
-        assert!(entry.contains("for (var k: u32 = 0; k < total; k = k + 1)"));
-        assert!(entry.contains("var light = clustered_lights[k];"));
-        assert!(entry.contains("continue;"));
-        assert!(entry.contains("let base_bsdf = evaluate_base_layer("));
-        assert!(entry.contains(
-            "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
-        ));
-        assert!(entry.contains("return vec4<f32>(color, opacity);"));
-    }
-
-    #[test]
-    fn pbr_generated_parity_with_legacy_assembly() {
-        // Vertex is shared with gbuffer (translated — see
-        // `gbuffer_vertex_entry_matches_legacy_shape`); pin the sharing.
+    fn uniform_offsets_match_the_host_records() {
+        let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
+        let context = naga::proc::GlobalCtx {
+            types: &module.types,
+            constants: &module.constants,
+            overrides: &module.overrides,
+            global_expressions: &module.global_expressions,
+        };
+        naga::proc::Layouter::default()
+            .update(context)
+            .expect("layout");
+        let mut ordering: Vec<(String, naga::Handle<naga::Type>)> = module
+            .types
+            .iter()
+            .filter_map(|(handle, ty)| ty.name.clone().map(|name| (name, handle)))
+            .collect();
+        ordering.sort();
+        let named = |name: &str| {
+            ordering
+                .iter()
+                .find(|(candidate, _)| candidate.trim_end_matches('_') == name)
+                .unwrap_or_else(|| panic!("type {name} is not declared"))
+                .1
+        };
+        let members = |handle: naga::Handle<naga::Type>| match &module.types[handle].inner {
+            naga::TypeInner::Struct { members, span } => {
+                let mut out: Vec<(u32, naga::Handle<naga::Type>)> =
+                    members.iter().map(|m| (m.offset, m.ty)).collect();
+                out.sort();
+                (out, *span)
+            }
+            other => panic!("expected a struct, found {other:?}"),
+        };
+        let (lighting, span) = members(named("UniformStruct4"));
+        let offsets: Vec<u32> = lighting.iter().map(|(offset, _)| *offset).collect();
+        assert_eq!(offsets, [0, 16, 1168, 1172, 1176, 1180, 1184]);
+        assert_eq!(span, 1488);
+        let (csm, csm_span) = members(lighting.last().expect("the cascade block").1);
         assert_eq!(
-            wgsl_vertex_source(),
-            super::super::gbuffer_generated::wgsl_vertex_source()
+            csm.iter().map(|(offset, _)| *offset).collect::<Vec<_>>(),
+            [0, 256, 272, 288]
         );
-        // Fragment layouts still splice the derived declarations (Camera
-        // raw — that declaration terminates with bare `}`).
-        let src = wgsl_source();
-        assert!(src.contains(CameraUniform::WGSL_SOURCE));
-        assert!(src.contains(&wgsl_decl(GpuLight::WGSL_SOURCE)));
-        assert!(src.contains(&wgsl_decl(CsmVp::WGSL_SOURCE)));
-        assert!(src.contains(&wgsl_decl(CsmBlock::WGSL_SOURCE)));
-        assert!(src.contains(&wgsl_decl(LightingUniform::WGSL_SOURCE)));
-        assert!(src.contains(openpbr_material_decl().as_str()));
+        assert_eq!(csm_span, 304);
+        let (cluster, cluster_span) = members(named("UniformStruct5"));
+        assert_eq!(cluster_span, 16);
+        assert_eq!(cluster.len(), 4);
+        // The light array's stride is the host record's size.
+        let naga::TypeInner::Array { stride, .. } = &module.types[lighting[1].1].inner else {
+            panic!("the second field is the light array");
+        };
+        assert_eq!(*stride, 144);
     }
 
     /// Every table row is bound at an address the shaders declare, and every

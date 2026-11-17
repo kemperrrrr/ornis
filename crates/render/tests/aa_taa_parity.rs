@@ -7,6 +7,8 @@
 #[allow(dead_code)]
 mod common;
 
+use common::parity::half;
+
 use common::parity::{depth_ramp, gradient, map_readback, mismatched_pixels, upload_rgba8};
 
 /// The raw-WGSL temporal resolve this pass used before the migration.
@@ -180,22 +182,6 @@ fn upload_u32(device: &wgpu::Device, queue: &wgpu::Queue, values: &[u32]) -> wgp
             texel: 4,
         },
     )
-}
-
-/// IEEE-754 binary16 encoding of `value` (round to nearest even).
-fn half(value: f32) -> [u8; 2] {
-    let bits = value.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exponent = ((bits >> 23) & 0xFF) as i32 - 127 + 15;
-    let mantissa = bits & 0x007F_FFFF;
-    let encoded = if exponent <= 0 {
-        sign
-    } else if exponent >= 0x1F {
-        sign | 0x7C00
-    } else {
-        sign | ((exponent as u16) << 10) | ((mantissa >> 13) as u16)
-    };
-    encoded.to_le_bytes()
 }
 
 /// One uploaded layer: its label, format, bytes, and texel size.

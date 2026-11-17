@@ -9,6 +9,7 @@
 #[allow(dead_code)]
 mod common;
 
+use common::parity::half_to_f32;
 use common::parity::map_readback;
 use glam::{Mat4, Vec3};
 
@@ -471,22 +472,4 @@ fn float_mismatches(expected: &[u8], actual: &[u8], texel: usize) -> usize {
                 .any(|(x, y)| (half_to_f32(x) - half_to_f32(y)).abs() > FLOAT_TOLERANCE)
         })
         .count()
-}
-
-/// Decode one little-endian IEEE-754 binary16.
-fn half_to_f32(bytes: &[u8]) -> f32 {
-    let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
-    let exponent = i32::from((bits >> 10) & 0x1F);
-    let fraction = f32::from(bits & 0x03FF) / 1024.0;
-    let magnitude = match exponent {
-        0 => fraction * 2.0f32.powi(-14),
-        0x1F if fraction == 0.0 => f32::INFINITY,
-        0x1F => f32::NAN,
-        _ => (1.0 + fraction) * 2.0f32.powi(exponent - 15),
-    };
-    if bits & 0x8000 == 0 {
-        magnitude
-    } else {
-        -magnitude
-    }
 }

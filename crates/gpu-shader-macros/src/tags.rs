@@ -37,6 +37,7 @@ pub(super) struct UniformParam {
 ///
 /// `workgroup` is already validated by the caller; `uniforms` is in signature
 /// order, which is the order the record lists them in.
+// qual:allow(complexity, max_function_lines=100) reason: "one expansion: the tag tables, the length arithmetic and the record fold are the same value, written once"
 pub(super) fn emit(
     entry: &Ident,
     workgroup: [u32; 3],
@@ -66,28 +67,47 @@ pub(super) fn emit(
             const #id: u32 = <#ty as ::ornis_gpu_shader::GpuStruct>::ID;
         }
     });
-    let lengths: Vec<proc_macro2::TokenStream> = names
+    // The tag list and the reachable nested structs of each parameter, so the
+    // record carries what the translator needs to lay a block out: a nested
+    // field names its struct by id, and the id alone says nothing.
+    let tag_lists: Vec<proc_macro2::TokenStream> =
+        names.iter().map(|(tags, _)| quote! { #tags }).collect();
+    let nested_lists: Vec<proc_macro2::TokenStream> = uniforms
         .iter()
-        .map(|(tags, _)| {
-            quote! { #tags.len() }
+        .map(|param| {
+            let ty = &param.ty;
+            quote! { <#ty as ::ornis_gpu_shader::GpuStruct>::NESTED }
         })
         .collect();
-    let total = quote! { ::ornis_gpu_shader::meta::len(#prefix, &[#(#lengths),*]) };
+    let total = quote! {
+        ::ornis_gpu_shader::meta::len(
+            #prefix,
+            &[#(#tag_lists),*],
+            &[#(#nested_lists),*],
+        )
+    };
     // Fold the record left to right: each step starts where the previous one
-    // ended, and `meta::cursor` computes that offset from the same tag counts.
+    // ended, and `meta::cursor` computes that offset from the same tag lists.
     let mut record = quote! {
         ::ornis_gpu_shader::meta::entry::<{ #total }>(#prefix)
     };
-    for (index, (tags, id)) in names.iter().enumerate() {
+    for (index, ((tags, id), param)) in names.iter().zip(uniforms).enumerate() {
         let first = index == 0;
         let index = syn::Index::from(index);
+        let ty = &param.ty;
         record = quote! {
             ::ornis_gpu_shader::meta::with_uniforms(
                 #record,
-                ::ornis_gpu_shader::meta::cursor(#prefix_len, &[#(#lengths),*], #index),
+                ::ornis_gpu_shader::meta::cursor(
+                    #prefix_len,
+                    &[#(#tag_lists),*],
+                    &[#(#nested_lists),*],
+                    #index,
+                ),
                 #first,
                 #id,
                 #tags,
+                <#ty as ::ornis_gpu_shader::GpuStruct>::NESTED,
             )
         };
     }

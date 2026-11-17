@@ -193,6 +193,22 @@ pub const UNIFORM_FIELD_VEC4: &str = "uniform_field_vec4";
 /// and vector components are not dynamically indexed.
 pub const UNIFORM_ARRAY_VEC4_LANE: &str = "uniform_array_vec4_lane";
 
+/// `(param i32 ×8) (result f32)` — the same read one struct deeper:
+/// `outer.inner[index].element_field[lane]`.
+///
+/// Operands are group, binding, struct id, the outer field (a nested struct),
+/// the array field inside it, the element index, the element struct's field and
+/// the lane. `Lighting` nests its cascade data in `csm`, so the access path
+/// starts one field further out.
+pub const UNIFORM_NESTED_ARRAY_VEC4_LANE: &str = "uniform_nested_array_vec4_lane";
+
+/// `(param i32 ×6) (result f32)` — lane `component` of `vec4` field `inner` of
+/// the struct in field `field`: `outer.inner.inner[component]`.
+///
+/// The cascade view axis and split distances live one struct deep in
+/// `Lighting`, and a `vec4` field is read by its constant lane.
+pub const UNIFORM_NESTED_VEC4_LANE: &str = "uniform_nested_vec4_lane";
+
 /// `(param i32 i32 i32 i32) (result f32)` — `array<f32, len>[index]`.
 ///
 /// The element stride is the uniform stride of `f32` (16 bytes), not the
@@ -391,6 +407,12 @@ pub const GPU_DPDY: &str = "gpu_dpdy";
 
 /// `(param f32) (result f32)` — `tan(value)`, one WGSL `tan`.
 pub const GPU_TAN: &str = "gpu_tan";
+
+/// `(param f32) (result f32)` — `floor(value)`, one WGSL `floor`.
+pub const GPU_FLOOR: &str = "gpu_floor";
+
+/// `(param f32) (result f32)` — `ceil(value)`, one WGSL `ceil`.
+pub const GPU_CEIL: &str = "gpu_ceil";
 
 /// `(param f32) (result f32)` — `ln(value)`, the natural logarithm, one WGSL
 /// `log`.
