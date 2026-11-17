@@ -183,6 +183,16 @@ pub const UNIFORM_FIELD_VEC3: &str = "uniform_field_vec3";
 /// `(param i32 i32 i32 i32) (result f32 f32 f32 f32)` — one `vec4<f32>` field.
 pub const UNIFORM_FIELD_VEC4: &str = "uniform_field_vec4";
 
+/// `(param i32 i32 i32 i32 i32 i32 i32) (result f32)` — lane of a `vec4` field
+/// of one element of a fixed-size uniform array.
+///
+/// Operands are group, binding, struct id, array field index, the element
+/// index, the element struct's field index and the lane. The element index is
+/// a runtime value — WGSL allows a dynamic index into a fixed-size uniform
+/// array — while the field and the lane are constants, because struct fields
+/// and vector components are not dynamically indexed.
+pub const UNIFORM_ARRAY_VEC4_LANE: &str = "uniform_array_vec4_lane";
+
 /// `(param i32 i32 i32 i32) (result f32)` — `array<f32, len>[index]`.
 ///
 /// The element stride is the uniform stride of `f32` (16 bytes), not the

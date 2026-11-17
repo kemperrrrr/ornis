@@ -261,19 +261,38 @@ fn parse_uniforms(value: &str, structs: &mut BTreeMap<u32, Vec<u8>>) -> Result<(
             }
             let tag = tag - b'0';
             if tag == ornis_gpu_abi::TYPE_TAG_STRUCT {
-                let Some(id_byte) = bytes.get(index).copied() else {
+                tags.push(nested_tag(bytes, &mut index)?);
+            } else if tag == ornis_gpu_abi::TYPE_TAG_ARRAY {
+                // `8`, the element's tag (itself `7` plus an id for an array of
+                // structs) and the length. The parsed form keeps the three
+                // bytes, so every later walk over the list needs a cursor.
+                let element = match bytes.get(index).copied().map(|b| b - b'0') {
+                    Some(ornis_gpu_abi::TYPE_TAG_STRUCT) => {
+                        index += 1;
+                        nested_tag(bytes, &mut index)?
+                    }
+                    Some(tag) if tag < ornis_gpu_abi::TYPE_TAG_ARRAY => {
+                        index += 1;
+                        tag
+                    }
+                    _ => {
+                        return Err(TranslateError::UnsupportedType(
+                            "array field needs an element tag".to_string(),
+                        ));
+                    }
+                };
+                let Some(length) = bytes.get(index).copied().map(|b| b - b'0') else {
                     return Err(TranslateError::UnsupportedType(
-                        "nested struct tag needs an id".to_string(),
+                        "array field needs a length".to_string(),
                     ));
                 };
                 index += 1;
-                if !id_byte.is_ascii_digit() {
-                    return Err(TranslateError::UnsupportedType(format!(
-                        "uniform field tag `{}` is not a digit",
-                        char::from(id_byte)
-                    )));
+                if length == 0 {
+                    return Err(TranslateError::UnsupportedType(
+                        "uniform array has no elements".to_string(),
+                    ));
                 }
-                tags.push(ornis_gpu_abi::TYPE_TAG_NESTED + (id_byte - b'0'));
+                tags.extend_from_slice(&[ornis_gpu_abi::TYPE_TAG_ARRAY, element, length]);
             } else {
                 tags.push(tag);
             }
@@ -286,4 +305,21 @@ fn parse_uniforms(value: &str, structs: &mut BTreeMap<u32, Vec<u8>>) -> Result<(
         structs.insert(id, tags);
     }
     Ok(())
+}
+
+/// Parse the struct id that follows a nested-struct tag at `index`.
+fn nested_tag(bytes: &[u8], index: &mut usize) -> Result<u8, TranslateError> {
+    let Some(id_byte) = bytes.get(*index).copied() else {
+        return Err(TranslateError::UnsupportedType(
+            "nested struct tag needs an id".to_string(),
+        ));
+    };
+    *index += 1;
+    if !id_byte.is_ascii_digit() {
+        return Err(TranslateError::UnsupportedType(format!(
+            "uniform field tag `{}` is not a digit",
+            char::from(id_byte)
+        )));
+    }
+    Ok(ornis_gpu_abi::TYPE_TAG_NESTED + (id_byte - b'0'))
 }
