@@ -129,6 +129,13 @@ pub const TYPE_TAG_VEC3: u8 = 5;
 pub const TYPE_TAG_VEC4: u8 = 6;
 /// Field tag of a nested uniform struct. The next `FIELD_TAGS` byte is its id.
 pub const TYPE_TAG_STRUCT: u8 = 7;
+/// Field tag of a fixed-size array: the element's tag follows, then the length.
+///
+/// `array<Light, 8>` of uniform struct 3 is `TYPE_TAG_ARRAY`, `TYPE_TAG_STRUCT`,
+/// `3`, `8`. A field like that occupies several `FIELD_TAGS` bytes, so the field
+/// index of everything after it is walked with a cursor rather than taken as a
+/// slice offset.
+pub const TYPE_TAG_ARRAY: u8 = 8;
 
 /// Diverging stub behind every resource method outside `wasm32`.
 #[cfg(not(target_arch = "wasm32"))]

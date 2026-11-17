@@ -1817,19 +1817,22 @@ impl Builders {
             ));
         }
         self.struct_stack.push(sid);
-        let mut members = Vec::with_capacity(tags.len());
-        let mut specs = Vec::with_capacity(tags.len());
-        let mut offsets = vec![0u32; tags.len()];
-        for (index, tag) in tags.iter().enumerate() {
-            let (ty, size, align) = self.tag_type(*tag)?;
-            specs.push(ornis_gpu_abi::FieldLayout { size, align });
+        let mut members = Vec::new();
+        let mut specs = Vec::new();
+        let mut cursor = 0usize;
+        while cursor < tags.len() {
+            let index = members.len();
+            let (ty, layout, width) = self.field_type(&tags, cursor)?;
+            specs.push(layout);
             members.push(naga::StructMember {
                 name: Some(format!("f{index}")),
                 ty,
                 binding: None,
                 offset: 0,
             });
+            cursor += width;
         }
+        let mut offsets = vec![0u32; members.len()];
         let span = ornis_gpu_abi::place_fields(&specs, true, &mut offsets);
         for (member, offset) in members.iter_mut().zip(&offsets) {
             member.offset = *offset;
@@ -1846,6 +1849,49 @@ impl Builders {
         let found = (ty, span, align);
         self.struct_types.insert(sid, found);
         Ok(found)
+    }
+
+    /// Type, layout and tag width of the field whose leading tag sits at
+    /// `cursor`.
+    ///
+    /// Scalars and vectors are one tag byte; a nested struct is the tag plus
+    /// its id; an array is [`TYPE_TAG_ARRAY`](ornis_gpu_abi::TYPE_TAG_ARRAY),
+    /// the element tag and the length.
+    // qual:allow(iosp) reason: "one field of a uniform struct: the tag decides the naga type, the layout it occupies and how many tag bytes it consumed"
+    fn field_type(
+        &mut self,
+        tags: &[u8],
+        cursor: usize,
+    ) -> Result<(naga::Handle<naga::Type>, ornis_gpu_abi::FieldLayout, usize), TranslateError> {
+        let tag = tags[cursor];
+        if tag != ornis_gpu_abi::TYPE_TAG_ARRAY {
+            let (ty, size, align) = self.tag_type(tag)?;
+            return Ok((ty, ornis_gpu_abi::FieldLayout { size, align }, 1));
+        }
+        let element_tag = *tags.get(cursor + 1).ok_or_else(|| {
+            TranslateError::UnsupportedType("array field has no element tag".to_string())
+        })?;
+        let length = u32::from(*tags.get(cursor + 2).ok_or_else(|| {
+            TranslateError::UnsupportedType("array field has no length".to_string())
+        })?);
+        let (element, size, align) = self.tag_type(element_tag)?;
+        let stride = ornis_gpu_abi::uniform_stride(size, align);
+        let ty = self.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Array {
+                    base: element,
+                    size: naga::ArraySize::Constant(
+                        std::num::NonZeroU32::new(length).unwrap_or(std::num::NonZeroU32::MIN),
+                    ),
+                    stride,
+                },
+            },
+            naga::Span::default(),
+        );
+        let layout =
+            ornis_gpu_abi::array_layout(ornis_gpu_abi::FieldLayout { size, align }, length);
+        Ok((ty, layout, 3))
     }
 
     // qual:allow(iosp) reason: "a field tag either selects a scalar naga type or recurses into the nested struct it names"
@@ -4320,6 +4366,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains("texture_height_2d") {
             return self.texture_size(out, args, 1, TextureKind::Depth);
         }
+        if callee.contains(ornis_gpu_abi::symbols::UNIFORM_ARRAY_VEC4_LANE) {
+            return self.uniform_array_vec4_lane(out, args);
+        }
         if callee.contains("uniform_nested_field_f32") {
             return self.uniform_nested_field(out, args, ornis_gpu_abi::TYPE_TAG_F32);
         }
@@ -5244,16 +5293,95 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     }
 
     fn field_tag(&self, sid: u32, field: u32) -> Result<u8, TranslateError> {
-        self.builders
-            .structs
-            .get(sid as usize)
-            .and_then(|tags| tags.get(field as usize))
+        let tags = self.builders.structs.get(sid as usize).ok_or_else(|| {
+            TranslateError::UnsupportedType(format!(
+                "uniform field {field} of struct {sid} is not declared"
+            ))
+        })?;
+        // Fields are not one tag each (a nested struct adds its id, an array
+        // adds the element tag and the length), so the ordinal has to be
+        // walked rather than used as an index.
+        let mut cursor = 0usize;
+        let mut seen = 0u32;
+        while seen < field {
+            let width = field_tag_width(tags, cursor).ok_or_else(|| missing_field(sid, field))?;
+            cursor += width;
+            seen += 1;
+        }
+        tags.get(cursor)
             .copied()
-            .ok_or_else(|| {
-                TranslateError::UnsupportedType(format!(
-                    "uniform field {field} of struct {sid} is not declared"
-                ))
-            })
+            .ok_or_else(|| missing_field(sid, field))
+    }
+
+    /// `uniform_array_vec4_lane(g, b, sid, field, index, element_field, lane)`.
+    ///
+    /// One element of a fixed-size uniform array by a runtime index, then one
+    /// `vec4` field of that element and one lane of it. The array field and the
+    /// element field are immediates; only the element index is a value, which
+    /// is exactly what WGSL allows in a uniform array.
+    // qual:allow(iosp) reason: "the declared tags decide each step of the access path, then one load returns the lane"
+    fn uniform_array_vec4_lane(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if args.len() != 7 {
+            return Err(TranslateError::Unsupported);
+        }
+        let (group, binding, sid, field) = uniform_ids(args)?;
+        // Decoding "one value operand between two immediates" is the shape of
+        // every indexed import in this file; folding it into a helper would
+        // hide which argument is the index.
+        // qual:allow(dry, fragment) reason: "the argument decode of an indexed import; a shared helper would hide which operand is the runtime index"
+        let index = self.operand(out, &args[4])?;
+        let element_field = const_u32(&args[5])?;
+        let lane = const_u32(&args[6])?;
+        if self.field_tag(sid, field)? != ornis_gpu_abi::TYPE_TAG_ARRAY {
+            return Err(TranslateError::UnsupportedType(format!(
+                "uniform field {field} of struct {sid} is not an array"
+            )));
+        }
+        let element = self.array_element(sid, field)?;
+        if self.field_tag(element, element_field)? != ornis_gpu_abi::TYPE_TAG_VEC4 {
+            return Err(TranslateError::UnsupportedType(format!(
+                "field {element_field} of the array element of struct {sid} is not a vec4"
+            )));
+        }
+        let global = self.builders.uniform_struct_global(group, binding, sid)?;
+        let base = self.expr(out, naga::Expression::GlobalVariable(global));
+        let array = self.access_field(out, base, field);
+        let element_ptr = self.expr(out, naga::Expression::Access { base: array, index });
+        let field_ptr = self.access_field(out, element_ptr, element_field);
+        let lane_ptr = self.access_field(out, field_ptr, lane);
+        Ok(self.expr(out, naga::Expression::Load { pointer: lane_ptr }))
+    }
+
+    /// Struct id of the element type of array field `field`.
+    fn array_element(&self, sid: u32, field: u32) -> Result<u32, TranslateError> {
+        let tags = &self.builders.structs[sid as usize];
+        let cursor = tag_cursor(tags, field);
+        let element = *tags.get(cursor + 1).ok_or_else(|| {
+            TranslateError::UnsupportedType(format!(
+                "uniform array field {field} of struct {sid} has no element tag"
+            ))
+        })?;
+        if element < ornis_gpu_abi::TYPE_TAG_NESTED {
+            return Err(TranslateError::UnsupportedType(format!(
+                "uniform array field {field} of struct {sid} holds scalars, not structs"
+            )));
+        }
+        Ok(u32::from(element - ornis_gpu_abi::TYPE_TAG_NESTED))
+    }
+
+    /// One constant `AccessIndex` step of an access path.
+    #[inline(always)]
+    fn access_field(
+        &mut self,
+        out: &mut naga::Block,
+        base: naga::Handle<naga::Expression>,
+        index: u32,
+    ) -> naga::Handle<naga::Expression> {
+        self.expr(out, naga::Expression::AccessIndex { base, index })
     }
 
     /// `uniform_field_f32/u32(group, binding, sid, field)`.
@@ -5982,6 +6110,52 @@ fn uniform_ids(args: &[Operand]) -> Result<(u32, u32, u32, u32), TranslateError>
     ))
 }
 
+/// Error for an ordinal past the declared field count.
+fn missing_field(sid: u32, field: u32) -> TranslateError {
+    TranslateError::UnsupportedType(format!(
+        "uniform field {field} of struct {sid} is not declared"
+    ))
+}
+
+/// Byte offset of field `field`'s leading tag, walking the multi-byte ones.
+fn tag_cursor(tags: &[u8], field: u32) -> usize {
+    let mut cursor = 0usize;
+    let mut seen = 0u32;
+    while seen < field {
+        match field_tag_width(tags, cursor) {
+            Some(width) => cursor += width,
+            None => return cursor,
+        }
+        seen += 1;
+    }
+    cursor
+}
+
+/// Tag bytes the field at `cursor` occupies, or `None` when the list ends
+/// inside that field.
+///
+/// Scalars and vectors are one byte, a nested struct is the tag plus its id,
+/// and an array is the tag plus the element's tag (two bytes when the element
+/// is a nested struct) plus the length.
+fn field_tag_width(tags: &[u8], cursor: usize) -> Option<usize> {
+    match *tags.get(cursor)? {
+        ornis_gpu_abi::TYPE_TAG_ARRAY => {
+            let element = *tags.get(cursor + 1)?;
+            let element_width = if element >= ornis_gpu_abi::TYPE_TAG_NESTED {
+                1
+            } else if element == ornis_gpu_abi::TYPE_TAG_STRUCT {
+                2
+            } else {
+                1
+            };
+            tags.get(cursor + 1 + element_width)?;
+            Some(2 + element_width)
+        }
+        ornis_gpu_abi::TYPE_TAG_STRUCT => Some(2),
+        _ => Some(1),
+    }
+}
+
 fn const_u32(op: &Operand) -> Result<u32, TranslateError> {
     match op {
         Operand::U32(value) => Ok(*value),
@@ -6173,6 +6347,35 @@ mod tests {
     /// Every sample-path test does the same four things — parse, pick `fs_main`
     /// out of the module, lower it, finish — so they go through here instead of
     /// repeating the setup.
+    /// `(offsets, span)` of uniform struct `name` in `module`.
+    fn uniform_members(module: &naga::Module, name: &str) -> (Vec<u32>, u32) {
+        let ty = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some(name))
+            .map(|(handle, _)| handle)
+            .expect("uniform struct type");
+        let naga::TypeInner::Struct { members, span } = &module.types[ty].inner else {
+            panic!("expected a struct");
+        };
+        (members.iter().map(|member| member.offset).collect(), *span)
+    }
+
+    /// Lower `cs_main` with the given uniform-struct tag table.
+    fn lower_compute(ir: &str, structs: &[&[u8]]) -> naga::Module {
+        let func = crate::parse::parse_module(ir)
+            .expect("parse")
+            .funcs
+            .into_iter()
+            .find(|func| func.name == ornis_gpu_abi::symbols::CS_MAIN)
+            .expect("entry");
+        let mut lowering = Lowering::new(structs, crate::TextureSampling::SingleSample);
+        lowering
+            .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
+            .expect("lower");
+        lowering.finish()
+    }
+
     fn lower_fragment(ir: &str) -> naga::Module {
         let func = crate::parse::parse_module(ir)
             .expect("parse")
@@ -6426,31 +6629,114 @@ start:
   ret void
 }
 "#;
-        let func = crate::parse::parse_module(ir)
-            .expect("parse")
-            .funcs
-            .into_iter()
-            .find(|func| func.name == ornis_gpu_abi::symbols::CS_MAIN)
-            .expect("entry");
         // `vec3` is 12 bytes but aligns to 16; the scalar after it sits at
         // byte 12 and the struct rounds up to 32 (uniform alignment).
         let structs: &[&[u8]] = &[&[TYPE_TAG_VEC3, TYPE_TAG_F32, TYPE_TAG_U32]];
-        let mut lowering = Lowering::new(structs, crate::TextureSampling::SingleSample);
-        lowering
-            .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
-            .expect("lower");
-        let module = lowering.finish();
-        let ty = module
+        let module = lower_compute(ir, structs);
+        let (offsets, span) = uniform_members(&module, "UniformStruct0");
+        assert_eq!(span, 32);
+        assert_eq!(offsets, [0, 12, 16]);
+    }
+
+    /// Reading `csm.vps[cascade]` — an element of a fixed-size uniform array by
+    /// a runtime index, then one of its `vec4` columns and one lane.
+    #[test]
+    fn a_uniform_array_element_reads_by_a_runtime_index() {
+        use ornis_gpu_abi::symbols::UNIFORM_ARRAY_VEC4_LANE;
+        use ornis_gpu_abi::{TYPE_TAG_ARRAY, TYPE_TAG_NESTED, TYPE_TAG_VEC4};
+        let ir = format!(
+            r#"
+declare float @{name}(i32, i32, i32, i32, i32, i32, i32)
+declare void @storage_write_f32(i32, i32, i32, float)
+define void @cs_main(i32 %id) {{
+start:
+  %v = call float @{name}(i32 0, i32 0, i32 0, i32 0, i32 %id, i32 2, i32 1)
+  call void @storage_write_f32(i32 0, i32 2, i32 %id, float %v)
+  ret void
+}}
+"#,
+            name = UNIFORM_ARRAY_VEC4_LANE
+        );
+        // Struct 0 is `Csm`, struct 1 is one `CsmVp`: four `vec4` columns, the
+        // same bytes a `mat4x4<f32>` occupies.
+        let vp: &[u8] = &[TYPE_TAG_VEC4, TYPE_TAG_VEC4, TYPE_TAG_VEC4, TYPE_TAG_VEC4];
+        let csm: &[u8] = &[TYPE_TAG_ARRAY, TYPE_TAG_NESTED + 1, 4, TYPE_TAG_VEC4];
+        let structs: &[&[u8]] = &[csm, vp];
+        let module = lower_compute(&ir, structs);
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("a dynamic uniform array index validates");
+        let indexed = module.entry_points.iter().any(|entry| {
+            entry
+                .function
+                .expressions
+                .iter()
+                .any(|(_, expr)| matches!(expr, naga::Expression::Access { .. }))
+        });
+        assert!(
+            indexed,
+            "the element read is a dynamic naga::Expression::Access"
+        );
+    }
+
+    /// The layout of `struct Lighting { ambient: vec4, lights: array<Light, 8>,
+    /// count: u32 }` where `Light` is `{ vec4 }` and therefore 16 bytes: the
+    /// array of eight spans 128 bytes, so the scalar after it lands at 144 and
+    /// the struct rounds up to 160.
+    #[test]
+    fn a_uniform_struct_with_an_array_field_places_the_fields_after_it() {
+        use ornis_gpu_abi::{TYPE_TAG_ARRAY, TYPE_TAG_NESTED, TYPE_TAG_U32, TYPE_TAG_VEC4};
+        let ir = r#"
+declare i32 @uniform_field_u32(i32, i32, i32, i32)
+declare void @storage_write_u32(i32, i32, i32, i32)
+define void @cs_main(i32 %id) {
+start:
+  %v = call i32 @uniform_field_u32(i32 0, i32 0, i32 0, i32 2)
+  call void @storage_write_u32(i32 0, i32 2, i32 %id, i32 %v)
+  ret void
+}
+"#;
+        // Struct 0 is `Lighting`, struct 1 is the 16-byte `Light` record.
+        let light: &[u8] = &[TYPE_TAG_VEC4];
+        let lighting: &[u8] = &[
+            TYPE_TAG_VEC4,
+            TYPE_TAG_ARRAY,
+            TYPE_TAG_NESTED + 1,
+            8,
+            TYPE_TAG_U32,
+        ];
+        let structs: &[&[u8]] = &[lighting, light];
+        let module = lower_compute(ir, structs);
+        let (offsets, span) = uniform_members(&module, "UniformStruct0");
+        assert_eq!(span, 160);
+        assert_eq!(offsets, [0, 16, 144]);
+        let array_ty = module
             .types
             .iter()
-            .find(|(_, ty)| ty.name.as_deref() == Some("UniformStruct0"))
-            .map(|(handle, _)| handle)
-            .expect("uniform struct type");
-        let naga::TypeInner::Struct { members, span } = &module.types[ty].inner else {
-            panic!("expected a struct");
+            .filter(|(_, ty)| matches!(ty.inner, naga::TypeInner::Struct { .. }))
+            .find_map(|(_, ty)| match &ty.inner {
+                naga::TypeInner::Struct { members, .. } if members.len() == 3 => {
+                    Some(members[1].ty)
+                }
+                _ => None,
+            })
+            .expect("the array field");
+        let naga::TypeInner::Array { stride, size, .. } = &module.types[array_ty].inner else {
+            panic!("the second field is an array");
         };
-        assert_eq!(*span, 32);
-        let offsets: Vec<u32> = members.iter().map(|member| member.offset).collect();
-        assert_eq!(offsets, [0, 12, 16]);
+        assert_eq!(*stride, 16);
+        assert_eq!(
+            *size,
+            naga::ArraySize::Constant(8.try_into().expect("eight"))
+        );
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("a uniform struct with an array validates");
     }
 }

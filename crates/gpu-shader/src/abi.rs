@@ -50,6 +50,16 @@ unsafe extern "C" {
         field: u32,
         component: u32,
     ) -> f32;
+    #[link_name = "uniform_array_vec4_lane"]
+    fn uniform_array_vec4_lane(
+        group: u32,
+        binding: u32,
+        sid: u32,
+        field: u32,
+        index: u32,
+        element_field: u32,
+        lane: u32,
+    ) -> f32;
     #[link_name = "gpu_exp"]
     fn gpu_exp(value: f32) -> f32;
     #[link_name = "gpu_pow"]
@@ -360,6 +370,31 @@ pub(crate) fn field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32 {
 #[inline(always)]
 pub(crate) fn nested_field_f32(group: u32, binding: u32, sid: u32, field: u32, inner: u32) -> f32 {
     call!(uniform_nested_field_f32(group, binding, sid, field, inner))
+}
+
+/// Lane `lane` of `vec4` field `element_field` of element `index` of the
+/// fixed-size array field `field`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the call from LLVM IR, and the host build never executes it"
+// qual:allow(srp, max_parameters=7) reason: "one parameter per import operand; the element index is the only runtime value, the rest are immediates the translator folds into the access path"
+#[inline(always)]
+pub(crate) fn array_vec4_lane(
+    group: u32,
+    binding: u32,
+    sid: u32,
+    field: u32,
+    index: u32,
+    element_field: u32,
+    lane: u32,
+) -> f32 {
+    call!(uniform_array_vec4_lane(
+        group,
+        binding,
+        sid,
+        field,
+        index,
+        element_field,
+        lane
+    ))
 }
 
 /// `dot((x, y, z, 1), plane)` for the `vec4` field `field`.
