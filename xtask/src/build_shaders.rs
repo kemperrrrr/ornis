@@ -196,8 +196,9 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
                 .map_err(|error| format!("read {}: {error}", artifact.display()))?;
             if current != translated.wgsl {
                 return Err(format!(
-                    "artifact {} is stale; run `cargo xtask build-shaders --artifact {}`",
+                    "artifact {} is stale ({}); run `cargo xtask build-shaders --artifact {}`",
                     artifact.display(),
+                    drift(&current, &translated.wgsl),
                     artifact.display()
                 ));
             }
@@ -334,9 +335,62 @@ fn resolve(root: &Path, path: &Path) -> PathBuf {
     }
 }
 
+/// One-line summary of how a checked-in artifact differs from the fresh one.
+///
+/// A byte-exact gate that only says "stale" leaves the cause to a manual
+/// rebuild-and-diff; the first differing line and the count of differing lines
+/// say whether the drift is a whole module (translation changed) or a handful
+/// of lines (one helper moved).
+fn drift(current: &str, fresh: &str) -> String {
+    let generated: Vec<&str> = fresh.lines().collect();
+    let checked_in: Vec<&str> = current.lines().collect();
+    let differing = generated
+        .iter()
+        .zip(checked_in.iter())
+        .filter(|(left, right)| left != right)
+        .count()
+        + generated.len().abs_diff(checked_in.len());
+    let first = generated
+        .iter()
+        .zip(checked_in.iter())
+        .position(|(left, right)| left != right)
+        .map_or_else(
+            || "checked-in artifact ends early".to_string(),
+            |line| {
+                format!(
+                    "first difference at line {}: generated `{}`, checked in `{}`",
+                    line + 1,
+                    generated[line].trim(),
+                    checked_in[line].trim()
+                )
+            },
+        );
+    format!(
+        "{differing} differing lines of {}; {first}",
+        generated.len()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drift_names_the_first_differing_line() {
+        let report = drift("a\nb\nc\n", "a\nB\nc\n");
+        assert!(report.starts_with("1 differing lines of 3;"), "{report}");
+        assert!(
+            report.contains("first difference at line 2: generated `B`, checked in `b`"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn drift_reports_a_truncated_artifact() {
+        let report = drift("a\n", "a\nb\n");
+        assert!(report.starts_with("1 differing lines of 2;"), "{report}");
+        assert!(report.contains("ends early"), "{report}");
+    }
 
     #[test]
     fn parse_defaults() {
