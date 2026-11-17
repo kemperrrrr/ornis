@@ -859,7 +859,6 @@ mod tests {
     fn stage_globals_declared() {
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let pbr = pbr_generated::wgsl_source();
         let textured = material_textures::wgsl_source_textured();
         // (bundle/entry globals, assemblies containing them). QuadConsts is
         // shared by the DSL vertex entries, so it pins against all the
@@ -872,7 +871,6 @@ mod tests {
                 vec![lighting.clone()],
             ),
             (lighting_generated::LightingMaps::GLOBALS, vec![lighting]),
-            (pbr_generated::PbrContext::GLOBALS, vec![pbr]),
             (
                 material_textures::PbrTexturedContext::GLOBALS,
                 vec![textured.clone()],
@@ -916,7 +914,7 @@ mod tests {
         assert_eq!(gbuffer_generated::VS_ENTRY, "vs_main");
         assert_eq!(gbuffer_generated::VS_INDIRECT_ENTRY, "vs_main_indirect");
         assert_eq!(gbuffer_generated::FS_ENTRY, "fs_main");
-        assert_eq!(pbr_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(pbr_generated::FS_ENTRY, "fs_main");
     }
 
     /// `true` when `field` is a vector swizzle (`xyzw` / `rgba`), not a member.
@@ -1026,11 +1024,6 @@ mod tests {
         }
         let entries = [
             Entry {
-                src: pbr_generated::fs_main::wgsl_source(),
-                input: Some(GbufferFragmentInput::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
                 src: material_textures::fs_main_textured::wgsl_source(),
                 input: Some(GbufferFragmentInput::WGSL_FIELDS),
                 output: None,
@@ -1084,9 +1077,9 @@ mod tests {
                 checked += usize::from(counted);
             }
         }
-        // Twelve entries, 151+ resolved uses today; fewer means the
+        // Eleven entries, 91+ resolved uses today; fewer means the
         // extraction broke or coverage was dropped — update deliberately.
-        assert!(checked >= 151, "expected field uses, found {checked}");
+        assert!(checked >= 91, "expected field uses, found {checked}");
     }
 
     /// Every call in translated entries resolves: built-ins via the
@@ -1159,10 +1152,8 @@ mod tests {
         // (entry source, its assembled shader)
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let pbr = pbr_generated::wgsl_source();
         let textured = material_textures::wgsl_source_textured();
         let pairs: &[(&str, &str)] = &[
-            (pbr_generated::fs_main::wgsl_source(), pbr.as_str()),
             (
                 material_textures::fs_main_textured::wgsl_source(),
                 textured.as_str(),
@@ -1194,9 +1185,10 @@ mod tests {
                 checked += 1;
             }
         }
-        // Twelve entries make 85+ calls today; near-zero hits would mean
-        // the extraction broke and the test passes vacuously.
-        assert!(checked >= 85, "expected calls, found {checked}");
+        // Three DSL entries remain (the forward pass, the lit and the textured
+        // stages); near-zero hits would mean the extraction broke and the test
+        // passes vacuously.
+        assert!(checked >= 60, "expected calls, found {checked}");
     }
 
     /// Every table-backed global an entry reads is visible at that
@@ -1214,11 +1206,6 @@ mod tests {
                 QuadConsts::GLOBALS,
                 &composite_generated::COMPOSITE_RESOURCES,
                 ShaderStages::VERTEX,
-            ),
-            (
-                pbr_generated::PbrContext::GLOBALS,
-                &pbr_generated::PBR_RESOURCES,
-                ShaderStages::FRAGMENT,
             ),
             (
                 material_textures::PbrTexturedContext::GLOBALS,

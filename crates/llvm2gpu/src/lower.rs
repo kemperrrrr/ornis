@@ -43,6 +43,10 @@ const SCALAR_WIDTH: u8 = core::mem::size_of::<f32>() as u8;
 const UNIFORM_LANE_BYTES: u32 = core::mem::size_of::<[f32; 4]>() as u32;
 /// Largest uniform binding accepted by the translator.
 const MAX_UNIFORM_BYTES: u32 = u16::MAX as u32 + 1;
+/// Operands of `uniform_nested_array_vec4_lane`.
+const NESTED_ARRAY_VEC4_ARGS: usize = 8;
+/// Operands of `uniform_nested_vec4_lane`.
+const NESTED_VEC4_ARGS: usize = 6;
 /// Lane counts of the GPU vector types.
 const VEC2_LANES: u32 = ornis_gpu_abi::VEC2_SIZE / WORD_BYTES;
 const VEC3_LANES: u32 = ornis_gpu_abi::VEC3_SIZE / WORD_BYTES;
@@ -1805,11 +1809,7 @@ impl Builders {
         let tags = self
             .structs
             .get(sid as usize)
-            .ok_or_else(|| {
-                TranslateError::UnsupportedType(format!(
-                    "uniform struct id {sid} has no ornis_gpu.types entry"
-                ))
-            })?
+            .ok_or_else(|| missing_struct(sid))?
             .clone();
         if tags.is_empty() {
             return Err(TranslateError::UnsupportedType(
@@ -4366,6 +4366,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains("texture_height_2d") {
             return self.texture_size(out, args, 1, TextureKind::Depth);
         }
+        if callee.contains(ornis_gpu_abi::symbols::UNIFORM_NESTED_VEC4_LANE) {
+            return self.uniform_nested_vec4_lane(out, args);
+        }
+        if callee.contains(ornis_gpu_abi::symbols::UNIFORM_NESTED_ARRAY_VEC4_LANE) {
+            return self.uniform_nested_array_vec4_lane(out, args);
+        }
         if callee.contains(ornis_gpu_abi::symbols::UNIFORM_ARRAY_VEC4_LANE) {
             return self.uniform_array_vec4_lane(out, args);
         }
@@ -5293,11 +5299,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     }
 
     fn field_tag(&self, sid: u32, field: u32) -> Result<u8, TranslateError> {
-        let tags = self.builders.structs.get(sid as usize).ok_or_else(|| {
-            TranslateError::UnsupportedType(format!(
-                "uniform field {field} of struct {sid} is not declared"
-            ))
-        })?;
+        let tags = self
+            .builders
+            .structs
+            .get(sid as usize)
+            .ok_or_else(|| missing_struct(sid))?;
         // Fields are not one tag each (a nested struct adds its id, an array
         // adds the element tag and the length), so the ordinal has to be
         // walked rather than used as an index.
@@ -5356,10 +5362,130 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         Ok(self.expr(out, naga::Expression::Load { pointer: lane_ptr }))
     }
 
+    /// `uniform_nested_vec4_lane(g, b, sid, field, inner, component)`.
+    fn uniform_nested_vec4_lane(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        // qual:allow(dry, fragment) reason: "the argument decode of a nested import; a shared helper would hide which field is the struct and which the vector"
+        let (sid, field, inner, component) = self.nested_ids(args)?;
+        let global =
+            self.builders
+                .uniform_struct_global(const_u32(&args[0])?, const_u32(&args[1])?, sid)?;
+        let base = self.expr(out, naga::Expression::GlobalVariable(global));
+        let ptr = self.access_nested(out, base, field, inner, component);
+        Ok(self.expr(out, naga::Expression::Load { pointer: ptr }))
+    }
+
+    /// `(sid, field, inner, component)` of a nested `vec4` lane read, after
+    /// checking that `field` is a struct and `inner` one of its `vec4` fields.
+    fn nested_ids(&self, args: &[Operand]) -> Result<(u32, u32, u32, u32), TranslateError> {
+        if args.len() != NESTED_VEC4_ARGS {
+            return Err(TranslateError::Unsupported);
+        }
+        let (group, binding, sid, field) = uniform_ids(args)?;
+        let _ = (group, binding);
+        // qual:allow(dry, fragment) reason: "the argument decode of an indexed import; a shared helper would hide which operand is the runtime index"
+        let inner = const_u32(&args[4])?;
+        let component = const_u32(&args[5])?;
+        let struct_id = self.nested_struct_id(sid, field)?;
+        if self.field_tag(struct_id, inner)? != ornis_gpu_abi::TYPE_TAG_VEC4 {
+            return Err(TranslateError::UnsupportedType(format!(
+                "field {inner} of struct {struct_id} is not a vec4"
+            )));
+        }
+        Ok((sid, field, inner, component))
+    }
+
+    /// Two constant `AccessIndex` steps into `field`'s struct, then the lane.
+    #[inline(always)]
+    fn access_nested(
+        &mut self,
+        out: &mut naga::Block,
+        base: naga::Handle<naga::Expression>,
+        field: u32,
+        inner: u32,
+        component: u32,
+    ) -> naga::Handle<naga::Expression> {
+        let outer = self.access_field(out, base, field);
+        let vector = self.access_field(out, outer, inner);
+        self.access_field(out, vector, component)
+    }
+
+    /// `uniform_nested_array_vec4_lane(g, b, sid, outer, field, index,
+    /// element_field, lane)`.
+    ///
+    /// `outer.inner[index].element_field[lane]`: one more `AccessIndex` than
+    /// the flat form, because the array lives in a nested uniform struct.
+    // qual:allow(iosp) reason: "the declared tags decide each step of the access path, then one load returns the lane"
+    fn uniform_nested_array_vec4_lane(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if args.len() != NESTED_ARRAY_VEC4_ARGS {
+            return Err(TranslateError::Unsupported);
+        }
+        let (group, binding, sid, outer) = uniform_ids(args)?;
+        let field = const_u32(&args[4])?;
+        // qual:allow(dry, fragment) reason: "the argument decode of an indexed import; a shared helper would hide which operand is the runtime index"
+        let index = self.operand(out, &args[5])?;
+        let element_field = const_u32(&args[6])?;
+        let lane = const_u32(&args[7])?;
+        // qual:allow(dry, fragment) reason: "the access path of this arity, stated once; a helper taking the depth as a parameter would hide which step is the dynamic index"
+        let inner = self.nested_struct_id(sid, outer)?;
+        if self.field_tag(inner, field)? != ornis_gpu_abi::TYPE_TAG_ARRAY {
+            return Err(TranslateError::UnsupportedType(format!(
+                "nested field {field} of struct {sid} is not an array"
+            )));
+        }
+        let element = self.array_element(inner, field)?;
+        if self.field_tag(element, element_field)? != ornis_gpu_abi::TYPE_TAG_VEC4 {
+            return Err(TranslateError::UnsupportedType(format!(
+                "field {element_field} of the nested array element is not a vec4"
+            )));
+        }
+        let global = self.builders.uniform_struct_global(group, binding, sid)?;
+        let base = self.expr(out, naga::Expression::GlobalVariable(global));
+        let outer_ptr = self.access_field(out, base, outer);
+        let array = self.access_field(out, outer_ptr, field);
+        let element_ptr = self.expr(out, naga::Expression::Access { base: array, index });
+        let field_ptr = self.access_field(out, element_ptr, element_field);
+        let lane_ptr = self.access_field(out, field_ptr, lane);
+        Ok(self.expr(out, naga::Expression::Load { pointer: lane_ptr }))
+    }
+
+    /// Struct id of the nested-struct field `field`.
+    fn nested_struct_id(&self, sid: u32, field: u32) -> Result<u32, TranslateError> {
+        let tags = self
+            .builders
+            .structs
+            .get(sid as usize)
+            .ok_or_else(|| missing_struct(sid))?;
+        let cursor = tag_cursor(tags, field);
+        let tag = *tags.get(cursor).ok_or_else(|| missing_field(sid, field))?;
+        if tag < ornis_gpu_abi::TYPE_TAG_NESTED {
+            return Err(TranslateError::UnsupportedType(format!(
+                "uniform field {field} of struct {sid} is not a struct"
+            )));
+        }
+        Ok(u32::from(tag - ornis_gpu_abi::TYPE_TAG_NESTED))
+    }
+
     /// Struct id of the element type of array field `field`.
     fn array_element(&self, sid: u32, field: u32) -> Result<u32, TranslateError> {
-        let tags = &self.builders.structs[sid as usize];
+        let tags = self
+            .builders
+            .structs
+            .get(sid as usize)
+            .ok_or_else(|| missing_struct(sid))?;
         let cursor = tag_cursor(tags, field);
+        if tags.get(cursor) != Some(&ornis_gpu_abi::TYPE_TAG_ARRAY) {
+            return Err(TranslateError::UnsupportedType(format!(
+                "uniform field {field} of struct {sid} is not an array"
+            )));
+        }
         let element = *tags.get(cursor + 1).ok_or_else(|| {
             TranslateError::UnsupportedType(format!(
                 "uniform array field {field} of struct {sid} has no element tag"
@@ -6048,6 +6174,8 @@ fn unary_math(callee: &str) -> Option<naga::MathFunction> {
         (ornis_gpu_abi::symbols::GPU_EXP, naga::MathFunction::Exp),
         (ornis_gpu_abi::symbols::GPU_LN, naga::MathFunction::Log),
         (ornis_gpu_abi::symbols::GPU_TAN, naga::MathFunction::Tan),
+        (ornis_gpu_abi::symbols::GPU_FLOOR, naga::MathFunction::Floor),
+        (ornis_gpu_abi::symbols::GPU_CEIL, naga::MathFunction::Ceil),
         ("sign", naga::MathFunction::Sign),
         ("abs", naga::MathFunction::Abs),
     ];
@@ -6107,6 +6235,13 @@ fn uniform_ids(args: &[Operand]) -> Result<(u32, u32, u32, u32), TranslateError>
         const_u32(&args[1])?,
         const_u32(&args[2])?,
         const_u32(&args[3])?,
+    ))
+}
+
+/// Error for a struct id the metadata never declared.
+fn missing_struct(sid: u32) -> TranslateError {
+    TranslateError::UnsupportedType(format!(
+        "uniform struct id {sid} has no ornis_gpu.types entry"
     ))
 }
 
@@ -6401,6 +6536,8 @@ mod tests {
         // otherwise every `exp2` in a shader becomes an `exp`.
         assert_eq!(unary_math("gpu_exp2"), Some(naga::MathFunction::Exp2));
         assert_eq!(unary_math("gpu_log2"), Some(naga::MathFunction::Log2));
+        assert_eq!(unary_math("gpu_floor"), Some(naga::MathFunction::Floor));
+        assert_eq!(unary_math("gpu_ceil"), Some(naga::MathFunction::Ceil));
         assert_eq!(unary_math("llvm.sqrt.f32"), Some(naga::MathFunction::Sqrt));
     }
 
@@ -6680,6 +6817,47 @@ start:
             indexed,
             "the element read is a dynamic naga::Expression::Access"
         );
+    }
+
+    /// The same read one struct deeper: `Lighting.csm.vps[cascade].cols[lane]`.
+    #[test]
+    fn a_nested_uniform_array_element_reads_through_two_fields() {
+        use ornis_gpu_abi::symbols::UNIFORM_NESTED_ARRAY_VEC4_LANE;
+        use ornis_gpu_abi::{TYPE_TAG_ARRAY, TYPE_TAG_F32, TYPE_TAG_NESTED, TYPE_TAG_VEC4};
+        let ir = format!(
+            r#"
+declare float @{name}(i32, i32, i32, i32, i32, i32, i32, i32)
+declare void @storage_write_f32(i32, i32, i32, float)
+define void @cs_main(i32 %id) {{
+start:
+  %v = call float @{name}(i32 0, i32 0, i32 1, i32 1, i32 0, i32 %id, i32 3, i32 0)
+  call void @storage_write_f32(i32 0, i32 2, i32 %id, float %v)
+  ret void
+}}
+"#,
+            name = UNIFORM_NESTED_ARRAY_VEC4_LANE
+        );
+        // Struct 0 is `Csm` (`vps: array<CsmVp, 4>` then a `vec4`), struct 1 is
+        // `Lighting` (`0: vec4`, `1: Csm`, `2: f32`), struct 2 is `CsmVp`.
+        let csm: &[u8] = &[TYPE_TAG_ARRAY, TYPE_TAG_NESTED + 2, 4, TYPE_TAG_VEC4];
+        let lighting: &[u8] = &[TYPE_TAG_VEC4, TYPE_TAG_NESTED, TYPE_TAG_F32];
+        let vp: &[u8] = &[TYPE_TAG_VEC4, TYPE_TAG_VEC4, TYPE_TAG_VEC4, TYPE_TAG_VEC4];
+        let structs: &[&[u8]] = &[csm, lighting, vp];
+        let module = lower_compute(&ir, structs);
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("a nested dynamic uniform array index validates");
+        let indexed = module.entry_points.iter().any(|entry| {
+            entry
+                .function
+                .expressions
+                .iter()
+                .any(|(_, expr)| matches!(expr, naga::Expression::Access { .. }))
+        });
+        assert!(indexed, "the element read keeps its runtime index");
     }
 
     /// The layout of `struct Lighting { ambient: vec4, lights: array<Light, 8>,

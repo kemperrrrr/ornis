@@ -461,7 +461,7 @@ impl Renderer3D {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &fs_module,
-                entry_point: Some(shaders::pbr_generated::fs_main::entry_point()),
+                entry_point: Some(shaders::pbr_generated::FS_ENTRY),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_config.format,
                     blend: Some(wgpu::BlendState::REPLACE),

@@ -60,6 +60,27 @@ unsafe extern "C" {
         element_field: u32,
         lane: u32,
     ) -> f32;
+    #[link_name = "uniform_nested_vec4_lane"]
+    fn uniform_nested_vec4_lane(
+        group: u32,
+        binding: u32,
+        sid: u32,
+        field: u32,
+        inner: u32,
+        component: u32,
+    ) -> f32;
+    #[link_name = "uniform_nested_array_vec4_lane"]
+    #[allow(clippy::too_many_arguments)]
+    fn uniform_nested_array_vec4_lane(
+        group: u32,
+        binding: u32,
+        sid: u32,
+        outer: u32,
+        field: u32,
+        index: u32,
+        element_field: u32,
+        lane: u32,
+    ) -> f32;
     #[link_name = "gpu_exp"]
     fn gpu_exp(value: f32) -> f32;
     #[link_name = "gpu_pow"]
@@ -100,6 +121,10 @@ unsafe extern "C" {
     fn gpu_mix(start: f32, end: f32, factor: f32) -> f32;
     #[link_name = "gpu_fract"]
     fn gpu_fract(value: f32) -> f32;
+    #[link_name = "gpu_floor"]
+    fn gpu_floor(value: f32) -> f32;
+    #[link_name = "gpu_ceil"]
+    fn gpu_ceil(value: f32) -> f32;
     #[link_name = "gpu_cos"]
     fn gpu_cos(value: f32) -> f32;
     #[link_name = "gpu_sin"]
@@ -397,6 +422,47 @@ pub(crate) fn array_vec4_lane(
     ))
 }
 
+/// Lane `component` of `vec4` field `inner` of the struct in field `field`.
+#[inline(always)]
+pub(crate) fn nested_vec4_lane(
+    group: u32,
+    binding: u32,
+    sid: u32,
+    field: u32,
+    inner: u32,
+    component: u32,
+) -> f32 {
+    call!(uniform_nested_vec4_lane(
+        group, binding, sid, field, inner, component
+    ))
+}
+
+/// Lane `lane` of a `vec4` field of an element of an array nested one struct
+/// deep: `outer.inner[index].element_field[lane]`.
+// qual:allow(srp, max_parameters=8) reason: "one parameter per import operand; only the element index is a value"
+#[inline(always)]
+pub(crate) fn nested_array_vec4_lane(
+    group: u32,
+    binding: u32,
+    sid: u32,
+    outer: u32,
+    field: u32,
+    index: u32,
+    element_field: u32,
+    lane: u32,
+) -> f32 {
+    call!(uniform_nested_array_vec4_lane(
+        group,
+        binding,
+        sid,
+        outer,
+        field,
+        index,
+        element_field,
+        lane
+    ))
+}
+
 /// `dot((x, y, z, 1), plane)` for the `vec4` field `field`.
 // qual:allow(srp, max_parameters=7) reason: "one operand per import argument: group, binding, struct id, field, and the three point lanes; bundling them into a struct would allocate in the shader"
 #[inline(always)]
@@ -473,6 +539,18 @@ pub(crate) fn mix(start: f32, end: f32, factor: f32) -> f32 {
 #[inline(always)]
 pub(crate) fn fract(value: f32) -> f32 {
     call!(gpu_fract(value))
+}
+
+/// Largest integer not greater than `value`.
+#[inline(always)]
+pub(crate) fn floor(value: f32) -> f32 {
+    call!(gpu_floor(value))
+}
+
+/// Smallest integer not less than `value`.
+#[inline(always)]
+pub(crate) fn ceil(value: f32) -> f32 {
+    call!(gpu_ceil(value))
 }
 
 /// Cosine.

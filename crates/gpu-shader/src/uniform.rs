@@ -30,6 +30,13 @@ pub trait GpuStruct {
     const ID: u32;
     /// Field tags, in declaration order (`1` `f32`, `2` `u32`, `6` `vec4`).
     const FIELD_TAGS: &'static [u8];
+    /// Tag lists of the structs `FIELD_TAGS` reaches, as `(id, tags)` pairs.
+    ///
+    /// A nested field names its struct by id, and the translator needs that
+    /// struct's own fields to lay the whole block out. The table lists every
+    /// struct reachable from `FIELD_TAGS`, transitively: `Lighting` names
+    /// `Light`, `Csm` and `CsmVp`, because `Csm` names `CsmVp`.
+    const NESTED: &'static [(u32, &'static [u8])] = &[];
 }
 
 /// Typed view of a uniform binding `(group, binding)` of `T`.
@@ -104,6 +111,29 @@ impl<T: GpuStruct, const G: u32, const B: u32> Uniform<T, G, B> {
         }
     }
 
+    /// Lane `COMPONENT` of `vec4` field `INNER` of the struct in field `FIELD`.
+    ///
+    /// One struct deeper than [`vec4_lane`](Self::vec4_lane), for a vector
+    /// nested in another uniform struct.
+    // qual:allow(test_quality, untested) reason: "shader method; the translated cascade read covers it, and calling it on the host diverges"
+    #[inline(always)]
+    pub fn nested_vec4_lane<const FIELD: usize, const INNER: usize, const COMPONENT: usize>(
+        &self,
+    ) -> f32 {
+        const { Self::require_tag::<FIELD>(TYPE_TAG_STRUCT) };
+        const { assert!(COMPONENT < 4, "a vec4 has four lanes") };
+        let _ = self;
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::nested_vec4_lane(G, B, T::ID, FIELD as u32, INNER as u32, COMPONENT as u32)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = INNER;
+            crate::host_unavailable()
+        }
+    }
+
     /// Lane `COMPONENT` of `vec4` field `ELEMENT_FIELD` of element `index` of
     /// the fixed-size array field `FIELD`.
     ///
@@ -129,6 +159,46 @@ impl<T: GpuStruct, const G: u32, const B: u32> Uniform<T, G, B> {
                 B,
                 T::ID,
                 FIELD as u32,
+                index,
+                ELEMENT_FIELD as u32,
+                COMPONENT as u32,
+            )
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = index;
+            crate::host_unavailable()
+        }
+    }
+
+    /// Lane `COMPONENT` of `vec4` field `ELEMENT_FIELD` of element `index` of
+    /// the array field `INNER_FIELD` of the struct in field `OUTER`.
+    ///
+    /// One struct deeper than [`array_vec4_lane`](Self::array_vec4_lane): a
+    /// uniform block that nests its array (`Lighting.csm.vps[cascade]`) still
+    /// names both field indices as constants, which is what WGSL requires.
+    // qual:allow(test_quality, untested) reason: "shader method; the translated cascade read covers it, and calling it on the host diverges"
+    #[inline(always)]
+    pub fn nested_array_vec4_lane<
+        const OUTER: usize,
+        const INNER_FIELD: usize,
+        const ELEMENT_FIELD: usize,
+        const COMPONENT: usize,
+    >(
+        &self,
+        index: u32,
+    ) -> f32 {
+        const { Self::require_tag::<OUTER>(TYPE_TAG_STRUCT) };
+        const { assert!(COMPONENT < 4, "a vec4 has four lanes") };
+        let _ = self;
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::nested_array_vec4_lane(
+                G,
+                B,
+                T::ID,
+                OUTER as u32,
+                INNER_FIELD as u32,
                 index,
                 ELEMENT_FIELD as u32,
                 COMPONENT as u32,

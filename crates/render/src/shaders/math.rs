@@ -1009,7 +1009,6 @@ mod tests {
             super::super::f32_lit(REC709_LUMA_R)
         );
         let passes = [
-            ("pbr", crate::shaders::pbr_generated::wgsl_source(), true),
             (
                 "lighting",
                 crate::shaders::lighting_generated::wgsl_source(),
@@ -1055,9 +1054,15 @@ mod tests {
             "bloom missing the soft knee"
         );
         assert_valid_wgsl("bloom", &bloom);
+        // The translated forward pass carries its selectors as literals: the
+        // two shadow families are one comparison sample each.
         let pbr = crate::shaders::pbr_generated::wgsl_source();
-        assert!(pbr.contains("const POINT_OR_SPOT_KIND_EDGE: f32"));
-        assert!(pbr.contains("const SHADOW_CUBE_NEAR: f32"));
+        assert_eq!(
+            pbr.matches("textureSampleCompareLevel(").count(),
+            4,
+            "two spot/CSM compares and two cube compares, all at an explicit level"
+        );
+        assert_valid_wgsl("pbr", &pbr);
         // Fog replaces the composite on the swapchain and runs the same ACES
         // kernel: the translated pass carries the coefficients as literals.
         let fog = crate::shaders::fog_generated::wgsl_source();
