@@ -47,6 +47,12 @@ const STRINGS = {
     noticeTitle: 'Viewport unavailable',
     noticeFallback:
         'WebGPU is unavailable in this environment — open the editor in Chrome via cargo xtask editor',
+    // The wasm-pack bundle is a build artifact: without it the module import
+    // itself fails. The fix is a command, so the notice names it.
+    pkgMissingTitle: 'Viewport bundle is missing',
+    pkgMissingBody:
+        'editor-v2/pkg has not been built — run cargo xtask editor, then reload the editor',
+    pkgMissingDetail: 'import ./pkg/ornis_wasm.js failed',
     // Shown over the viewport in native mode: the toolbar's 3D/2D, gizmo and
     // snap controls drive the WASM replica, which does not exist when the shell
     // renders. Saying so beats a button that silently does nothing.
@@ -87,19 +93,20 @@ let editorMode = 'edit';
 let snap = { enabled: false, translate: 0.5, rotateDeg: 15, scale: 0.25 };
 
 // ── written fallback ──────────────────────────────────────────────────────
-// The written fallback: no WebGPU in this webview, so there is nothing to
-// render here. The title is ours; the body wording comes from the shell when it
-// has one (it knows the environment), with an English fallback for a browser.
-function showNotice(reason) {
+// The written fallback: there is nothing for the page to render here, so it
+// explains why instead of leaving a dead red canvas.
+//
+// `notice` carries the wording; `showNotice` takes the environment case (where
+// the shell owns the body text because it knows the host) and
+// `showBuildNotice` takes a build problem, whose fix is a command the page can
+// name itself.
+function showNotice(notice) {
     if (!noticeEl) return;
-    if (noticeTitleEl) noticeTitleEl.textContent = STRINGS.noticeTitle;
-    if (noticeBodyEl) {
-        noticeBodyEl.textContent =
-            (shell && shell.webgpuNotice) || STRINGS.noticeFallback;
-    }
+    if (noticeTitleEl) noticeTitleEl.textContent = notice.title;
+    if (noticeBodyEl) noticeBodyEl.textContent = notice.body;
     if (noticeDetailEl) {
-        noticeDetailEl.textContent = reason ? String(reason) : '';
-        noticeDetailEl.hidden = !reason;
+        noticeDetailEl.textContent = notice.detail ? String(notice.detail) : '';
+        noticeDetailEl.hidden = !notice.detail;
     }
     noticeEl.hidden = false;
     if (canvasEl) {
@@ -116,6 +123,24 @@ function showNotice(reason) {
 function hideNotice() {
     if (noticeEl) noticeEl.hidden = true;
     if (canvasEl) canvasEl.hidden = false;
+}
+
+// The environment cannot do WebGPU (no `navigator.gpu`, or an adapter that
+// resolved null). The shell knows the host, so its wording wins when present;
+// the page's English fallback covers a plain browser tab.
+function environmentNotice(detail) {
+    return {
+        title: STRINGS.noticeTitle,
+        body: (shell && shell.webgpuNotice) || STRINGS.noticeFallback,
+        detail: detail,
+    };
+}
+
+// A build problem rather than a renderer defect: `editor-v2/pkg` has not been
+// produced by `cargo xtask editor`. Kept separate so the message names the
+// command instead of telling the user their GPU is at fault.
+function buildNotice(detail) {
+    return { title: STRINGS.pkgMissingTitle, body: STRINGS.pkgMissingBody, detail: detail };
 }
 
 // ── WebGPU capability ─────────────────────────────────────────────────────
@@ -606,7 +631,7 @@ async function boot() {
     }
     if (webgpuMissing()) {
         // No point fetching the module: `start_renderer` can only fail.
-        showNotice('navigator.gpu missing');
+        showNotice(environmentNotice('navigator.gpu missing'));
         console.warn('[ornis-editor] WebGPU unavailable in this webview, viewport disabled');
         return;
     }
@@ -614,12 +639,22 @@ async function boot() {
     // *before* downloading the module. Checking it here (rather than guessing
     // from a later error message) is what keeps real renderer failures loud.
     if (!(await hasWebgpuAdapter())) {
-        showNotice('no WebGPU adapter');
+        showNotice(environmentNotice('no WebGPU adapter'));
         console.warn('[ornis-editor] no WebGPU adapter, viewport disabled');
         return;
     }
     console.log('[ornis-editor] loading WASM…');
-    wasm = await import('./pkg/ornis_wasm.js');
+    // A missing `editor-v2/pkg` (the wasm-pack output, built by
+    // `cargo xtask editor`) fails the import itself, before any GPU work. That
+    // is a *build* problem with a concrete fix, so it is reported as such
+    // instead of as a renderer failure.
+    try {
+        wasm = await import('./pkg/ornis_wasm.js');
+    } catch (err) {
+        console.warn('[ornis-editor] wasm package missing:', err);
+        showNotice(buildNotice(STRINGS.pkgMissingDetail));
+        return;
+    }
     await wasm.default();
     console.log('[ornis-editor] WASM loaded, starting renderer…');
     await wasm.start_renderer('canvas');
@@ -647,7 +682,7 @@ boot().catch((err) => {
     // renderer defect and keeps the loud red canvas, even if the message
     // mentions WebGPU or an adapter.
     if (!nativeViewport && (webgpuMissing() || isAdapterNotFound(message))) {
-        showNotice(message || 'no WebGPU adapter');
+        showNotice(environmentNotice(message || 'no WebGPU adapter'));
         return;
     }
     if (canvasEl) {

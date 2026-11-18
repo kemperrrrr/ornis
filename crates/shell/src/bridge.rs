@@ -339,7 +339,10 @@ pub fn init_script_for(capabilities: ShellCapabilities) -> String {
             "var p=pending.get(msg.request_id);if(!p)return;pending.delete(msg.request_id);",
             "if(msg.accepted){{p.resolve(msg);}}else{{p.reject(new Error(msg.error||\"rejected\"));}}return;}}",
             "if(msg.kind===\"events\"&&Array.isArray(msg.events)){{",
-            "for(var i=0;i<msg.events.length;i++){{for(var j=0;j<subs.length;j++){{subs[j](msg.events[i]);}}}}",
+            // Three closing braces: the two `for` loops and the `if` above.
+            // In a `format!` string each literal brace is doubled, so three
+            // braces are six.
+            "for(var i=0;i<msg.events.length;i++){{for(var j=0;j<subs.length;j++){{subs[j](msg.events[i]);}}}}}}",
             "}});",
             "}})();",
         ),
@@ -616,5 +619,66 @@ mod tests {
         assert!(script.contains("nativeViewport:true"));
         assert!(script.contains("window.ornisSend"), "IPC stays available");
         assert!(script.contains("ornis-ipc"));
+    }
+
+    /// Runs `node --check` on `script`; `true` when it parses.
+    ///
+    /// `None` when `node` is not on `PATH` — the caller then skips, matching how
+    /// the `editor-viewport` stage treats a missing Node. A skip here must not
+    /// pass silently in CI: `ORNIS_REQUIRE_NODE=1` (set where the tool is known
+    /// to exist) turns a missing binary into a failure.
+    fn node_parses(script: &str) -> Option<bool> {
+        use std::process::{Command, Stdio};
+        let mut child = match Command::new("node")
+            .args(["--check", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => {
+                assert!(
+                    !matches!(std::env::var("ORNIS_REQUIRE_NODE").as_deref(), Ok("1")),
+                    "ORNIS_REQUIRE_NODE is set but node is not on PATH"
+                );
+                return None;
+            }
+        };
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().expect("piped stdin");
+            stdin.write_all(script.as_bytes()).expect("write script");
+        }
+        let out = child.wait_with_output().expect("node --check runs");
+        Some(out.status.success())
+    }
+
+    /// The generated init script must be **syntactically valid JavaScript**, not
+    /// merely contain the right substrings.
+    ///
+    /// A substring test cannot catch a brace miscount: `format!` doubles every
+    /// literal brace, and one missing `}` turned the whole script into a
+    /// `SyntaxError` that WKWebView drops silently — so `window.ornisShell` was
+    /// never defined and the page fell back to the browser path. That regression
+    /// shipped because nothing parsed the output; this does.
+    #[test]
+    fn init_script_is_valid_javascript() {
+        for capabilities in [
+            ShellCapabilities::WEBVIEW_ONLY,
+            ShellCapabilities::NATIVE_VIEWPORT,
+        ] {
+            let script = init_script_for(capabilities);
+            match node_parses(&script) {
+                Some(true) => {}
+                Some(false) => panic!(
+                    "init_script_for({capabilities:?}) is not valid JavaScript — the webview \
+                     drops it silently and the page loses window.ornisShell:\n{script}"
+                ),
+                None => {
+                    eprintln!("skip: no node on PATH, init script syntax not checked");
+                }
+            }
+        }
     }
 }

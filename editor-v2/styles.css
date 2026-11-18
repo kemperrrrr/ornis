@@ -191,8 +191,20 @@ button { font: inherit; color: inherit; }
 .viewport-canvas[hidden] { display: none; }
 /* Native viewport (PLAN.md §j, вариант 1): the shell draws the scene into a
    layer UNDER the webview, so the page's own viewport box must let it show
-   through. Only in embedded mode — Chrome keeps the opaque canvas. */
+   through. Only in embedded mode — Chrome keeps the opaque canvas.
+
+   The whole *ancestor chain* must be transparent, not just `.viewport`: an
+   opaque `background` anywhere above it (body, the panel, the grid container)
+   composites over the layer and the scene disappears behind flat `#232326`.
+   The panel therefore keeps its frame (border, radius) but drops its fill, and
+   `body`/`.layout` drop theirs; every other panel keeps its own background, so
+   they still look solid. `html` needs no rule: a `background` on `body`
+   propagates to the root canvas, so clearing it there is enough. */
+body.ornis-native-viewport,
+body.ornis-native-viewport .layout,
+body.ornis-native-viewport .viewport-panel,
 body.ornis-native-viewport .viewport { background: transparent; }
+body.ornis-native-viewport .panel.viewport-panel { border-color: transparent; }
 body.ornis-native-viewport .viewport-canvas { visibility: hidden; }
 /* The toolbar's 3D/2D, gizmo and snap controls drive the WASM replica, which
    does not exist when the shell renders. They stay visible (the frame is the

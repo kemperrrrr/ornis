@@ -185,13 +185,20 @@ function control(selectors) {
 // Boots a fresh copy of `viewport.js` next to the stub WASM package with the
 // DOM/window stubs installed as globals (the module reads them as globals,
 // exactly like in a browser).
-async function bootPage({ shell, gpu = true, adapter = true, stub = WASM_STUB }) {
+async function bootPage({
+  shell,
+  gpu = true,
+  adapter = true,
+  stub = WASM_STUB,
+  includePkg = true,
+}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ornis-viewport-'));
-  fs.mkdirSync(path.join(dir, 'pkg'));
-  fs.writeFileSync(
-    path.join(dir, 'pkg', 'ornis_wasm.js'),
-    stub,
-  );
+  if (includePkg) {
+    // `includePkg: false` models a checkout where `cargo xtask editor` was
+    // never run: the import itself fails, before any GPU work.
+    fs.mkdirSync(path.join(dir, 'pkg'));
+    fs.writeFileSync(path.join(dir, 'pkg', 'ornis_wasm.js'), stub);
+  }
   copyCounter += 1;
   const entry = path.join(dir, `viewport-${copyCounter}.mjs`);
   fs.writeFileSync(entry, SOURCE);
@@ -894,6 +901,67 @@ export default async () => {
     } finally {
       page.restore();
     }
+  }
+});
+
+test('native mode makes the whole ancestor chain transparent', async () => {
+  // The second M1 blocker: `background: transparent` on `.viewport` alone left
+  // the native layer hidden behind the panel's `#232326` fill. The scene is
+  // only visible if every ancestor between the root and the viewport box is
+  // transparent, so the rule must name them — this reads the shipped stylesheet
+  // rather than trusting a comment.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'styles.css'), 'utf8');
+  for (const ancestor of ['', ' .layout', ' .viewport-panel', ' .viewport']) {
+    const selector = `body.ornis-native-viewport${ancestor}`;
+    const rule = new RegExp(
+      `(^|,)\\s*${selector.replace(/\./g, '\\.')}\\s*[,{]`,
+      'm',
+    );
+    assert.ok(
+      rule.test(css),
+      `styles.css must make \`${selector}\` transparent in native mode`,
+    );
+  }
+  // And it must be the native-mode branch only: Chrome keeps its opaque UI.
+  assert.ok(
+    !/(^|\n)\.viewport-panel\s*\{\s*background:\s*transparent/.test(css),
+    'the transparent panel must be scoped to native mode, not applied globally',
+  );
+});
+
+test('a missing editor-v2/pkg shows a build notice, not a red canvas', async () => {
+  // The manual M1 run hit this: without `cargo xtask editor`, the module import
+  // itself throws ("Importing a module script failed"). That is a build step
+  // the user can run, so it must be named — a red canvas would blame the
+  // renderer, and on macOS 26 the WebGPU pre-flight passes, so nothing else
+  // would explain it.
+  const page = await bootPage({
+    shell: { nativeViewport: false, webgpuNotice: 'environment notice' },
+    gpu: true,
+    includePkg: false,
+  });
+  try {
+    assert.strictEqual(
+      page.dom['viewport-notice'].hidden,
+      false,
+      'the build notice must be visible',
+    );
+    assert.strictEqual(
+      page.dom['viewport-notice-title'].textContent,
+      'Viewport bundle is missing',
+    );
+    assert.match(
+      page.dom['viewport-notice-body'].textContent,
+      /cargo xtask editor/,
+      'the body must name the command that builds the bundle',
+    );
+    assert.ok(
+      !page.dom.canvas.classes.has('failed'),
+      'a missing build artifact is not a renderer defect',
+    );
+    assert.strictEqual(page.dom.canvas.hidden, true, 'the canvas steps aside');
+  } finally {
+    page.restore();
   }
 });
 
