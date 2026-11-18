@@ -80,9 +80,8 @@ const DEFECT_MESSAGES = [
 
 // Messages that *contain* `ADAPTER_NOT_FOUND` without being it. They are the
 // reason the page compares with `===`: an `includes()` check would classify all
-// three as an environment limit. Defined once and used from both tests below
-// (the combined defects sweep and the dedicated equality test) so the two
-// cannot drift apart.
+// three as an environment limit. Used only by the dedicated equality test
+// below; the combined defects sweep iterates `DEFECT_MESSAGES` alone.
 const ADAPTER_LOOKALIKES = [
   'device: adapter not found in cache',
   'adapter not found: retrying after device loss',
@@ -309,33 +308,6 @@ async function bootPage({ shell, gpu = true, adapter = true, stub = WASM_STUB })
     error: (message) => consoleMessages.push(String(message)),
   };
 
-  await import(entry);
-  // The page fetches the wasm module with a real dynamic `import()`, so a fixed
-  // number of microtask ticks is not a wait for boot: on a cold tmpdir the chain
-  // is still running when the ticks run out, and its tail then lands in the
-  // *next* test's globals. Wait for a terminal boot state instead — the mirrors
-  // applied (healthy), the written notice (environment limit), the red canvas
-  // (defect) or the first bounds post (native shell) — and fail loudly if none
-  // arrives, so a stuck boot cannot masquerade as an empty call log.
-  const bootSettled = () =>
-    (globalThis.__ornisCalls || []).some((call) => call[0] === 'set_editor_mode')
-    || dom['viewport-notice'].hidden === false
-    || dom.canvas.classes.has('failed')
-    || posted.length > 0;
-  for (let i = 0; i < 500 && !bootSettled(); i += 1) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.ok(bootSettled(), 'the page must reach a terminal boot state');
-  // Let the tail after the marker land (ready subscribers run after the mirrors).
-  let previous = -1;
-  for (let i = 0; i < 50; i += 1) {
-    const size = (globalThis.__ornisCalls || []).length;
-    if (size === previous) break;
-    previous = size;
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-
-  const calls = (globalThis.__ornisCalls || []).slice();
   const restore = () => {
     globalThis.window = saved.window;
     globalThis.document = saved.document;
@@ -351,6 +323,40 @@ async function bootPage({ shell, gpu = true, adapter = true, stub = WASM_STUB })
     else globalThis.__ornisCalls = saved.calls;
     fs.rmSync(dir, { recursive: true, force: true });
   };
+  // A failed boot assert (or a throwing import) must not leak the stubbed
+  // globals and the tmpdir into the next test: restore before rethrowing.
+  try {
+    await import(entry);
+    // The page fetches the wasm module with a real dynamic `import()`, so a fixed
+    // number of microtask ticks is not a wait for boot: on a cold tmpdir the chain
+    // is still running when the ticks run out, and its tail then lands in the
+    // *next* test's globals. Wait for a terminal boot state instead — the mirrors
+    // applied (healthy), the written notice (environment limit), the red canvas
+    // (defect) or the first bounds post (native shell) — and fail loudly if none
+    // arrives, so a stuck boot cannot masquerade as an empty call log.
+    const bootSettled = () =>
+      (globalThis.__ornisCalls || []).some((call) => call[0] === 'set_editor_mode')
+      || dom['viewport-notice'].hidden === false
+      || dom.canvas.classes.has('failed')
+      || posted.length > 0;
+    for (let i = 0; i < 500 && !bootSettled(); i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.ok(bootSettled(), 'the page must reach a terminal boot state');
+    // Let the tail after the marker land (ready subscribers run after the mirrors).
+    let previous = -1;
+    for (let i = 0; i < 50; i += 1) {
+      const size = (globalThis.__ornisCalls || []).length;
+      if (size === previous) break;
+      previous = size;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  } catch (error) {
+    restore();
+    throw error;
+  }
+
+  const calls = (globalThis.__ornisCalls || []).slice();
   return {
     dom,
     posted,
