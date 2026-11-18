@@ -333,6 +333,8 @@ enum IoImport {
     InstanceIndex,
     /// Lane of a vertex `@location` input.
     VertexInput,
+    /// Scalar `u32` vertex `@location` input.
+    VertexInputU32,
     /// Clip-space `@builtin(position)` of a vertex entry.
     VertexPosition,
     /// Two-lane vertex `@location` output.
@@ -363,10 +365,14 @@ enum IoImport {
 
 /// Order matters only where one import name is a prefix of another, which is
 /// why the located fragment output precedes the `@location(0)` one.
-const IO_IMPORTS: [(&str, IoImport); 16] = [
+const IO_IMPORTS: [(&str, IoImport); 17] = [
     (
         ornis_gpu_abi::symbols::VERTEX_INPUT_LANE,
         IoImport::VertexInput,
+    ),
+    (
+        ornis_gpu_abi::symbols::VERTEX_INPUT_U32,
+        IoImport::VertexInputU32,
     ),
     (
         ornis_gpu_abi::symbols::VERTEX_STORE_F32X2,
@@ -455,6 +461,9 @@ fn scan_io(func: &LlvmFunc, stage: Stage) -> Result<StageIo, TranslateError> {
                 (Stage::Vertex, IoImport::VertexInput) => {
                     let (location, lanes) = input_lanes(args)?;
                     record_io(&mut io.inputs, location, IoValue::floats(lanes))?;
+                }
+                (Stage::Vertex, IoImport::VertexInputU32) => {
+                    record_io(&mut io.inputs, location_of(args)?, IoValue::U32)?;
                 }
                 (Stage::Vertex, IoImport::VertexPosition) => io.position_out = true,
                 (Stage::Vertex, IoImport::VertexOutputU32) => {
@@ -4351,7 +4360,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains("fragment_uv_lane") {
             return self.input_lane(out, 0, args.first().ok_or(TranslateError::Unsupported)?);
         }
-        if callee.contains(ornis_gpu_abi::symbols::FRAGMENT_INPUT_U32) {
+        if callee.contains(ornis_gpu_abi::symbols::FRAGMENT_INPUT_U32)
+            || callee.contains(ornis_gpu_abi::symbols::VERTEX_INPUT_U32)
+        {
             return self.input_word(const_u32(args.first().ok_or(TranslateError::Unsupported)?)?);
         }
         if callee.contains("vertex_input_lane") || callee.contains("fragment_input_lane") {

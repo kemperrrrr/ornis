@@ -2248,6 +2248,42 @@ fn run_compute_with_input(
 }
 
 #[test]
+fn a_vertex_entry_reads_a_flat_u32_input() {
+    // Joint indices arrive as a `vec4<u32>` varying: an integer interface
+    // value is flat, so each location carries one word and the entry declares
+    // it from the `u32` import rather than from a float lane count.
+    let ir = r#"
+declare i32 @vertex_input_u32(i32)
+declare void @vertex_store_u32(i32, i32)
+declare void @vertex_position(float, float, float, float)
+define dso_local void @vs_main() {
+start:
+  %joint = call i32 @vertex_input_u32(i32 6)
+  call void @vertex_store_u32(i32 2, i32 %joint)
+  call void @vertex_position(float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("flat u32 vertex input");
+    // Both sides of the interface declare the word flat: an integer varying
+    // is never interpolated, in or out.
+    assert!(
+        translated
+            .wgsl
+            .contains("fn vs_main(@location(6) @interpolate(flat) in6_: u32)"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated
+            .wgsl
+            .contains("@location(2) @interpolate(flat) o2_: u32"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
 fn a_fragment_entry_discards_an_invocation() {
     // Alpha-tested materials cut pixels out below the cutoff: the fragment
     // body branches to a `discard` and the store after the merge then never

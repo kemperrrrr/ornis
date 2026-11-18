@@ -130,6 +130,26 @@ pub fn vertex_input_lane<const LOC: u32, const LANES: u32, const LANE: u32>() ->
     }
 }
 
+/// The `u32` vertex input at `LOC`.
+///
+/// An integer varying is declared `@interpolate(flat)`, so it carries a whole
+/// word instead of a lane: joint indices are a `vec4<u32>`, and the translator
+/// declares it from this call rather than from a lane count.
+// qual:allow(test_quality, untested) reason: "shader builtin; the translator test lowers the same call from LLVM IR"
+#[inline(always)]
+#[must_use]
+pub fn vertex_input_u32<const LOC: u32>() -> u32 {
+    const { assert!(LOC < 16, "a vertex input is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_input_u32(LOC)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::host_unavailable()
+    }
+}
+
 /// Clip-space `@builtin(position)` of the vertex output.
 #[inline(always)]
 pub fn vertex_position(x: f32, y: f32, z: f32, w: f32) {
