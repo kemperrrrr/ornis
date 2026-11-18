@@ -302,6 +302,13 @@ pub const INSTANCE_INDEX: &str = "instance_index";
 /// must agree on it, and each side is compiled separately.
 pub const VERTEX_INPUT_LANE: &str = "vertex_input_lane";
 
+/// Vertex entry. `(i32) -> i32`: the `u32` `@location` input's single lane.
+///
+/// Joint indices and weights ride as `vec4<u32>`/`vec4<f32>` varying; the
+/// integer one is declared flat, so it needs the word form rather than a float
+/// lane.
+pub const VERTEX_INPUT_U32: &str = "vertex_input_u32";
+
 /// `(param f32 f32 f32 f32)` — clip-space `@builtin(position)` of a vertex
 /// entry.
 pub const VERTEX_POSITION: &str = "vertex_position";
