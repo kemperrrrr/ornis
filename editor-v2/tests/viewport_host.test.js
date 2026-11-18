@@ -310,9 +310,30 @@ async function bootPage({ shell, gpu = true, adapter = true, stub = WASM_STUB })
   };
 
   await import(entry);
-  // Let the boot promise chain (the stub import included) settle.
-  for (let i = 0; i < 50; i += 1) await Promise.resolve();
-  await new Promise((resolve) => setImmediate(resolve));
+  // The page fetches the wasm module with a real dynamic `import()`, so a fixed
+  // number of microtask ticks is not a wait for boot: on a cold tmpdir the chain
+  // is still running when the ticks run out, and its tail then lands in the
+  // *next* test's globals. Wait for a terminal boot state instead — the mirrors
+  // applied (healthy), the written notice (environment limit), the red canvas
+  // (defect) or the first bounds post (native shell) — and fail loudly if none
+  // arrives, so a stuck boot cannot masquerade as an empty call log.
+  const bootSettled = () =>
+    (globalThis.__ornisCalls || []).some((call) => call[0] === 'set_editor_mode')
+    || dom['viewport-notice'].hidden === false
+    || dom.canvas.classes.has('failed')
+    || posted.length > 0;
+  for (let i = 0; i < 500 && !bootSettled(); i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(bootSettled(), 'the page must reach a terminal boot state');
+  // Let the tail after the marker land (ready subscribers run after the mirrors).
+  let previous = -1;
+  for (let i = 0; i < 50; i += 1) {
+    const size = (globalThis.__ornisCalls || []).length;
+    if (size === previous) break;
+    previous = size;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 
   const calls = (globalThis.__ornisCalls || []).slice();
   const restore = () => {
