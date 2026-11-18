@@ -278,25 +278,30 @@ fn lighting_bytes() -> Vec<u8> {
         put(&mut bytes, 0, lane, value);
     }
     let lights = 16;
-    // Light 0: directional, white, unit intensity, no range cutoff.
+    // Light 0: directional, unit intensity, no range cutoff. The channels
+    // differ so a lobe scaled by one channel instead of the colour vector
+    // shows up in the pixels: with a white light that mistake is invisible.
+    const DIRECTIONAL_COLOR: [f32; 3] = [0.25, 0.6, 1.0];
     put(&mut bytes, lights, 0, 0.0);
     put(&mut bytes, lights + 4, 0, -0.4);
     put(&mut bytes, lights + 4, 1, 0.5);
     put(&mut bytes, lights + 4, 2, -1.0);
-    for lane in 0..3 {
-        put(&mut bytes, lights + 12, lane, 1.0);
+    for (lane, value) in DIRECTIONAL_COLOR.into_iter().enumerate() {
+        put(&mut bytes, lights + 12, lane, value);
     }
     put(&mut bytes, lights + 12, 3, 1.0);
     put(&mut bytes, lights + 16, 0, 1.0);
     put(&mut bytes, lights + 16, 3, -1.0);
-    // Light 1: point at -1 on x, range 5, a layer in `params.w`.
+    // Light 1: point at -1 on x, range 5, a layer in `params.w`, and a
+    // different colour from the directional so neither can stand in for it.
+    const POINT_COLOR: [f32; 3] = [1.0, 0.45, 0.15];
     let point = lights + LIGHT_BYTES;
     put(&mut bytes, point, 0, 1.0);
     put(&mut bytes, point + 8, 0, -1.0);
     put(&mut bytes, point + 8, 1, 0.0);
     put(&mut bytes, point + 8, 2, 1.0);
-    for lane in 0..3 {
-        put(&mut bytes, point + 12, lane, 1.0);
+    for (lane, value) in POINT_COLOR.into_iter().enumerate() {
+        put(&mut bytes, point + 12, lane, value);
     }
     put(&mut bytes, point + 12, 3, 2.0);
     put(&mut bytes, point + 16, 0, 5.0);
