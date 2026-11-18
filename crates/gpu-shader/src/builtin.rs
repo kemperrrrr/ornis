@@ -51,6 +51,22 @@ pub fn fragment_uv<const LANE: u32>() -> f32 {
     crate::host_unavailable()
 }
 
+/// Drop the current fragment invocation.
+///
+/// The invocation stops before the rest of the entry runs, so a fragment
+/// shader can cut out alpha-tested pixels. Derivatives taken before this call
+/// stay well defined: after a *non-uniform* discard they would not be.
+// qual:allow(test_quality, untested) reason: "shader builtin; the translator test lowers the discard from LLVM IR, and the host build has no invocation to drop"
+#[inline(always)]
+pub fn fragment_discard() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_discard();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host_unavailable()
+}
+
 /// Write the fragment's `@location(0)` color.
 #[inline(always)]
 pub fn fragment_store(r: f32, g: f32, b: f32, a: f32) {

@@ -1333,5 +1333,15 @@ mod openpbr_math_parity {
             close(reference.x, ported.0, "octahedral_encode.x");
             close(reference.y, ported.1, "octahedral_encode.y");
         }
+        // The g-buffer decode is the inverse the lighting pass runs, so it
+        // has to agree on the *packed* value the encoder produces, including
+        // the folded lower hemisphere.
+        for (u, v) in [(0.0, 0.0), (0.35, -0.62), (-0.9, 0.12), (0.5, 0.5)] {
+            close3(
+                crate::shaders::octahedral_decode_rust(glam::Vec2::new(u, v)),
+                port::octahedral_decode((u, v)),
+                "octahedral_decode",
+            );
+        }
     }
 }
