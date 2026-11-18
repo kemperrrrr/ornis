@@ -19,16 +19,16 @@ var<storage, read_write> atomic_storage_0_2_: array<atomic<u32>>;
 fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @builtin(local_invocation_index) local_invocation_index: u32) {
     var _0_u002e_sroa_u002e_0_u002e_0_u002e_i: u32;
     var safe_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_: u32;
-    var lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_: u32;
+    var lid_u002e_sroa_u002e_0_u002e_0_: u32;
+    var lid_u002e_sroa_u002e_0_u002e_0_1: u32;
 
     if (local_invocation_index < 256u) {
-        lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_ = local_invocation_index;
+        lid_u002e_sroa_u002e_0_u002e_0_ = local_invocation_index;
         loop {
-            let _e7 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_;
+            let _e7 = lid_u002e_sroa_u002e_0_u002e_0_;
             atomicStore((&workgroup_atomics[_e7]), 0u);
             if (_e7 < 192u) {
-                lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_ = (_e7 + 64u);
+                lid_u002e_sroa_u002e_0_u002e_0_ = (_e7 + 64u);
                 continue;
             } else {
                 break;
@@ -77,19 +77,19 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @buil
     }
     workgroupBarrier();
     if (local_invocation_index < 256u) {
-        lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_ = local_invocation_index;
+        lid_u002e_sroa_u002e_0_u002e_0_1 = local_invocation_index;
     } else {
         return;
     }
     loop {
-        let _e153 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_;
+        let _e153 = lid_u002e_sroa_u002e_0_u002e_0_1;
         let _e156 = atomicLoad((&workgroup_atomics[_e153]));
         if (_e156 == 0u) {
         } else {
             let _e161 = atomicAdd((&atomic_storage_0_2_[_e153]), _e156);
         }
         if (_e153 < 192u) {
-            lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_ = (_e153 + 64u);
+            lid_u002e_sroa_u002e_0_u002e_0_1 = (_e153 + 64u);
             continue;
         } else {
             break;

@@ -119,10 +119,10 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
     var coat_darken_u002e_sroa_u002e_0_u002e_0_: f32;
     var coat_darken_u002e_sroa_u002e_5_u002e_0_: f32;
     var coat_darken_u002e_sroa_u002e_7_u002e_0_: f32;
-    var k_u002e_sroa_u002e_0_u002e_0_u002e_i1522_: u32;
-    var lo_u002e_sroa_u002e_9_u002e_01521_: f32;
-    var lo_u002e_sroa_u002e_6_u002e_01520_: f32;
-    var lo_u002e_sroa_u002e_0_u002e_01519_: f32;
+    var k_u002e_sroa_u002e_0_u002e_0_: u32;
+    var lo_u002e_sroa_u002e_9_: f32;
+    var lo_u002e_sroa_u002e_6_: f32;
+    var lo_u002e_sroa_u002e_0_: f32;
     var _2_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
     var lo_u002e_sroa_u002e_0_u002e_1_: f32;
     var lo_u002e_sroa_u002e_6_u002e_1_: f32;
@@ -317,15 +317,15 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
         let _e787 = bitcast<f32>(_e177);
         let _e788 = bitcast<f32>(_e182);
         let _e818 = bitcast<f32>(_e237);
-        k_u002e_sroa_u002e_0_u002e_0_u002e_i1522_ = 0u;
-        lo_u002e_sroa_u002e_9_u002e_01521_ = 0f;
-        lo_u002e_sroa_u002e_6_u002e_01520_ = 0f;
-        lo_u002e_sroa_u002e_0_u002e_01519_ = 0f;
+        k_u002e_sroa_u002e_0_u002e_0_ = 0u;
+        lo_u002e_sroa_u002e_9_ = 0f;
+        lo_u002e_sroa_u002e_6_ = 0f;
+        lo_u002e_sroa_u002e_0_ = 0f;
         loop {
-            let _e843 = k_u002e_sroa_u002e_0_u002e_0_u002e_i1522_;
-            let _e845 = lo_u002e_sroa_u002e_9_u002e_01521_;
-            let _e847 = lo_u002e_sroa_u002e_6_u002e_01520_;
-            let _e849 = lo_u002e_sroa_u002e_0_u002e_01519_;
+            let _e843 = k_u002e_sroa_u002e_0_u002e_0_;
+            let _e845 = lo_u002e_sroa_u002e_9_;
+            let _e847 = lo_u002e_sroa_u002e_6_;
+            let _e849 = lo_u002e_sroa_u002e_0_;
             if (_e843 < _e567) {
                 _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i = _e843;
             } else {
@@ -682,10 +682,10 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
                 lo_u002e_sroa_u002e_9_u002e_0_u002e_lcssa = _e2326;
                 break;
             } else {
-                k_u002e_sroa_u002e_0_u002e_0_u002e_i1522_ = _e2329;
-                lo_u002e_sroa_u002e_9_u002e_01521_ = _e2326;
-                lo_u002e_sroa_u002e_6_u002e_01520_ = _e2323;
-                lo_u002e_sroa_u002e_0_u002e_01519_ = _e2320;
+                k_u002e_sroa_u002e_0_u002e_0_ = _e2329;
+                lo_u002e_sroa_u002e_9_ = _e2326;
+                lo_u002e_sroa_u002e_6_ = _e2323;
+                lo_u002e_sroa_u002e_0_ = _e2320;
                 continue;
             }
         }
