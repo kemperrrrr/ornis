@@ -34,12 +34,12 @@ var<uniform> uniform_struct_0_3_: UniformStruct1_;
 fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     var fragment_out: vec4<f32>;
     var cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i419_: f32;
-    var visibility_u002e_sroa_u002e_0_u002e_0578_: f32;
-    var slice_u002e_sroa_u002e_0_u002e_0577_: u32;
-    var horizon_pos_u002e_sroa_u002e_0_u002e_0576_: f32;
-    var horizon_neg_u002e_sroa_u002e_0_u002e_0575_: f32;
-    var step_u002e_sroa_u002e_0_u002e_0574_: u32;
+    var cos_h_u002e_sroa_u002e_0_u002e_0_: f32;
+    var visibility_u002e_sroa_u002e_0_: f32;
+    var slice_u002e_sroa_u002e_0_: u32;
+    var horizon_pos_u002e_sroa_u002e_0_: f32;
+    var horizon_neg_u002e_sroa_u002e_0_: f32;
+    var step_u002e_sroa_u002e_0_: u32;
     var out_u002e_8_: f32;
     var out_u002e_10_: f32;
     var out_u002e_11_: f32;
@@ -173,11 +173,11 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
         let _e616 = uniform_struct_0_2_.f2_.w;
         let _e622 = uniform_struct_0_2_.f3_.w;
         let _e625 = max((_e622 + (((_e553 * _e605) + (_e555 * _e610)) + (_e557 * _e616))), 0.000001f);
-        visibility_u002e_sroa_u002e_0_u002e_0578_ = 0f;
-        slice_u002e_sroa_u002e_0_u002e_0577_ = 0u;
+        visibility_u002e_sroa_u002e_0_ = 0f;
+        slice_u002e_sroa_u002e_0_ = 0u;
         loop {
-            let _e676 = visibility_u002e_sroa_u002e_0_u002e_0578_;
-            let _e678 = slice_u002e_sroa_u002e_0_u002e_0577_;
+            let _e676 = visibility_u002e_sroa_u002e_0_;
+            let _e678 = slice_u002e_sroa_u002e_0_;
             let _e682 = ((fract((fract(dot(vec2<f32>(f32(_e15), f32(_e17)), vec2<f32>(0.06711056f, 0.00583715f))) * 52.982918f)) * 3.1415927f) + (f32(_e678) * 1.5707964f));
             let _e683 = cos(_e682);
             let _e684 = sin(_e682);
@@ -193,13 +193,13 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
             let _e751 = (sign(dot(vec3<f32>(normalize(vec3<f32>(_e687, _e690, _e693)).x, normalize(vec3<f32>(_e687, _e690, _e693)).y, normalize(vec3<f32>(_e687, _e690, _e693)).z), vec3<f32>(_e730, _e732, _e734))) * acos(clamp((dot(vec3<f32>(_e730, _e732, _e734), vec3<f32>(_e231, _e232, _e233)) / _e738), 0f, 1f)));
             let _e754 = cos((_e751 + 1.5707964f));
             let _e757 = cos((_e751 + -1.5707964f));
-            horizon_pos_u002e_sroa_u002e_0_u002e_0576_ = _e754;
-            horizon_neg_u002e_sroa_u002e_0_u002e_0575_ = _e757;
-            step_u002e_sroa_u002e_0_u002e_0574_ = 1u;
+            horizon_pos_u002e_sroa_u002e_0_ = _e754;
+            horizon_neg_u002e_sroa_u002e_0_ = _e757;
+            step_u002e_sroa_u002e_0_ = 1u;
             loop {
-                let _e763 = horizon_pos_u002e_sroa_u002e_0_u002e_0576_;
-                let _e765 = horizon_neg_u002e_sroa_u002e_0_u002e_0575_;
-                let _e767 = step_u002e_sroa_u002e_0_u002e_0574_;
+                let _e763 = horizon_pos_u002e_sroa_u002e_0_;
+                let _e765 = horizon_neg_u002e_sroa_u002e_0_;
+                let _e767 = step_u002e_sroa_u002e_0_;
                 let _e771 = ((max(length(vec3<f32>((((((_e578 + (((_e561 * _e553) + (_e555 * _e566)) + (_e557 * _e572))) / _e625) * 0.5f) + 0.5f) - uv.x), ((0.5f - (((_e600 + (((_e553 * _e583) + (_e555 * _e588)) + (_e557 * _e594))) / _e625) * 0.5f)) - uv.y), 0f)), _e235) * f32(_e767)) * 0.25f);
                 let _e772 = (_e683 * _e771);
                 let _e773 = (_e684 * _e771);
@@ -239,17 +239,17 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                         let _e946 = (((_e919 + (((_e804 * _e902) + (_e808 * _e907)) + (_e798 * _e913))) / (_e941 + (((_e804 * _e924) + (_e808 * _e929)) + (_e798 * _e935)))) - _e211);
                         let _e948 = length(vec3<f32>(_e944, _e945, _e946));
                         if ((_e948 > 0.000001f) & (_e948 < _e548)) {
-                            cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i419_ = mix(_e754, dot(vec3<f32>((_e944 / _e948), (_e945 / _e948), (_e946 / _e948)), vec3<f32>(_e231, _e232, _e233)), clamp((1f - (_e948 / max(_e548, 0.000001f))), 0f, 1f));
+                            cos_h_u002e_sroa_u002e_0_u002e_0_ = mix(_e754, dot(vec3<f32>((_e944 / _e948), (_e945 / _e948), (_e946 / _e948)), vec3<f32>(_e231, _e232, _e233)), clamp((1f - (_e948 / max(_e548, 0.000001f))), 0f, 1f));
                         } else {
-                            cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i419_ = -1f;
+                            cos_h_u002e_sroa_u002e_0_u002e_0_ = -1f;
                         }
                     } else {
-                        cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i419_ = -1f;
+                        cos_h_u002e_sroa_u002e_0_u002e_0_ = -1f;
                     }
                 } else {
-                    cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i419_ = -1f;
+                    cos_h_u002e_sroa_u002e_0_u002e_0_ = -1f;
                 }
-                let _e974 = cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i419_;
+                let _e974 = cos_h_u002e_sroa_u002e_0_u002e_0_;
                 let _e975 = max(_e763, _e974);
                 out_u002e_10_ = _e975;
                 let _e977 = (uv.x - _e772);
@@ -305,9 +305,9 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                 if (_e1181 == 5u) {
                     break;
                 } else {
-                    horizon_pos_u002e_sroa_u002e_0_u002e_0576_ = _e975;
-                    horizon_neg_u002e_sroa_u002e_0_u002e_0575_ = _e1178;
-                    step_u002e_sroa_u002e_0_u002e_0574_ = _e1181;
+                    horizon_pos_u002e_sroa_u002e_0_ = _e975;
+                    horizon_neg_u002e_sroa_u002e_0_ = _e1178;
+                    step_u002e_sroa_u002e_0_ = _e1181;
                     continue;
                 }
             }
@@ -318,8 +318,8 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
             let _e1225 = (_e676 + (_e738 * ((((cos(_e751) - cos((_e1202 - _e751))) + (_e1202 * sin(_e751))) * 0.25f) + (((cos(_e751) - cos((_e1213 - _e751))) + (_e1213 * sin(_e751))) * 0.25f))));
             out_u002e_8_ = _e1225;
             if (_e678 == 0u) {
-                visibility_u002e_sroa_u002e_0_u002e_0578_ = _e1225;
-                slice_u002e_sroa_u002e_0_u002e_0577_ = (_e678 + 1u);
+                visibility_u002e_sroa_u002e_0_ = _e1225;
+                slice_u002e_sroa_u002e_0_ = (_e678 + 1u);
                 continue;
             } else {
                 break;

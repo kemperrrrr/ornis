@@ -34,8 +34,8 @@ var<uniform> uniform_struct_0_3_: UniformStruct1_;
 fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     var fragment_out: vec4<f32>;
     var _0_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var occluded_u002e_sroa_u002e_0_u002e_0146_: f32;
-    var index_u002e_sroa_u002e_0_u002e_0145_: u32;
+    var occluded_u002e_sroa_u002e_0_: f32;
+    var index_u002e_sroa_u002e_0_: u32;
     var out_u002e_4_: f32;
 
     let _e5 = textureDimensions(tex_0_0_);
@@ -86,11 +86,11 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
         let _e273 = uniform_struct_0_3_.f0_;
         let _e276 = uniform_struct_0_3_.f1_;
         let _e279 = uniform_struct_0_3_.f2_;
-        occluded_u002e_sroa_u002e_0_u002e_0146_ = 0f;
-        index_u002e_sroa_u002e_0_u002e_0145_ = 0u;
+        occluded_u002e_sroa_u002e_0_ = 0f;
+        index_u002e_sroa_u002e_0_ = 0u;
         loop {
-            let _e291 = occluded_u002e_sroa_u002e_0_u002e_0146_;
-            let _e293 = index_u002e_sroa_u002e_0_u002e_0145_;
+            let _e291 = occluded_u002e_sroa_u002e_0_;
+            let _e293 = index_u002e_sroa_u002e_0_;
             let _e296 = (f32(_e293) + 0.5f);
             let _e298 = (_e296 * 0.125f);
             let _e300 = (_e296 * 2.399963f);
@@ -185,8 +185,8 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
             if (_e661 == 8u) {
                 break;
             } else {
-                occluded_u002e_sroa_u002e_0_u002e_0146_ = _e658;
-                index_u002e_sroa_u002e_0_u002e_0145_ = _e661;
+                occluded_u002e_sroa_u002e_0_ = _e658;
+                index_u002e_sroa_u002e_0_ = _e661;
                 continue;
             }
         }

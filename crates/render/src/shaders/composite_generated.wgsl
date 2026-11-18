@@ -16,26 +16,26 @@ var sampler_0_1_: sampler;
 fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     var fragment_out: vec4<f32>;
     var _0_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var _0_u002e_sroa_u002e_0_u002e_0_u002e_i11_: f32;
-    var _0_u002e_sroa_u002e_0_u002e_0_u002e_i18_: f32;
+    var _0_u002e_sroa_u002e_0_u002e_0_: f32;
+    var _0_u002e_sroa_u002e_0_u002e_0_1: f32;
 
     let _e8 = textureSampleLevel(tex_0_2_, sampler_0_3_, vec2<f32>(uv.x, uv.y), 0f);
     let _e14 = textureSampleLevel(tex_0_0_, sampler_0_1_, vec2<f32>(uv.x, uv.y), 0f);
     let _e20 = textureSampleLevel(tex_0_2_, sampler_0_3_, vec2<f32>(uv.x, uv.y), 0f);
     if !((_e20.x <= 0.04045f)) {
-        _0_u002e_sroa_u002e_0_u002e_0_u002e_i18_ = pow(((_e20.x + 0.055f) / 1.055f), 2.4f);
+        _0_u002e_sroa_u002e_0_u002e_0_1 = pow(((_e20.x + 0.055f) / 1.055f), 2.4f);
     } else {
-        _0_u002e_sroa_u002e_0_u002e_0_u002e_i18_ = (_e20.x / 12.92f);
+        _0_u002e_sroa_u002e_0_u002e_0_1 = (_e20.x / 12.92f);
     }
-    let _e36 = _0_u002e_sroa_u002e_0_u002e_0_u002e_i18_;
+    let _e36 = _0_u002e_sroa_u002e_0_u002e_0_1;
     let _e42 = textureSampleLevel(tex_0_0_, sampler_0_1_, vec2<f32>(uv.x, uv.y), 0f);
     let _e48 = textureSampleLevel(tex_0_2_, sampler_0_3_, vec2<f32>(uv.x, uv.y), 0f);
     if !((_e48.y <= 0.04045f)) {
-        _0_u002e_sroa_u002e_0_u002e_0_u002e_i11_ = pow(((_e48.y + 0.055f) / 1.055f), 2.4f);
+        _0_u002e_sroa_u002e_0_u002e_0_ = pow(((_e48.y + 0.055f) / 1.055f), 2.4f);
     } else {
-        _0_u002e_sroa_u002e_0_u002e_0_u002e_i11_ = (_e48.y / 12.92f);
+        _0_u002e_sroa_u002e_0_u002e_0_ = (_e48.y / 12.92f);
     }
-    let _e64 = _0_u002e_sroa_u002e_0_u002e_0_u002e_i11_;
+    let _e64 = _0_u002e_sroa_u002e_0_u002e_0_;
     let _e70 = textureSampleLevel(tex_0_0_, sampler_0_1_, vec2<f32>(uv.x, uv.y), 0f);
     let _e76 = textureSampleLevel(tex_0_2_, sampler_0_3_, vec2<f32>(uv.x, uv.y), 0f);
     if !((_e76.z <= 0.04045f)) {

@@ -196,10 +196,10 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
                 .map_err(|error| format!("read {}: {error}", artifact.display()))?;
             if current != translated.wgsl {
                 return Err(format!(
-                    "artifact {} is stale ({}); run `cargo xtask build-shaders --artifact {}`",
+                    "artifact {} is stale ({}); run `{}`",
                     artifact.display(),
                     drift(&current, &translated.wgsl),
-                    artifact.display()
+                    rebuild_command(args, &artifact)
                 ));
             }
             eprintln!("xtask build-shaders: {} is current", artifact.display());
@@ -333,6 +333,30 @@ fn resolve(root: &Path, path: &Path) -> PathBuf {
     } else {
         root.join(path)
     }
+}
+
+/// The command that regenerates one artifact.
+///
+/// Every artifact needs its own package and entry, and the stages that declare
+/// multisampled textures need those flags too: a suggestion that prints only
+/// `--artifact` would regenerate the *default* shader into that file.
+fn rebuild_command(args: &Args, artifact: &Path) -> String {
+    let mut command = format!(
+        "cargo xtask build-shaders --package {} --entry {}",
+        args.package,
+        args.entry.as_deref().unwrap_or("all")
+    );
+    if args.multisampled {
+        command.push_str(" --multisampled");
+    }
+    if !args.multisampled_textures.is_empty() {
+        command.push_str(" --multisampled-textures");
+        for (group, binding) in &args.multisampled_textures {
+            command.push_str(&format!(" {group}:{binding}"));
+        }
+    }
+    command.push_str(&format!(" --artifact {}", artifact.display()));
+    command
 }
 
 /// One-line summary of how a checked-in artifact differs from the fresh one.

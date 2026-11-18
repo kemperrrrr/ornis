@@ -43,6 +43,11 @@ const SCALAR_WIDTH: u8 = core::mem::size_of::<f32>() as u8;
 const UNIFORM_LANE_BYTES: u32 = core::mem::size_of::<[f32; 4]>() as u32;
 /// Largest uniform binding accepted by the translator.
 const MAX_UNIFORM_BYTES: u32 = u16::MAX as u32 + 1;
+/// Shortest bare digit run that can only be an LLVM SSA-index counter.
+///
+/// An `i`-prefixed run is a counter at any length (`i11`), but a *bare* short
+/// run is an aggregate member index (`lo.sroa.9.0`) and has to stay.
+const UNSTABLE_COUNTER_DIGITS: usize = 4;
 /// Operands of `uniform_nested_array_vec4_lane`.
 const NESTED_ARRAY_VEC4_ARGS: usize = 8;
 /// Operands of `uniform_nested_vec4_lane`.
@@ -681,6 +686,34 @@ struct StageArguments {
     position: Option<naga::Handle<naga::Expression>>,
     /// `@location` arguments by location.
     inputs: BTreeMap<u32, naga::Handle<naga::Expression>>,
+}
+
+/// Name of the WGSL local that holds an LLVM value.
+///
+/// LLVM disambiguates inlined copies by appending an SSA-index counter to the
+/// value's name — `%lo.sroa.9.01521` here, `%k.sroa.0.0.i1522` elsewhere — and
+/// that counter numbers every value of the *function*, so it moves when the
+/// compiler inlines differently. The same shader built by a different rustc
+/// build then carries `…01519`, and the checked-in WGSL stops matching the
+/// machine that generated it. The counter says nothing about the shader, so the
+/// last name segment is dropped when it is four or more digits (optionally
+/// prefixed by `i`); real member indices (`lo.sroa.9.0`) are one or two digits
+/// and stay. Two values that still collide are renamed by the WGSL writer in
+/// declaration order, which follows the IR.
+fn local_label(name: &str) -> &str {
+    let Some((base, tail)) = name.rsplit_once('.') else {
+        return name;
+    };
+    let (digits, inlined) = match tail.strip_prefix('i') {
+        Some(digits) => (digits, true),
+        None => (tail, false),
+    };
+    let counter = if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        false
+    } else {
+        inlined || digits.len() >= UNSTABLE_COUNTER_DIGITS
+    };
+    if counter { base } else { name }
 }
 
 /// Local variable the entry returns, holding the stage output.
@@ -2521,7 +2554,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 let ty = self.ty(phi.ty)?;
                 let var = self.func.local_variables.append(
                     naga::LocalVariable {
-                        name: Some(phi.dst.clone()),
+                        name: Some(local_label(&phi.dst).to_string()),
                         ty,
                         init: None,
                     },
@@ -2656,7 +2689,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let ty = self.word_array_type(words);
         let var = self.func.local_variables.append(
             naga::LocalVariable {
-                name: Some(dst.to_string()),
+                name: Some(local_label(dst).to_string()),
                 ty,
                 init: None,
             },
@@ -3571,7 +3604,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let ty = self.ty(ty)?;
         let var = self.func.local_variables.append(
             naga::LocalVariable {
-                name: Some(format!("out.{name}")),
+                name: Some(format!("out.{}", local_label(name))),
                 ty,
                 init: None,
             },
@@ -6539,6 +6572,25 @@ mod tests {
         assert_eq!(unary_math("gpu_floor"), Some(naga::MathFunction::Floor));
         assert_eq!(unary_math("gpu_ceil"), Some(naga::MathFunction::Ceil));
         assert_eq!(unary_math("llvm.sqrt.f32"), Some(naga::MathFunction::Sqrt));
+    }
+
+    #[test]
+    fn an_inline_counter_is_dropped_from_a_local_name() {
+        assert_eq!(local_label("lo.sroa.0.0.i1522"), "lo.sroa.0.0");
+        assert_eq!(local_label("k.sroa.0.0.i1520"), "k.sroa.0.0");
+        assert_eq!(local_label("lo.sroa.9.01521"), "lo.sroa.9");
+        assert_eq!(local_label("sum_y.sroa.0.0.i101"), "sum_y.sroa.0.0");
+        assert_eq!(local_label("_0.sroa.0.0.i11"), "_0.sroa.0.0");
+        assert_eq!(local_label("lo.sroa.9.01519"), "lo.sroa.9");
+        // Member indices are one or two digits and stay.
+        assert_eq!(local_label("lo.sroa.9.0"), "lo.sroa.9.0");
+        assert_eq!(local_label("lo.sroa.12.lcssa"), "lo.sroa.12.lcssa");
+        assert_eq!(local_label("lo.sroa.0.0"), "lo.sroa.0.0");
+        assert_eq!(local_label("west.blue"), "west.blue");
+        // A name that only looks numeric keeps its suffix.
+        assert_eq!(local_label("lo.sroa.0.i0.x"), "lo.sroa.0.i0.x");
+        assert_eq!(local_label("value.inline"), "value.inline");
+        assert_eq!(local_label("x.i"), "x.i");
     }
 
     #[test]
