@@ -6,6 +6,7 @@ use super::{
     REC709_LUMA_R, SRGB_GAMMA, SRGB_LINEAR_CUTOFF, SRGB_LINEAR_SLOPE, SRGB_OFFSET, SRGB_SCALE,
     add3, dot, max3, mul3, scale3, splat3, sub3,
 };
+use crate::layers::normalize3;
 use ornis_gpu_shader::Vec3;
 use ornis_gpu_shader::abs;
 use ornis_gpu_shader::pow;
@@ -113,6 +114,25 @@ pub fn octahedral_encode(n: Vec3) -> (f32, f32) {
         return (flipped_x, flipped_y);
     }
     (px, py)
+}
+
+/// Inverse of [`octahedral_encode`]: a g-buffer normal back to a unit vector.
+///
+/// The `z` component comes from what the two axes leave of the `L1` norm, and
+/// the lower hemisphere is folded back by shifting each component along its own
+/// sign — multiplying by the *other* component instead tilts the whole `z < 0`
+/// half by up to ~69°.
+#[inline(always)]
+#[must_use]
+// qual:test_helper — the Render pass that calls it moves over next; `openpbr_math_parity` is its only caller until then
+pub fn octahedral_decode(p: (f32, f32)) -> Vec3 {
+    let mut n = Vec3::new(p.0, p.1, 1.0 - abs(p.0) - abs(p.1));
+    // The fold shifts both components by the same `t`, each along its own
+    // sign, so the two selections share one magnitude.
+    let t = if -n.z > 0.0 { -n.z } else { 0.0 };
+    n.x += if p.0 >= 0.0 { -t } else { t };
+    n.y += if p.1 >= 0.0 { -t } else { t };
+    normalize3(n)
 }
 
 /// One channel of [`srgb_to_linear`].

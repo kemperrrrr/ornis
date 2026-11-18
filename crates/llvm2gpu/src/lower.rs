@@ -5662,6 +5662,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains("workgroup_store_u32") {
             return self.workgroup_store(out, args, false);
         }
+        if callee.contains("fragment_discard") {
+            out.push(naga::Statement::Kill, naga::Span::default());
+            return Ok(());
+        }
         if callee.contains("workgroup_barrier") {
             // Uniformity is not proved: every invocation of a workgroup must
             // reach a barrier together, so any enclosing `if`/`loop`, or a

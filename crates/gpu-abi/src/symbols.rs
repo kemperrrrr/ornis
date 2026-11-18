@@ -91,6 +91,9 @@ pub const WORKGROUP_ATOMIC_ADD_U32: &str = "workgroup_atomic_add_u32";
 /// `()` — synchronize workgroup execution and workgroup memory.
 pub const WORKGROUP_BARRIER: &str = "workgroup_barrier";
 
+/// `()` — discard the current fragment invocation.
+pub const FRAGMENT_DISCARD: &str = "fragment_discard";
+
 /// `()` — order storage memory accesses.
 pub const STORAGE_BARRIER: &str = "storage_barrier";
 
@@ -461,6 +464,7 @@ pub fn is_toy_import(name: &str) -> bool {
             | WORKGROUP_STORE_U32
             | WORKGROUP_ATOMIC_ADD_U32
             | WORKGROUP_BARRIER
+            | FRAGMENT_DISCARD
             | STORAGE_BARRIER
             | STORAGE_READ_VEC2
             | STORAGE_WRITE_VEC2

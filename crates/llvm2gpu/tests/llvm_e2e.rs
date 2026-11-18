@@ -2248,6 +2248,34 @@ fn run_compute_with_input(
 }
 
 #[test]
+fn a_fragment_entry_discards_an_invocation() {
+    // Alpha-tested materials cut pixels out below the cutoff: the fragment
+    // body branches to a `discard` and the store after the merge then never
+    // runs for those pixels.
+    let ir = r#"
+declare void @fragment_discard()
+declare void @fragment_store_f32x4(float, float, float, float)
+define dso_local void @fs_main() {
+start:
+  %alpha = fadd float 1.000000e+00, 0.000000e+00
+  %cut = fcmp olt float %alpha, 5.000000e-01
+  br i1 %cut, label %drop, label %keep
+drop:
+  call void @fragment_discard()
+  br label %merge
+keep:
+  br label %merge
+merge:
+  call void @fragment_store_f32x4(float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float %alpha)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("discard lowers");
+    assert!(translated.wgsl.contains("discard;"), "{}", translated.wgsl);
+    assert!(translated.wgsl.contains("if ("), "{}", translated.wgsl);
+}
+
+#[test]
 fn barrier_in_uniform_control_flow_is_allowed() {
     // The condition is a uniform field, so every invocation takes the same
     // arm and the barrier is reached by the whole workgroup.

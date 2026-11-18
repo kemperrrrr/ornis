@@ -235,6 +235,8 @@ unsafe extern "C" {
     fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32;
     #[link_name = "workgroup_barrier"]
     fn import_workgroup_barrier();
+    #[link_name = "fragment_discard"]
+    fn import_fragment_discard();
     #[link_name = "global_invocation_lane"]
     fn import_global_invocation_lane(axis: u32) -> u32;
     #[link_name = "local_invocation_index"]
@@ -840,6 +842,13 @@ pub(crate) fn workgroup_atomic_add(index: u32, value: u32) -> u32 {
 #[inline(always)]
 pub(crate) fn workgroup_barrier() {
     call!(import_workgroup_barrier());
+}
+
+/// Discard the current fragment invocation.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+#[inline(always)]
+pub(crate) fn fragment_discard() {
+    call!(import_fragment_discard());
 }
 
 /// Lane `axis` of `@builtin(global_invocation_id)`.
