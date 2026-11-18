@@ -120,6 +120,7 @@ paths = [
     "crates/editor-backend/**",
     "crates/wasm/**",
     "crates/runner/**",
+    "crates/shell/**",
     "src/main.rs",
     "src/showcase_physics.rs",
     "xtask/**",

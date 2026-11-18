@@ -101,8 +101,9 @@ jobs:
   # `--ci --only <ids>` (see `cargo xtask quality --list-stages`). Wall time
   # is the slowest shard, not the sum of all 13 stages.
   #
-  # Shard map (stage ids):
-  #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual, machete, typos (no compilation)
+  # Shard map (stage ids; `macos` runs cargo directly, see its job):
+  #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual, machete, typos,
+  #            editor-viewport (no compilation; editor-viewport needs `node`)
   #   clippy — clippy-physics, clippy
   #   test   — test, test-lockfree (workspace + ornis-core lock-free lanes)
   #   gpu    — test-physics, test-wasm2gpu, test-render-gpu, smoke (all need
@@ -113,7 +114,10 @@ jobs:
   #            GPU half and the render `try_device` gates (which the test
   #            shard skips without an adapter); the xtask stages themselves
   #            do not force that variable.
-  #   docs   — doc, wasm-check
+  #   docs   — doc, wasm-check, build-shaders
+  #   macos  — clippy + test of `-p ornis-shell` on macos-latest: the native
+  #            viewport is `cfg(target_os = "macos")`, so nothing else in this
+  #            workflow compiles it
   fast:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -222,7 +226,7 @@ jobs:
         # the previous step read live into ORNIS_BASELINE_BUMP_ALLOWED.
         run: |
           mkdir -p target
-          cargo xtask quality --ci --only fmt,audit,deny,outdated,upgrade-check,rustqual,machete,typos 2>&1 | tee target/quality-fast.log
+          cargo xtask quality --ci --only fmt,audit,deny,outdated,upgrade-check,rustqual,machete,typos,editor-viewport 2>&1 | tee target/quality-fast.log
 
       - name: Upload shard log
         if: always()
@@ -466,6 +470,62 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+  # The native viewport (`crates/shell/src/native_viewport`) is behind
+  # `cfg(target_os = "macos")`, so no ubuntu job ever compiles ~1250 lines of
+  # it — including every `unsafe` AppKit block and the `wgpu` surface path.
+  # Cross-checking the Apple target from Linux does NOT work for this
+  # dependency tree: `objc2-exception-helper` builds Objective-C through
+  # cc-rs and a Linux gcc rejects `-arch arm64` /
+  # `-mmacosx-version-min=11.0`. So this job runs on a real macOS runner,
+  # where clippy, the unit tests (the macOS-only ones included) and a `check`
+  # all see the code the shipping build sees.
+  #
+  # Deliberately narrow: `-p ornis-shell` only. The rest of the workspace is
+  # already covered by the Linux shards, and building it twice per PR would
+  # cost macOS minutes for nothing.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    env:
+      CARGO_INCREMENTAL: 0
+      # No sccache here: the macOS minutes are few and a cold cache is not
+      # worth the extra action; rust-cache below covers the normal case.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: macos
+
+      # One stage id per command so a failure names the exact step in the
+      # merged digest: clippy (which is `cargo check` + lints), then the
+      # unit tests, which on macOS include the native-viewport ones that
+      # cannot run on Linux.
+      - name: Quality gate (macos shard)
+        id: gate
+        shell: bash
+        run: |
+          mkdir -p target
+          {
+            cargo clippy -p ornis-shell --all-targets -- -D warnings
+            cargo test -p ornis-shell
+          } 2>&1 | tee target/quality-macos.log
+
+      - name: Upload shard log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quality-log-macos
+          path: target/quality-macos.log
+          retention-days: 7
+          if-no-files-found: warn
+
   # Merges the five shard logs and preserves the old single-job reporting:
   # one digest comment (QUALITY SUMMARY + tail) plus the full merged log as
   # chunked comments. Runs even when shards fail; stays silent on success.
@@ -479,7 +539,7 @@ jobs:
   report:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [fast, clippy, test, gpu, docs]
+    needs: [fast, clippy, test, gpu, docs, macos]
     # Posts failure-digest PR comments — the only gate job that needs
     # `pull-requests: write`. Explicit `contents: read` because a
     # job-level block replaces the workflow default.

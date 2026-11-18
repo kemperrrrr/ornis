@@ -70,7 +70,7 @@ const LEVEL1_IDS: [&str; 16] = [
     "machete",
     "typos",
 ];
-const CI_IDS: [&str; 3] = ["doc", "wasm-check", "build-shaders"];
+const CI_IDS: [&str; 4] = ["doc", "wasm-check", "editor-viewport", "build-shaders"];
 const FULL_IDS: [&str; 3] = ["coverage", "bench-compile", "hack-check"];
 const BENCH_IDS: [&str; 1] = ["criterion"];
 const DEEP_IDS: [&str; 3] = ["mutants", "fuzz-scene", "fuzz-editor"];
@@ -2095,6 +2095,31 @@ fn ci_stages(stages: &mut StageList<'_>) {
         );
     }
 
+    // Editor page behaviour: `editor-v2/viewport.js` picks its host at boot
+    // (WASM renderer in Chrome, bounds+input client with a native viewport,
+    // written fallback without WebGPU). Plain `node --test`, no browser and
+    // no GPU — a missing `node` is a SKIP, and strict mode turns that red
+    // rather than letting the page contract go unchecked.
+    if binary_exists("node") {
+        stages.run(
+            "editor-viewport",
+            "editor-viewport",
+            "node --test editor-v2/tests/viewport_host.test.js (viewport host selection, no browser)",
+            cmd(
+                stages.root,
+                "node",
+                &["--test", "editor-v2/tests/viewport_host.test.js"],
+            ),
+            false,
+        );
+    } else {
+        stages.skip(
+            "editor-viewport",
+            "editor-viewport",
+            "node not installed — Install:  https://nodejs.org (>= 20, for `node --test`)",
+        );
+    }
+
     check_shader_artifact(
         stages,
         None,
@@ -2380,7 +2405,7 @@ fn quality_usage(code: i32) -> ! {
          \n\
          USAGE:\n  \
           cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, test-wasm2gpu, test-render-gpu, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
-         cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
+         cargo xtask quality --ci      + rustdoc, wasm32 check and the editor page test (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage ratchet (llvm-cov --workspace vs coverage-baseline.json), bench compile-check and the cargo-hack feature matrix\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
          cargo xtask quality --everything\n      \
@@ -2392,7 +2417,7 @@ fn quality_usage(code: i32) -> ! {
           In strict mode (--ci or GITHUB_ACTIONS) a SKIP fails the gate unless\n  \
           excused via --allow-skip. Locally skips only print a trailing warning.\n\
           \n\
-          External tools (audit, deny, outdated, upgrade-check, llvm-cov, rustqual, hack, machete, typos) are optional:\n  \
+          External tools (audit, deny, outdated, upgrade-check, llvm-cov, rustqual, hack, machete, typos, node) are optional:\n  \
           missing → SKIP with install hint. rustqual is MIT.\n  \
           rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
           Baseline: rustqual --save-baseline baseline.json; the gate re-runs rustqual\n  \

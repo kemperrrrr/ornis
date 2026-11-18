@@ -26,9 +26,13 @@ const liveSource = readFileSync(join(editorDir, 'live.js'), 'utf8');
 // `a_rotate_step_wider_than_a_half_turn_still_turns` (crates/editor/src/snap.rs)
 // plus `effective_rotate_step_is_readable_from_the_browser`
 // (crates/wasm/src/snap.rs) — keep this stub in step with them.
+// The failure that must stay a loud red canvas is a *renderer defect* after a
+// working adapter (here: shader compilation), not an environment limit: the page
+// routes "no navigator.gpu" and "no adapter" to the written notice instead, so a
+// message naming an adapter would test the wrong branch.
 function stubSource(failInit) {
     const initBody = failInit
-        ? "throw new Error('WebGPU adapter unavailable');"
+        ? "throw new Error('shader compilation failed: unresolved identifier');"
         : 'await gate;';
     return `
 export const calls = [];
@@ -68,7 +72,16 @@ function makeEl() {
         height: 0,
         hidden: false,
         added: [],
-        classList: { add: (c) => el.added.push(c), toggle: () => {} },
+        // A real `classList` supports removal too; the viewport drops the
+        // `failed` mark when it shows the written fallback instead.
+        classList: {
+            add: (c) => el.added.push(c),
+            remove: (c) => {
+                const at = el.added.indexOf(c);
+                if (at >= 0) el.added.splice(at, 1);
+            },
+            toggle: () => {},
+        },
         getBoundingClientRect: () => ({ width: 800, height: 600 }),
         addEventListener: () => {},
         setAttribute: () => {},
@@ -99,6 +112,19 @@ async function sandbox(failInit) {
         },
     };
     globalThis.window = { devicePixelRatio: 1 };
+    // The harness models a WebGPU-capable browser: the viewport boots the wasm
+    // module only when `navigator.gpu` exists *and* `requestAdapter()` yields an
+    // adapter (both are checked before the module is fetched; a WKWebView
+    // without them gets the written fallback, covered by
+    // editor-v2/tests/viewport_host.test.js). Node's own `navigator` is
+    // getter-only, hence `defineProperty`.
+    Object.defineProperty(globalThis, 'navigator', {
+        value: {
+            gpu: { requestAdapter: async () => ({ name: 'harness adapter' }) },
+        },
+        configurable: true,
+        writable: true,
+    });
     globalThis.requestAnimationFrame = () => 0;
     const wasm = await import(pathToFileURL(join(dir, 'pkg', 'ornis_wasm.js')).href);
     await import(pathToFileURL(join(dir, 'viewport.js')).href);
