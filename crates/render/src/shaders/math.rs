@@ -1008,18 +1008,11 @@ mod tests {
             "const REC709_LUMA_R: f32 = {};",
             super::super::f32_lit(REC709_LUMA_R)
         );
-        let passes = [
-            (
-                "lighting",
-                crate::shaders::lighting_generated::wgsl_source(),
-                true,
-            ),
-            (
-                "textured",
-                crate::shaders::material_textures::wgsl_source_textured(),
-                true,
-            ),
-        ];
+        let passes = [(
+            "lighting",
+            crate::shaders::lighting_generated::wgsl_source(),
+            true,
+        )];
         for (name, src, wants_luma) in passes {
             if wants_luma {
                 assert!(src.contains(&decl), "{name} missing {decl}");

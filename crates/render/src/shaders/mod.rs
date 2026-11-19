@@ -540,25 +540,6 @@ pub(crate) struct QuadConsts {
     pub uvs: [[f32; 2]; 4],
 }
 
-/// Shared `OpenPBRMaterial` WGSL declaration (20 `vec4` slots), used by the
-/// g-buffer, lighting and forward-PBR skeletons.
-///
-/// Generated from [`OPENPBR_SLOTS`]: the CPU-side
-/// [`OpenPBRMaterial`](ornis_core::material::OpenPBRMaterial) is grouped
-/// (`BaseGroup`, `SpecularGroup`, …), not flat, so there is no 1:1 field
-/// mirror to derive from — the slot-name list is the single source of truth
-/// for the WGSL side. The `openpbr_rust_layout_matches_wgsl_order` test
-/// below pins the group offsets against this slot order instead.
-/// Leading/trailing newlines are part of the legacy assembly contract.
-pub(crate) fn openpbr_material_decl() -> String {
-    let mut out = String::from("\nstruct OpenPBRMaterial {\n");
-    for slot in OPENPBR_SLOTS {
-        out.push_str(&format!("    {slot}: vec4<f32>,\n"));
-    }
-    out.push_str("};\n");
-    out
-}
-
 /// The WGSL type name of the shared material declaration (no derive:
 /// the CPU side is grouped, so the name lives next to the slot list).
 pub(crate) const OPENPBR_WGSL_NAME: &str = "OpenPBRMaterial";
@@ -859,7 +840,6 @@ mod tests {
     fn stage_globals_declared() {
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let textured = material_textures::wgsl_source_textured();
         // (bundle/entry globals, assemblies containing them). QuadConsts is
         // shared by the DSL vertex entries, so it pins against all the
         // assemblies carrying the quad constants (the translated composite pass
@@ -871,10 +851,6 @@ mod tests {
                 vec![lighting.clone()],
             ),
             (lighting_generated::LightingMaps::GLOBALS, vec![lighting]),
-            (
-                material_textures::PbrTexturedContext::GLOBALS,
-                vec![textured.clone()],
-            ),
         ];
         let mut checked = 0;
         for (globals, assemblies) in pairs {
@@ -887,10 +863,11 @@ mod tests {
                 checked += 1;
             }
         }
-        // Nine bundles plus one lone `global` param declare 30+ names today;
-        // fewer means a declaration was dropped and the test passes vacuously.
+        // The two lit-stage bundles and the lone `global` param declare 21
+        // names today; fewer means a declaration was dropped and the test
+        // passes vacuously.
         assert!(
-            checked >= 30,
+            checked >= 21,
             "expected global declarations, found {checked}"
         );
     }
@@ -1011,7 +988,6 @@ mod tests {
     /// real definitions, the text is the real output.
     #[test]
     fn stage_field_uses_resolve() {
-        use super::interface::GbufferFragmentInput;
         use crate::renderer::{
             BloomUniform, CameraUniform, CsmBlock, GpuLight, LightingUniform, PerObjectGpu,
         };
@@ -1023,11 +999,6 @@ mod tests {
             output: Option<&'static [&'static str]>,
         }
         let entries = [
-            Entry {
-                src: material_textures::fs_main_textured::wgsl_source(),
-                input: Some(GbufferFragmentInput::WGSL_FIELDS),
-                output: None,
-            },
             Entry {
                 src: lighting_generated::vs_main::wgsl_source(),
                 input: None,
@@ -1077,9 +1048,9 @@ mod tests {
                 checked += usize::from(counted);
             }
         }
-        // Eleven entries, 91+ resolved uses today; fewer means the
-        // extraction broke or coverage was dropped — update deliberately.
-        assert!(checked >= 91, "expected field uses, found {checked}");
+        // Ten entries, 9+ resolved uses today; fewer means the extraction
+        // broke or coverage was dropped — update deliberately.
+        assert!(checked >= 9, "expected field uses, found {checked}");
     }
 
     /// Every call in translated entries resolves: built-ins via the
@@ -1152,12 +1123,7 @@ mod tests {
         // (entry source, its assembled shader)
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let textured = material_textures::wgsl_source_textured();
         let pairs: &[(&str, &str)] = &[
-            (
-                material_textures::fs_main_textured::wgsl_source(),
-                textured.as_str(),
-            ),
             (
                 lighting_generated::vs_main::wgsl_source(),
                 lighting_vertex.as_str(),
@@ -1185,10 +1151,10 @@ mod tests {
                 checked += 1;
             }
         }
-        // Three DSL entries remain (the forward pass, the lit and the textured
-        // stages); near-zero hits would mean the extraction broke and the test
-        // passes vacuously.
-        assert!(checked >= 60, "expected calls, found {checked}");
+        // Two DSL entries remain (the lit vertex and fragment stages);
+        // near-zero hits would mean the extraction broke and the test passes
+        // vacuously.
+        assert!(checked >= 15, "expected calls, found {checked}");
     }
 
     /// Every table-backed global an entry reads is visible at that
@@ -1206,11 +1172,6 @@ mod tests {
                 QuadConsts::GLOBALS,
                 &composite_generated::COMPOSITE_RESOURCES,
                 ShaderStages::VERTEX,
-            ),
-            (
-                material_textures::PbrTexturedContext::GLOBALS,
-                &material_textures::TEXTURED_PBR_RESOURCES,
-                ShaderStages::FRAGMENT,
             ),
             (
                 QuadConsts::GLOBALS,
@@ -1251,9 +1212,9 @@ mod tests {
                 }
             }
         }
-        // 28 table-backed uses today; fewer means a table lost a row the
+        // 19 table-backed uses today; fewer means a table lost a row the
         // entries still read — update deliberately.
-        assert!(checked >= 28, "expected visible resources, found {checked}");
+        assert!(checked >= 19, "expected visible resources, found {checked}");
     }
 
     /// Parse and fully validate an assembled WGSL module with naga.
@@ -1314,7 +1275,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, emission), 256);
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, geometry), 288);
         // Within-group slot order mirrors the WGSL field order.
-        assert_eq!(openpbr_material_decl().matches("vec4<f32>").count(), 20);
+        assert_eq!(OPENPBR_SLOTS.len(), 20);
     }
 
     /// MSAA declaration policy: at 1x every spelling is the legacy

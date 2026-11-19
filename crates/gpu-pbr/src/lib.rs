@@ -34,6 +34,7 @@ use ornis_gpu_openpbr::layers::evaluate_coat_darkening;
 use ornis_gpu_openpbr::layers::evaluate_emission;
 use ornis_gpu_openpbr::layers::normalize3;
 use ornis_gpu_openpbr::layers::sanitize_hdr;
+use ornis_gpu_openpbr::layers::specular_aa_roughness;
 use ornis_gpu_openpbr::math::add3;
 use ornis_gpu_openpbr::math::evaluate_ibl;
 use ornis_gpu_openpbr::math::fresnel0_from_ior;
@@ -83,6 +84,7 @@ use crate::layout::IRRADIANCE_BINDING;
 use crate::layout::LIGHT_COUNT_FIELD;
 use crate::layout::LIGHTING_BINDING;
 use crate::layout::Lighting;
+use crate::layout::MATERIAL_SAMPLER_BINDING;
 use crate::layout::PREFILTER_BINDING;
 use crate::layout::SHADOW_CUBE_BINDING;
 use crate::layout::SHADOW_SAMPLER_BINDING;
@@ -103,6 +105,10 @@ const WORLD_NORMAL_LOC: u32 = 1;
 const WORLD_TANGENT_LOC: u32 = 3;
 /// Fragment input location of the flat material index.
 const MATERIAL_LOC: u32 = 4;
+/// Fragment input location of the material texture coordinates.
+const UV_LOC: u32 = 2;
+/// Lanes of the UV interface value.
+const VEC2_LANES: u32 = 2;
 
 /// Lanes of the world-position interface value.
 const VEC3_LANES: u32 = 3;
@@ -172,6 +178,122 @@ pub fn fs_main(
     let t = normalize3(input_xyz::<WORLD_TANGENT_LOC>());
     let b = tangent_bitangent(n, t);
     let mat = Material::load(&materials, fragment_input_u32::<MATERIAL_LOC>(), n);
+    let span_base = clusters::cluster_index(&camera, world_pos) * CLUSTER_SPAN_WORDS;
+    let clustered = cluster_params.field_u32::<CLUSTERED_FIELD>();
+    shade(
+        mat,
+        world_pos,
+        cam_pos,
+        n,
+        v,
+        t,
+        b,
+        nov,
+        lighting.field_u32::<LIGHT_COUNT_FIELD>(),
+        cluster_grid.load(span_base) * clustered,
+        cluster_grid.load(span_base + 1) * clustered,
+        &lighting,
+        &shadow_tex,
+        shadow_sampler,
+        &shadow_cube_tex,
+        &prefilter_cube,
+        &irradiance_cube,
+        &brdf_lut,
+        ibl_sampler,
+        &csm_tex,
+        &clustered_lights,
+        &cluster_light_indices,
+    );
+}
+
+/// The textured forward pass: the same shading with three material maps.
+///
+/// The gLTF rule is factor times texel: the sampled base colour and emission
+/// scale their authored colours, the roughness texel scales the authored
+/// roughness *before* the screen-space filter, and the metallic texel scales
+/// the authored metallic factor. An unbound slot samples a 1x1 white fallback,
+/// which is the exact no-op, so an untextured material renders identically to
+/// [`fs_main`].
+#[gpu_entry(fragment)]
+// qual:allow(complexity, max_function_lines=85) reason: "one fragment entry: the interface decode, the map fold and the shading call"
+// qual:allow(srp, max_parameters=19) reason: "one parameter per binding the pass declares; the attributes above are the table"
+// qual:allow(iosp) reason: "the textured entry ships before the renderer points its textured pipeline at it; the artifact gate builds it every run"
+#[allow(clippy::too_many_arguments)]
+pub fn fs_main_textured(
+    #[gpu(uniform, group = 0, binding = 0)] camera: Uniform<Camera>,
+    #[gpu(storage_buffer, group = 0, binding = 2, read_only)] materials: Storage<u32>,
+    #[gpu(uniform, group = 0, binding = 3)] lighting: Uniform<Lighting>,
+    #[gpu(depth_texture_2d_array, group = 0, binding = 4)] shadow_tex: DepthTexture2dArray,
+    #[gpu(comparison_sampler, group = 0, binding = 5)] shadow_sampler: ComparisonSampler,
+    #[gpu(depth_texture_cube_array, group = 0, binding = 6)] shadow_cube_tex: DepthCubeArray,
+    #[gpu(texture_cube, group = 0, binding = 7)] prefilter_cube: TextureCube,
+    #[gpu(texture_cube, group = 0, binding = 8)] irradiance_cube: TextureCube,
+    #[gpu(texture_2d, group = 0, binding = 9)] brdf_lut: Texture2d,
+    #[gpu(sampler, group = 0, binding = 10)] ibl_sampler: Sampler,
+    #[gpu(depth_texture_2d_array, group = 0, binding = 11)] csm_tex: DepthTexture2dArray,
+    #[gpu(uniform, group = 0, binding = 12)] cluster_params: Uniform<ClusterParams>,
+    #[gpu(storage_buffer, group = 0, binding = 13, read_only)] clustered_lights: Storage<u32>,
+    #[gpu(storage_buffer, group = 0, binding = 14, read_only)] cluster_light_indices: Storage<u32>,
+    #[gpu(storage_buffer, group = 0, binding = 15, read_only)] cluster_grid: Storage<u32>,
+    #[gpu(texture_2d, group = 0, binding = 16)] base_color_tex: Texture2d,
+    #[gpu(texture_2d, group = 0, binding = 17)] metallic_roughness_tex: Texture2d,
+    #[gpu(texture_2d, group = 0, binding = 18)] emissive_tex: Texture2d,
+    #[gpu(sampler, group = 0, binding = 19)] material_sampler: Sampler,
+) {
+    // qual:allow(dry, fragment) reason: "the entry decodes its own interface; the decode returns five values, which the translator cannot pass back from a helper"
+    let world_pos = input_xyz::<WORLD_POS_LOC>();
+    let n = normalize3(input_xyz::<WORLD_NORMAL_LOC>());
+    let cam_pos = camera_position(&camera);
+    let v = normalize3(sub3(cam_pos, world_pos));
+    let nov = max_f32(dot3(n.x, n.y, n.z, v.x, v.y, v.z), EPS);
+    let t = normalize3(input_xyz::<WORLD_TANGENT_LOC>());
+    let b = tangent_bitangent(n, t);
+    let mut mat = Material::load(&materials, fragment_input_u32::<MATERIAL_LOC>(), n);
+    let u = fragment_input_lane::<UV_LOC, VEC2_LANES, X_LANE>();
+    let w = fragment_input_lane::<UV_LOC, VEC2_LANES, Y_LANE>();
+    let base_map = v3(
+        base_color_tex.sample_auto_lane::<GROUP, MATERIAL_SAMPLER_BINDING, X_LANE>(
+            material_sampler,
+            u,
+            w,
+        ),
+        base_color_tex.sample_auto_lane::<GROUP, MATERIAL_SAMPLER_BINDING, Y_LANE>(
+            material_sampler,
+            u,
+            w,
+        ),
+        base_color_tex.sample_auto_lane::<GROUP, MATERIAL_SAMPLER_BINDING, Z_LANE>(
+            material_sampler,
+            u,
+            w,
+        ),
+    );
+    let roughness_map = metallic_roughness_tex
+        .sample_auto_lane::<GROUP, MATERIAL_SAMPLER_BINDING, Y_LANE>(material_sampler, u, w);
+    let metallic_map = metallic_roughness_tex
+        .sample_auto_lane::<GROUP, MATERIAL_SAMPLER_BINDING, Z_LANE>(material_sampler, u, w);
+    let emissive_map = v3(
+        emissive_tex.sample_auto_lane::<GROUP, MATERIAL_SAMPLER_BINDING, X_LANE>(
+            material_sampler,
+            u,
+            w,
+        ),
+        emissive_tex.sample_auto_lane::<GROUP, MATERIAL_SAMPLER_BINDING, Y_LANE>(
+            material_sampler,
+            u,
+            w,
+        ),
+        emissive_tex.sample_auto_lane::<GROUP, MATERIAL_SAMPLER_BINDING, Z_LANE>(
+            material_sampler,
+            u,
+            w,
+        ),
+    );
+    mat.base_color = mul3(mat.base_color, base_map);
+    mat.metalness *= metallic_map;
+    mat.specular_roughness = specular_aa_roughness(mat.specular_roughness_raw * roughness_map, n);
+    mat.emission_color = mul3(mat.emission_color, emissive_map);
+    // qual:allow(dry, fragment) reason: "the entry hands its frame to the shared shading; the call is the seam, not copyable logic"
     let span_base = clusters::cluster_index(&camera, world_pos) * CLUSTER_SPAN_WORDS;
     let clustered = cluster_params.field_u32::<CLUSTERED_FIELD>();
     shade(

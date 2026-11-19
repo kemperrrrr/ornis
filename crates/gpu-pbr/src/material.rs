@@ -78,6 +78,9 @@ pub struct Material {
     pub(crate) specular_weight: f32,
     /// Roughness after the geometric specular antialiasing.
     pub(crate) specular_roughness: f32,
+    /// `specular_roughness` before the screen-space filter: a roughness map
+    /// scales the *authored* value and the filter runs on the product.
+    pub(crate) specular_roughness_raw: f32,
     /// Index of refraction of the specular lobe.
     pub(crate) specular_ior: f32,
     /// Anisotropy of the specular lobe.
@@ -174,6 +177,7 @@ impl Material {
                 mat(materials, base, SPECULAR_PARAMS_WORD + LANE_Y),
                 n,
             ),
+            specular_roughness_raw: mat(materials, base, SPECULAR_PARAMS_WORD + LANE_Y),
             specular_ior: mat(materials, base, SPECULAR_PARAMS_WORD + LANE_Z),
             specular_anisotropy: mat(materials, base, SPECULAR_PARAMS_WORD + LANE_W),
             specular_edge_tint: mat_rgb(materials, base, SPECULAR_COLOR_WORD),

@@ -23,6 +23,10 @@ use glam::{Mat4, Vec3};
 /// The forward-PBR fragment stage this pass used before the migration.
 const DSL_FRAGMENT: &str = include_str!("data/pbr_dsl.wgsl");
 
+/// The frozen DSL assembly of the textured entry, captured before the DSL
+/// path was retired for this pass.
+const TEXTURED_DSL: &str = include_str!("data/textured_pbr_dsl.wgsl");
+
 /// Render target size.
 const SIZE: (u32, u32) = (64, 64);
 /// The colour target both fragments write.
@@ -56,16 +60,83 @@ fn translated_pbr_matches_the_dsl_pixels() {
     };
     let inputs = Inputs::new(&device, &queue);
     let vertex = ornis_render::shaders::pbr_generated::wgsl_vertex_source();
-    let reference = render(&device, &queue, &vertex, DSL_FRAGMENT, &inputs);
+    let reference = render(
+        &device,
+        &queue,
+        &vertex,
+        DSL_FRAGMENT,
+        "fs_main",
+        &inputs,
+        false,
+    );
     let translated = render(
         &device,
         &queue,
         &vertex,
         &ornis_render::shaders::pbr_generated::wgsl_source(),
+        "fs_main",
         &inputs,
+        false,
     );
     let mismatches = float_mismatches(&reference, &translated);
     assert_eq!(mismatches, 0, "{mismatches} texels differ");
+    let lit = reference
+        .chunks_exact(8)
+        .filter(|texel| texel.iter().any(|byte| *byte != 0))
+        .count();
+    assert!(
+        lit > (SIZE.0 * SIZE.1 / 2) as usize,
+        "only {lit} texels carry a colour — the gate would pass vacuously"
+    );
+}
+
+/// Same gate for the textured entry: three role maps, one shared sampler.
+///
+/// The role texels are per-channel distinct on purpose — a white map would
+/// hide a swapped or dropped channel the way a white light hid the radiance
+/// bug.
+#[test]
+fn translated_textured_pbr_matches_the_dsl_pixels() {
+    let Some((device, queue)) = common::parity::device_pair() else {
+        return;
+    };
+    let inputs = Inputs::new(&device, &queue);
+    let vertex = ornis_render::shaders::pbr_generated::wgsl_vertex_source();
+    let reference = render(
+        &device,
+        &queue,
+        &vertex,
+        TEXTURED_DSL,
+        "fs_main_textured",
+        &inputs,
+        true,
+    );
+    let translated = render(
+        &device,
+        &queue,
+        &vertex,
+        &ornis_render::shaders::material_textures::wgsl_source_textured(),
+        ornis_render::shaders::material_textures::TEXTURED_FS_ENTRY,
+        &inputs,
+        true,
+    );
+    let mismatches = float_mismatches(&reference, &translated);
+    assert_eq!(mismatches, 0, "{mismatches} texels differ");
+    // The maps must reach the frame: without them the pass would be the
+    // untextured one and the gate would compare two copies of the same thing.
+    let plain = render(
+        &device,
+        &queue,
+        &vertex,
+        &ornis_render::shaders::pbr_generated::wgsl_source(),
+        "fs_main",
+        &inputs,
+        false,
+    );
+    assert_ne!(
+        reference, plain,
+        "the role maps changed nothing — the gate compares two untextured frames"
+    );
     let lit = reference
         .chunks_exact(8)
         .filter(|texel| texel.iter().any(|byte| *byte != 0))
@@ -110,6 +181,14 @@ struct Inputs {
     cluster_light_indices: wgpu::Buffer,
     /// Group 0 binding 15.
     cluster_grid: wgpu::Buffer,
+    /// Group 0 binding 16: base-colour map of the textured entry.
+    base_color_tex: wgpu::TextureView,
+    /// Group 0 binding 17: metallic-roughness map (G roughness, B metal).
+    metallic_roughness_tex: wgpu::TextureView,
+    /// Group 0 binding 18: emissive map.
+    emissive_tex: wgpu::TextureView,
+    /// Group 0 binding 19: the one sampler all three roles share.
+    material_sampler: wgpu::Sampler,
     /// Positions, normals, uvs and tangents of one triangle.
     vertices: wgpu::Buffer,
 }
@@ -146,12 +225,27 @@ impl Inputs {
             cluster_light_indices: storage(device, queue, "pbr cluster indices", &[0u8; 4]),
             cluster_grid: storage(device, queue, "pbr cluster grid", &[0u8; 8]),
             vertices: vertex_buffer(device, queue),
+            base_color_tex: solid_texture(device, queue, "pbr base color", [0.8, 0.5, 0.2, 1.0]),
+            metallic_roughness_tex: solid_texture(
+                device,
+                queue,
+                "pbr metallic roughness",
+                [0.0, 0.7, 0.35, 1.0],
+            ),
+            emissive_tex: solid_texture(device, queue, "pbr emissive", [0.1, 0.2, 0.3, 1.0]),
+            material_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("pbr material sampler"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
+                ..Default::default()
+            }),
         }
     }
 
     /// The bind group entries, in binding order.
-    fn entries(&self) -> Vec<wgpu::BindGroupEntry<'_>> {
-        vec![
+    fn entries(&self, textured: bool) -> Vec<wgpu::BindGroupEntry<'_>> {
+        let mut entries = vec![
             self.camera.as_entire_binding_entry(0),
             self.objects.as_entire_binding_entry(1),
             self.materials.as_entire_binding_entry(2),
@@ -192,7 +286,28 @@ impl Inputs {
             self.clustered_lights.as_entire_binding_entry(13),
             self.cluster_light_indices.as_entire_binding_entry(14),
             self.cluster_grid.as_entire_binding_entry(15),
-        ]
+        ];
+        if textured {
+            entries.extend([
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: wgpu::BindingResource::TextureView(&self.base_color_tex),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::TextureView(&self.metallic_roughness_tex),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&self.emissive_tex),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::Sampler(&self.material_sampler),
+                },
+            ]);
+        }
+        entries
     }
 }
 
@@ -625,7 +740,9 @@ fn render(
     queue: &wgpu::Queue,
     vertex: &str,
     fragment: &str,
+    fragment_entry: &str,
     inputs: &Inputs,
+    textured: bool,
 ) -> Vec<u8> {
     let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("pbr parity vertex"),
@@ -650,7 +767,7 @@ fn render(
         },
         fragment: Some(wgpu::FragmentState {
             module: &fs_module,
-            entry_point: Some("fs_main"),
+            entry_point: Some(fragment_entry),
             targets: &[Some(wgpu::ColorTargetState {
                 format: FORMAT,
                 blend: None,
@@ -672,7 +789,7 @@ fn render(
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("pbr parity"),
         layout: &pipeline.get_bind_group_layout(0),
-        entries: &inputs.entries(),
+        entries: &inputs.entries(textured),
     });
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("pbr parity target"),
