@@ -712,7 +712,16 @@ Forward-PBR (`crates/gpu-pbr`) — самый широкий фрагментн�
 текстуру. Паритет — `crates/render/tests/pbr_parity.rs`: сцена с направленным
 светом (каскадный путь), точечным (кубический путь), материалом с coat и fuzz,
 твёрдыми IBL-картами и LUT `(1, 0)`; смещение uniform-блоков отдельно
-закреплено против хостовых записей в тесте `pbr_generated`.
+закреплено против хостовых записей в тесте `pbr_generated`. Второй entry того
+же крейта — `fs_main_textured` (артефакт
+`crates/render/src/shaders/pbr_textured_generated.wgsl`): те же слои, но три
+роли материалов (base color, metallic-roughness, emissive) сэмплируются в
+начале и складываются в факторы до цикла света, а `TEXTURED_PBR_RESOURCES`
+переиспользует номера forward-пасса и добавляет свои (16–18 текстуры, 19 общий
+сэмплер). Второй entry меняет инлайнинг rustc, поэтому помощники с `ptr` в
+подписи помечены `#[inline(always)]`; гейт `translated_textured_pbr_matches_the_dsl_pixels`
+сравнивает кадр с замороженной DSL-версией и отдельно требует, чтобы карты
+меняли картинку.
 Общая обвязка паритетных
 гейтов (генератор изображений, загрузка текстуры, рендер depth-рампы, подсчёт
 расхождений, half-float кодирование) — `crates/render/tests/common/parity.rs`.

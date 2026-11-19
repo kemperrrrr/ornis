@@ -488,7 +488,7 @@ impl Renderer3D {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &fs_module,
-                entry_point: Some(shaders::material_textures::fs_main_textured::entry_point()),
+                entry_point: Some(shaders::material_textures::TEXTURED_FS_ENTRY),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba16Float,
                     blend: Some(forward_blend_state(self.transparency)),
