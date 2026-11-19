@@ -34,6 +34,7 @@ use crate::layout::Y_LANE_U;
 /// the same size in screen space as they recede. A position behind the near
 /// plane clamps into the first tile and the first slice instead of wrapping: the
 /// GPU conversion saturates, which is what the reference clamps after.
+#[inline(always)]
 pub(crate) fn cluster_index(
     camera: &Uniform<Camera, GROUP, CAMERA_BINDING>,
     world_pos: Vec3,

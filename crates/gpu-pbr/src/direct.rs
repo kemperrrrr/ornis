@@ -217,9 +217,7 @@ pub(crate) fn direct(
                 mat.subsurface_color,
             );
             let layer = add3(add3(add3(base, coat), add3(fuzz, transmission)), subsurface);
-            // Both factors are per lane: a coloured light tints the lobe it
-            // lights, so a scalar would tint every channel with red's energy
-            // (invisible with a white light, wrong with any other).
+            // Per lane: a coloured light tints the lobe it lights.
             lo = add3(lo, mul3(scale3(layer, nol), radiance));
         }
         k += 1;

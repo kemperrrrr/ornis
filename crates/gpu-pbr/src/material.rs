@@ -157,6 +157,7 @@ impl Material {
     ///
     /// The thin-film thickness arrives in micrometers and the modulation wants
     /// nanometers, so the scale is applied here rather than in the layer.
+    #[inline(always)]
     pub(crate) fn load(
         materials: &Storage<u32, GROUP, MATERIALS_BINDING, ReadOnly>,
         material_index: u32,
