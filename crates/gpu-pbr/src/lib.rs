@@ -65,18 +65,28 @@ use ornis_gpu_shader::mix;
 use crate::direct::Frame;
 use crate::direct::direct;
 use crate::layout::AMBIENT_FIELD;
+use crate::layout::BRDF_LUT_BINDING;
+use crate::layout::CAMERA_BINDING;
 use crate::layout::CAMERA_POS;
+use crate::layout::CLUSTER_INDICES_BINDING;
 use crate::layout::CLUSTER_SPAN_WORDS;
 use crate::layout::CLUSTERED_FIELD;
+use crate::layout::CLUSTERED_LIGHTS_BINDING;
+use crate::layout::CSM_TEX_BINDING;
 use crate::layout::Camera;
 use crate::layout::ClusterParams;
 use crate::layout::GROUP;
 use crate::layout::IBL_MAX_MIP_FIELD;
 use crate::layout::IBL_SAMPLER_BINDING;
 use crate::layout::IBL_WEIGHT_FIELD;
+use crate::layout::IRRADIANCE_BINDING;
 use crate::layout::LIGHT_COUNT_FIELD;
 use crate::layout::LIGHTING_BINDING;
 use crate::layout::Lighting;
+use crate::layout::PREFILTER_BINDING;
+use crate::layout::SHADOW_CUBE_BINDING;
+use crate::layout::SHADOW_SAMPLER_BINDING;
+use crate::layout::SHADOW_TEX_BINDING;
 use crate::layout::X_LANE;
 use crate::layout::X_LANE_U;
 use crate::layout::Y_LANE;
@@ -135,7 +145,6 @@ fn input_xyz<const LOC: u32>() -> Vec3 {
 /// emissive and image-based terms. Alpha is the material opacity: the pass
 /// writes straight alpha and the composite stage blends it.
 #[gpu_entry(fragment)]
-// qual:allow(complexity, max_function_lines=150) reason: "one fragment entry; the pass is the binding table plus the shading it drives"
 // qual:allow(srp, max_parameters=15) reason: "one parameter per binding the pass declares; the attributes above are the table"
 #[allow(clippy::too_many_arguments)]
 pub fn fs_main(
@@ -157,21 +166,75 @@ pub fn fs_main(
 ) {
     let world_pos = input_xyz::<WORLD_POS_LOC>();
     let n = normalize3(input_xyz::<WORLD_NORMAL_LOC>());
-    let cam_pos = v3(
-        camera.vec4_lane::<CAMERA_POS, X_LANE_U>(),
-        camera.vec4_lane::<CAMERA_POS, Y_LANE_U>(),
-        camera.vec4_lane::<CAMERA_POS, Z_LANE_U>(),
-    );
+    let cam_pos = camera_position(&camera);
     let v = normalize3(sub3(cam_pos, world_pos));
     let nov = max_f32(dot3(n.x, n.y, n.z, v.x, v.y, v.z), EPS);
-    let tangent = input_xyz::<WORLD_TANGENT_LOC>();
-    let t = normalize3(tangent);
-    let b = v3(
-        cross_lane::<X_LANE>(n.x, n.y, n.z, t.x, t.y, t.z),
-        cross_lane::<Y_LANE>(n.x, n.y, n.z, t.x, t.y, t.z),
-        cross_lane::<Z_LANE>(n.x, n.y, n.z, t.x, t.y, t.z),
-    );
+    let t = normalize3(input_xyz::<WORLD_TANGENT_LOC>());
+    let b = tangent_bitangent(n, t);
     let mat = Material::load(&materials, fragment_input_u32::<MATERIAL_LOC>(), n);
+    let span_base = clusters::cluster_index(&camera, world_pos) * CLUSTER_SPAN_WORDS;
+    let clustered = cluster_params.field_u32::<CLUSTERED_FIELD>();
+    shade(
+        mat,
+        world_pos,
+        cam_pos,
+        n,
+        v,
+        t,
+        b,
+        nov,
+        lighting.field_u32::<LIGHT_COUNT_FIELD>(),
+        cluster_grid.load(span_base) * clustered,
+        cluster_grid.load(span_base + 1) * clustered,
+        &lighting,
+        &shadow_tex,
+        shadow_sampler,
+        &shadow_cube_tex,
+        &prefilter_cube,
+        &irradiance_cube,
+        &brdf_lut,
+        ibl_sampler,
+        &csm_tex,
+        &clustered_lights,
+        &cluster_light_indices,
+    );
+}
+
+/// Everything after the material record: the light walk and the ambient,
+/// emissive and image-based terms.
+///
+/// Both forward entries end here — the plain one and the textured one, which
+/// differs only in where its base colour, roughness, metalness and emission
+/// come from. The geometry is passed as scalars rather than a struct because
+/// the translator keeps them in registers.
+// qual:allow(complexity, max_function_lines=120) reason: "the pass's document: one light walk plus the three additive terms it is summed with"
+// qual:allow(srp, max_parameters=22) reason: "the binding table and the frame scalars; a bundle struct would be a second copy of the same list"
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn shade(
+    mat: Material,
+    world_pos: Vec3,
+    cam_pos: Vec3,
+    n: Vec3,
+    v: Vec3,
+    t: Vec3,
+    b: Vec3,
+    nov: f32,
+    light_count: u32,
+    span_offset: u32,
+    span_count: u32,
+    lighting: &Uniform<Lighting, GROUP, LIGHTING_BINDING>,
+    shadow_tex: &DepthTexture2dArray<GROUP, SHADOW_TEX_BINDING>,
+    shadow_sampler: ComparisonSampler<GROUP, SHADOW_SAMPLER_BINDING>,
+    shadow_cube_tex: &DepthCubeArray<GROUP, SHADOW_CUBE_BINDING>,
+    prefilter_cube: &TextureCube<GROUP, PREFILTER_BINDING>,
+    irradiance_cube: &TextureCube<GROUP, IRRADIANCE_BINDING>,
+    brdf_lut: &Texture2d<GROUP, BRDF_LUT_BINDING>,
+    ibl_sampler: Sampler<GROUP, IBL_SAMPLER_BINDING>,
+    csm_tex: &DepthTexture2dArray<GROUP, CSM_TEX_BINDING>,
+    clustered_lights: &Storage<u32, GROUP, CLUSTERED_LIGHTS_BINDING, ReadOnly>,
+    cluster_light_indices: &Storage<u32, GROUP, CLUSTER_INDICES_BINDING, ReadOnly>,
+) {
     let thin_film_mod = thin_film_weight_mix(
         mat.thin_film_weight,
         thin_film_modulation(
@@ -192,11 +255,6 @@ pub fn fs_main(
         mat.subsurface_weight,
         mat.subsurface_color,
     );
-    let light_count = lighting.field_u32::<LIGHT_COUNT_FIELD>();
-    let span_base = clusters::cluster_index(&camera, world_pos) * CLUSTER_SPAN_WORDS;
-    let clustered = cluster_params.field_u32::<CLUSTERED_FIELD>();
-    let span_offset = cluster_grid.load(span_base) * clustered;
-    let span_count = cluster_grid.load(span_base + 1) * clustered;
     let frame = Frame {
         world_pos,
         cam_pos,
@@ -209,13 +267,13 @@ pub fn fs_main(
         coat_darken,
     };
     let lo = direct(
-        &lighting,
-        &shadow_tex,
-        &shadow_cube_tex,
-        &csm_tex,
+        lighting,
+        shadow_tex,
+        shadow_cube_tex,
+        csm_tex,
         shadow_sampler,
-        &clustered_lights,
-        &cluster_light_indices,
+        clustered_lights,
+        cluster_light_indices,
         &mat,
         &frame,
         light_count,
@@ -227,7 +285,7 @@ pub fn fs_main(
         mul3(mat.base_color, splat3(mat.specular_weight)),
         mat.metalness,
     );
-    let ambient = mul3(ambient_color(&lighting), ambient_tint);
+    let ambient = mul3(ambient_color(lighting), ambient_tint);
     let emission = evaluate_emission(
         mat.emission_luminance,
         mat.emission_color,
@@ -294,6 +352,26 @@ pub fn fs_main(
         full
     });
     fragment_store(color.x, color.y, color.z, mat.opacity);
+}
+
+/// `cross(n, t)`: the bitangent of the surface frame.
+#[inline(always)]
+fn tangent_bitangent(n: Vec3, t: Vec3) -> Vec3 {
+    v3(
+        cross_lane::<X_LANE>(n.x, n.y, n.z, t.x, t.y, t.z),
+        cross_lane::<Y_LANE>(n.x, n.y, n.z, t.x, t.y, t.z),
+        cross_lane::<Z_LANE>(n.x, n.y, n.z, t.x, t.y, t.z),
+    )
+}
+
+/// `Camera::camera_pos.xyz`.
+#[inline(always)]
+fn camera_position(camera: &Uniform<Camera, GROUP, CAMERA_BINDING>) -> Vec3 {
+    v3(
+        camera.vec4_lane::<CAMERA_POS, X_LANE_U>(),
+        camera.vec4_lane::<CAMERA_POS, Y_LANE_U>(),
+        camera.vec4_lane::<CAMERA_POS, Z_LANE_U>(),
+    )
 }
 
 /// `Lighting::ambient_color.xyz`.

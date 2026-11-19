@@ -5706,7 +5706,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains("storage_write_u32") {
             return self.store_void(out, args, Elem::U32);
         }
-        if callee.contains("llvm.assume") || callee.contains("llvm.lifetime") {
+        // Intrinsics that exist for the optimiser's benefit only:
+        // `llvm.assume`/`lifetime` say what the code already satisfies, and
+        // `llvm.experimental.noalias.scope.decl` marks a scope by metadata.
+        if callee.contains("llvm.assume")
+            || callee.contains("llvm.lifetime")
+            || callee.contains("llvm.experimental.")
+        {
             return Ok(());
         }
         Err(TranslateError::Unsupported)

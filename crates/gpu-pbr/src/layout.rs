@@ -33,6 +33,12 @@ pub const SHADOW_TEX_BINDING: u32 = 4;
 pub const SHADOW_SAMPLER_BINDING: u32 = 5;
 /// Binding of the point-light shadow cube pool.
 pub const SHADOW_CUBE_BINDING: u32 = 6;
+/// Binding of the prefiltered environment map.
+pub const PREFILTER_BINDING: u32 = 7;
+/// Binding of the diffuse irradiance map.
+pub const IRRADIANCE_BINDING: u32 = 8;
+/// Binding of the split-sum BRDF lookup table.
+pub const BRDF_LUT_BINDING: u32 = 9;
 /// Binding of the IBL sampler.
 pub const IBL_SAMPLER_BINDING: u32 = 10;
 /// Binding of the cascaded-shadow-map atlas.

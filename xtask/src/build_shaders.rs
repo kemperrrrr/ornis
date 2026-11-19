@@ -17,8 +17,13 @@ const DEFAULT_PACKAGE: &str = "ornis-gpu-shaders";
 const DEFAULT_ENTRY: &str = "cs_main";
 /// `--entry all`: translate every entry point into one module.
 const ALL_ENTRIES: &str = "all";
-/// Raster entries the translator also accepts.
-const RASTER_ENTRIES: [&str; 2] = ["fs_main", "vs_main"];
+/// Entry-name prefixes the translator recognises a stage from.
+///
+/// A crate may define more than one entry per stage — `vs_main_indirect` or
+/// `fs_main_textured` — and the translator picks the stage by prefix, so the
+/// command line accepts any name that starts with one of these. A name that
+/// matches none is rejected here, where the message can name the rule.
+const ENTRY_PREFIXES: [&str; 3] = [DEFAULT_ENTRY, "vs_main", "fs_main"];
 /// LLVM optimisation level used for the shader crate.
 ///
 /// `1` is the canonical level for the checked-in artifacts: it inlines the
@@ -61,10 +66,13 @@ pub fn build_shaders(raw: &[String]) {
         }
     };
     if let Some(entry) = &args.entry {
-        if entry != DEFAULT_ENTRY && !RASTER_ENTRIES.contains(&entry.as_str()) {
+        let known = ENTRY_PREFIXES
+            .iter()
+            .any(|prefix| entry.starts_with(prefix));
+        if !known {
             eprintln!(
-                "xtask build-shaders: entry must be `{DEFAULT_ENTRY}`, `{}`, `{}`, or `{ALL_ENTRIES}`",
-                RASTER_ENTRIES[0], RASTER_ENTRIES[1]
+                "xtask build-shaders: entry must start with `{}`, `{}`, or `{}`, or be `{ALL_ENTRIES}`",
+                ENTRY_PREFIXES[0], ENTRY_PREFIXES[1], ENTRY_PREFIXES[2]
             );
             exit(2);
         }

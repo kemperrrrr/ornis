@@ -162,6 +162,7 @@ fn clip_lane<const LANE: usize>(
 ///
 /// The fragment is projected with the light's view-projection and compared
 /// against the stored depth at the layer `params.w` names.
+#[inline(always)]
 pub(crate) fn spot_shadow(
     shadow_tex: &DepthTexture2dArray<GROUP, SHADOW_TEX_BINDING>,
     shadow_sampler: ComparisonSampler<GROUP, SHADOW_SAMPLER_BINDING>,
@@ -205,6 +206,7 @@ pub(crate) fn shadow_lane<const LANE: usize>(
 ///
 /// A cube face stores a linear depth along the major axis, so the reference
 /// depth is reconstructed from the light range rather than from a projection.
+#[inline(always)]
 pub(crate) fn point_shadow(
     shadow_cube_tex: &DepthCubeArray<GROUP, SHADOW_CUBE_BINDING>,
     shadow_sampler: ComparisonSampler<GROUP, SHADOW_SAMPLER_BINDING>,

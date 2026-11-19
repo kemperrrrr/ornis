@@ -1267,6 +1267,12 @@ fn parse_call(rhs: &str) -> Result<(String, Vec<Operand>), TranslateError> {
     for arg in split_top(inner) {
         // `i32 noundef %id` and `float 1.0`: the value is the last token.
         if let Some(value) = arg.split_whitespace().next_back() {
+            // `metadata !159` is an annotation, not an argument: the
+            // noalias-scope intrinsics take nothing else, and the call is
+            // dropped at lowering.
+            if value.starts_with('!') {
+                continue;
+            }
             args.push(parse_operand(value)?);
         }
     }
