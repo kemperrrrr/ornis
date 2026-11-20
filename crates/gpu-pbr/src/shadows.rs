@@ -20,11 +20,9 @@ use ornis_gpu_shader::Storage;
 use ornis_gpu_shader::abs;
 
 use crate::layout::CASCADE_ARRAY_LEN;
-use crate::layout::CLUSTERED_LIGHTS_BINDING;
 use crate::layout::CSM_FIELD;
 use crate::layout::CSM_SPLIT_FAR_FIELD;
 use crate::layout::CSM_SPLITS_LO_FIELD;
-use crate::layout::CSM_TEX_BINDING;
 use crate::layout::CSM_VIEW_FWD_FIELD;
 use crate::layout::CSM_VPS_FIELD;
 use crate::layout::FIRST_COLUMN;
@@ -35,14 +33,10 @@ use crate::layout::LIGHT_POSITION_WORD;
 use crate::layout::LIGHT_RANGE_WORD;
 use crate::layout::LIGHT_SHADOW_LAYER_WORD;
 use crate::layout::LIGHT_SHADOW_VP_WORD;
-use crate::layout::LIGHTING_BINDING;
 use crate::layout::Lighting;
 use crate::layout::MIDDLE_COLUMN;
 use crate::layout::NDC_TO_UV_HALF;
 use crate::layout::SECOND_COLUMN_WORD;
-use crate::layout::SHADOW_CUBE_BINDING;
-use crate::layout::SHADOW_SAMPLER_BINDING;
-use crate::layout::SHADOW_TEX_BINDING;
 use crate::layout::THIRD_COLUMN_WORD;
 use crate::layout::W_LANE_U;
 use crate::layout::X_LANE_U;
@@ -80,10 +74,10 @@ fn max_f32(a: f32, b: f32) -> f32 {
 ///
 /// `0` fully shadowed, `1` fully lit, blended across the split band.
 #[inline(always)]
-pub(crate) fn csm_visibility(
-    lighting: &Uniform<Lighting, GROUP, LIGHTING_BINDING>,
-    csm_tex: &DepthTexture2dArray<GROUP, CSM_TEX_BINDING>,
-    shadow_sampler: ComparisonSampler<GROUP, SHADOW_SAMPLER_BINDING>,
+pub fn csm_visibility<const LB: u32, const CSMB: u32, const SSB: u32>(
+    lighting: &Uniform<Lighting, GROUP, LB>,
+    csm_tex: &DepthTexture2dArray<GROUP, CSMB>,
+    shadow_sampler: ComparisonSampler<GROUP, SSB>,
     world_pos: Vec3,
     cam_pos: Vec3,
 ) -> f32 {
@@ -106,11 +100,18 @@ pub(crate) fn csm_visibility(
     let cascade = (past_b1 + past_b2 + past_b3) as u32;
     let upper = mix(mix(mix(b1, b2, past_b1), b3, past_b2), b4, past_b3);
     let lower = mix(mix(mix(b0, b1, past_b1), b2, past_b2), b3, past_b3);
-    let mut vis = cascade_sample(lighting, csm_tex, shadow_sampler, world_pos, cascade);
+    let mut vis =
+        cascade_sample::<LB, CSMB, SSB>(lighting, csm_tex, shadow_sampler, world_pos, cascade);
     if cascade < CSM_LAST_CASCADE {
         let band = max_f32((upper - lower) * CSM_BLEND_FRACTION, EPS);
         let t = ((upper - view_depth) / band).clamp(0.0, 1.0);
-        let vis1 = cascade_sample(lighting, csm_tex, shadow_sampler, world_pos, cascade + 1);
+        let vis1 = cascade_sample::<LB, CSMB, SSB>(
+            lighting,
+            csm_tex,
+            shadow_sampler,
+            world_pos,
+            cascade + 1,
+        );
         vis = mix(vis1, vis, t);
     }
     vis
@@ -122,17 +123,17 @@ pub(crate) fn csm_visibility(
 /// only way a uniform matrix can be indexed: WGSL allows a dynamic index into a
 /// fixed-size array, not into a matrix.
 #[inline(always)]
-fn cascade_sample(
-    lighting: &Uniform<Lighting, GROUP, LIGHTING_BINDING>,
-    csm_tex: &DepthTexture2dArray<GROUP, CSM_TEX_BINDING>,
-    shadow_sampler: ComparisonSampler<GROUP, SHADOW_SAMPLER_BINDING>,
+fn cascade_sample<const LB: u32, const CSMB: u32, const SSB: u32>(
+    lighting: &Uniform<Lighting, GROUP, LB>,
+    csm_tex: &DepthTexture2dArray<GROUP, CSMB>,
+    shadow_sampler: ComparisonSampler<GROUP, SSB>,
     world_pos: Vec3,
     cascade: u32,
 ) -> f32 {
-    let x = clip_lane::<X_LANE_U>(lighting, cascade, world_pos);
-    let y = clip_lane::<Y_LANE_U>(lighting, cascade, world_pos);
-    let z = clip_lane::<Z_LANE_U>(lighting, cascade, world_pos);
-    let w = clip_lane::<W_LANE_U>(lighting, cascade, world_pos);
+    let x = clip_lane::<X_LANE_U, LB>(lighting, cascade, world_pos);
+    let y = clip_lane::<Y_LANE_U, LB>(lighting, cascade, world_pos);
+    let z = clip_lane::<Z_LANE_U, LB>(lighting, cascade, world_pos);
+    let w = clip_lane::<W_LANE_U, LB>(lighting, cascade, world_pos);
     let u = (x / w) * NDC_TO_UV_HALF + NDC_TO_UV_HALF;
     let v = NDC_TO_UV_HALF - (y / w) * NDC_TO_UV_HALF;
     csm_tex.sample_compare(shadow_sampler, u, v, cascade, (z / w) - SHADOW_REF_BIAS)
@@ -143,8 +144,8 @@ fn cascade_sample(
 /// Word `LANE` of each of the four columns scaled by that column's coordinate:
 /// reading the columns as rows would silently transpose the projection.
 #[inline(always)]
-fn clip_lane<const LANE: usize>(
-    lighting: &Uniform<Lighting, GROUP, LIGHTING_BINDING>,
+fn clip_lane<const LANE: usize, const LB: u32>(
+    lighting: &Uniform<Lighting, GROUP, LB>,
     cascade: u32,
     world_pos: Vec3,
 ) -> f32 {
@@ -163,17 +164,17 @@ fn clip_lane<const LANE: usize>(
 /// The fragment is projected with the light's view-projection and compared
 /// against the stored depth at the layer `params.w` names.
 #[inline(always)]
-pub(crate) fn spot_shadow(
-    shadow_tex: &DepthTexture2dArray<GROUP, SHADOW_TEX_BINDING>,
-    shadow_sampler: ComparisonSampler<GROUP, SHADOW_SAMPLER_BINDING>,
+pub fn spot_shadow<const STB: u32, const SSB: u32, const LIGHTS_B: u32>(
+    shadow_tex: &DepthTexture2dArray<GROUP, STB>,
+    shadow_sampler: ComparisonSampler<GROUP, SSB>,
     light: &LightRef,
-    lights: &Storage<u32, GROUP, CLUSTERED_LIGHTS_BINDING, ReadOnly>,
+    lights: &Storage<u32, GROUP, LIGHTS_B, ReadOnly>,
     world_pos: &Vec3,
 ) -> f32 {
-    let x = shadow_lane::<X_LANE_U>(light, lights, world_pos);
-    let y = shadow_lane::<Y_LANE_U>(light, lights, world_pos);
-    let z = shadow_lane::<Z_LANE_U>(light, lights, world_pos);
-    let w = shadow_lane::<W_LANE_U>(light, lights, world_pos);
+    let x = shadow_lane::<X_LANE_U, LIGHTS_B>(light, lights, world_pos);
+    let y = shadow_lane::<Y_LANE_U, LIGHTS_B>(light, lights, world_pos);
+    let z = shadow_lane::<Z_LANE_U, LIGHTS_B>(light, lights, world_pos);
+    let w = shadow_lane::<W_LANE_U, LIGHTS_B>(light, lights, world_pos);
     let u = (x / w) * NDC_TO_UV_HALF + NDC_TO_UV_HALF;
     let v = NDC_TO_UV_HALF - (y / w) * NDC_TO_UV_HALF;
     let layer = light.word(lights, LIGHT_SHADOW_LAYER_WORD) as u32;
@@ -181,9 +182,9 @@ pub(crate) fn spot_shadow(
 }
 
 /// Lane `LANE` of `shadow_vp · (x, y, z, 1)` of the current light.
-pub(crate) fn shadow_lane<const LANE: usize>(
+pub fn shadow_lane<const LANE: usize, const LIGHTS_B: u32>(
     light: &LightRef,
-    lights: &Storage<u32, GROUP, CLUSTERED_LIGHTS_BINDING, ReadOnly>,
+    lights: &Storage<u32, GROUP, LIGHTS_B, ReadOnly>,
     world_pos: &Vec3,
 ) -> f32 {
     let c0 = light.word(lights, LIGHT_SHADOW_VP_WORD + LANE as u32);
@@ -207,11 +208,11 @@ pub(crate) fn shadow_lane<const LANE: usize>(
 /// A cube face stores a linear depth along the major axis, so the reference
 /// depth is reconstructed from the light range rather than from a projection.
 #[inline(always)]
-pub(crate) fn point_shadow(
-    shadow_cube_tex: &DepthCubeArray<GROUP, SHADOW_CUBE_BINDING>,
-    shadow_sampler: ComparisonSampler<GROUP, SHADOW_SAMPLER_BINDING>,
+pub fn point_shadow<const SCB: u32, const SSB: u32, const LIGHTS_B: u32>(
+    shadow_cube_tex: &DepthCubeArray<GROUP, SCB>,
+    shadow_sampler: ComparisonSampler<GROUP, SSB>,
     light: &LightRef,
-    lights: &Storage<u32, GROUP, CLUSTERED_LIGHTS_BINDING, ReadOnly>,
+    lights: &Storage<u32, GROUP, LIGHTS_B, ReadOnly>,
     world_pos: &Vec3,
 ) -> f32 {
     let to_frag = sub3(*world_pos, light.xyz(lights, LIGHT_POSITION_WORD));

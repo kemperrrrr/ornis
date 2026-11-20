@@ -102,7 +102,14 @@ pub(crate) fn direct(
         let light = LightRef {
             base: light_base(light_indices, k, light_count, span_offset),
         };
-        let radiance = shaded_radiance(
+        let radiance = shaded_radiance::<
+            LIGHTING_BINDING,
+            SHADOW_TEX_BINDING,
+            SHADOW_CUBE_BINDING,
+            CSM_TEX_BINDING,
+            SHADOW_SAMPLER_BINDING,
+            CLUSTERED_LIGHTS_BINDING,
+        >(
             lighting,
             shadow_tex,
             shadow_cube_tex,
@@ -113,7 +120,7 @@ pub(crate) fn direct(
             &frame.world_pos,
             &frame.cam_pos,
         );
-        let l = light_dir(lights, &light, frame);
+        let l = light_dir::<CLUSTERED_LIGHTS_BINDING>(lights, &light, frame);
         let h = normalize3(add3(add3(frame.v, l), v3(0.0, 0.0, EPS)));
         let nol = max_f32(dot3(frame.n.x, frame.n.y, frame.n.z, l.x, l.y, l.z), EPS);
         let noh = max_f32(dot3(frame.n.x, frame.n.y, frame.n.z, h.x, h.y, h.z), EPS);

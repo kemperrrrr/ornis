@@ -23,8 +23,6 @@ use ornis_gpu_shader::smoothstep;
 
 use crate::direct::Frame;
 use crate::layout::CLUSTER_INDICES_BINDING;
-use crate::layout::CLUSTERED_LIGHTS_BINDING;
-use crate::layout::CSM_TEX_BINDING;
 use crate::layout::GROUP;
 use crate::layout::LIGHT_COLOR_WORD;
 use crate::layout::LIGHT_DIRECTION_WORD;
@@ -34,11 +32,7 @@ use crate::layout::LIGHT_PARAMS_WORD;
 use crate::layout::LIGHT_POSITION_WORD;
 use crate::layout::LIGHT_SHADOW_LAYER_WORD;
 use crate::layout::LIGHT_STRIDE;
-use crate::layout::LIGHTING_BINDING;
 use crate::layout::Lighting;
-use crate::layout::SHADOW_CUBE_BINDING;
-use crate::layout::SHADOW_SAMPLER_BINDING;
-use crate::layout::SHADOW_TEX_BINDING;
 use crate::layout::light_word;
 use crate::shadows::csm_visibility;
 use crate::shadows::point_shadow;
@@ -84,25 +78,25 @@ pub(crate) struct LightRef {
 impl LightRef {
     /// `f32` word `word` of this record.
     #[inline(always)]
-    pub(crate) fn word(
+    pub fn word<const LIGHTS_B: u32>(
         &self,
-        lights: &Storage<u32, GROUP, CLUSTERED_LIGHTS_BINDING, ReadOnly>,
+        lights: &Storage<u32, GROUP, LIGHTS_B, ReadOnly>,
         word: u32,
     ) -> f32 {
-        light_word(lights, self.base, word)
+        light_word::<LIGHTS_B>(lights, self.base, word)
     }
 
     /// Lanes `x`, `y`, `z` of the `vec4` at `word`.
     #[inline(always)]
-    pub(crate) fn xyz(
+    pub fn xyz<const LIGHTS_B: u32>(
         &self,
-        lights: &Storage<u32, GROUP, CLUSTERED_LIGHTS_BINDING, ReadOnly>,
+        lights: &Storage<u32, GROUP, LIGHTS_B, ReadOnly>,
         word: u32,
     ) -> Vec3 {
         v3(
-            self.word(lights, word),
-            self.word(lights, word + 1),
-            self.word(lights, word + 2),
+            self.word::<LIGHTS_B>(lights, word),
+            self.word::<LIGHTS_B>(lights, word + 1),
+            self.word::<LIGHTS_B>(lights, word + 2),
         )
     }
 }
@@ -128,18 +122,21 @@ pub(crate) fn light_base(
 /// Unit vector toward the light: the stored direction for a directional or spot
 /// light, the direction to the light centre for a point light.
 #[inline(always)]
-pub(crate) fn light_dir(
-    lights: &Storage<u32, GROUP, CLUSTERED_LIGHTS_BINDING, ReadOnly>,
+pub fn light_dir<const LIGHTS_B: u32>(
+    lights: &Storage<u32, GROUP, LIGHTS_B, ReadOnly>,
     light: &LightRef,
     frame: &Frame,
 ) -> Vec3 {
-    let kind = light.word(lights, LIGHT_KIND_WORD);
-    let to_light = sub3(light.xyz(lights, LIGHT_POSITION_WORD), frame.world_pos);
+    let kind = light.word::<LIGHTS_B>(lights, LIGHT_KIND_WORD);
+    let to_light = sub3(
+        light.xyz::<LIGHTS_B>(lights, LIGHT_POSITION_WORD),
+        frame.world_pos,
+    );
     let dist = length3(to_light.x, to_light.y, to_light.z);
     let to_point = scale3(to_light, 1.0 / max_f32(dist, EPS));
     let use_point = step(POINT_OR_SPOT_KIND_EDGE, kind);
     normalize3(mix3(
-        normalize3(light.xyz(lights, LIGHT_DIRECTION_WORD)),
+        normalize3(light.xyz::<LIGHTS_B>(lights, LIGHT_DIRECTION_WORD)),
         to_point,
         use_point,
     ))
@@ -151,34 +148,47 @@ pub(crate) fn light_dir(
 // qual:allow(srp, max_parameters=9) reason: "two shadow textures, the cascade block and the sampler they share, plus the light record and the frame position"
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-pub(crate) fn shaded_radiance(
-    lighting: &Uniform<Lighting, GROUP, LIGHTING_BINDING>,
-    shadow_tex: &DepthTexture2dArray<GROUP, SHADOW_TEX_BINDING>,
-    shadow_cube_tex: &DepthCubeArray<GROUP, SHADOW_CUBE_BINDING>,
-    csm_tex: &DepthTexture2dArray<GROUP, CSM_TEX_BINDING>,
-    shadow_sampler: ComparisonSampler<GROUP, SHADOW_SAMPLER_BINDING>,
+pub fn shaded_radiance<
+    const LB: u32,
+    const STB: u32,
+    const SCB: u32,
+    const CSMB: u32,
+    const SSB: u32,
+    const LIGHTS_B: u32,
+>(
+    lighting: &Uniform<Lighting, GROUP, LB>,
+    shadow_tex: &DepthTexture2dArray<GROUP, STB>,
+    shadow_cube_tex: &DepthCubeArray<GROUP, SCB>,
+    csm_tex: &DepthTexture2dArray<GROUP, CSMB>,
+    shadow_sampler: ComparisonSampler<GROUP, SSB>,
     light: &LightRef,
-    lights: &Storage<u32, GROUP, CLUSTERED_LIGHTS_BINDING, ReadOnly>,
+    lights: &Storage<u32, GROUP, LIGHTS_B, ReadOnly>,
     world_pos: &Vec3,
     cam_pos: &Vec3,
 ) -> Vec3 {
-    let kind = light.word(lights, LIGHT_KIND_WORD);
-    let to_light = sub3(light.xyz(lights, LIGHT_POSITION_WORD), *world_pos);
+    let kind = light.word::<LIGHTS_B>(lights, LIGHT_KIND_WORD);
+    let to_light = sub3(
+        light.xyz::<LIGHTS_B>(lights, LIGHT_POSITION_WORD),
+        *world_pos,
+    );
     let dist = length3(to_light.x, to_light.y, to_light.z);
     let use_point = step(POINT_OR_SPOT_KIND_EDGE, kind);
-    let range = light.word(lights, LIGHT_PARAMS_WORD);
+    let range = light.word::<LIGHTS_B>(lights, LIGHT_PARAMS_WORD);
     let edge0 = range * RANGE_CUTOFF_INNER_FRACTION;
     let range_cut = mix(1.0, 1.0 - smoothstep(edge0, range, dist), use_point);
-    let color = light.xyz(lights, LIGHT_COLOR_WORD);
-    let intensity = light.word(lights, LIGHT_INTENSITY_WORD);
-    let to_frag = normalize3(sub3(*world_pos, light.xyz(lights, LIGHT_POSITION_WORD)));
-    let axis = normalize3(light.xyz(lights, LIGHT_DIRECTION_WORD));
+    let color = light.xyz::<LIGHTS_B>(lights, LIGHT_COLOR_WORD);
+    let intensity = light.word::<LIGHTS_B>(lights, LIGHT_INTENSITY_WORD);
+    let to_frag = normalize3(sub3(
+        *world_pos,
+        light.xyz::<LIGHTS_B>(lights, LIGHT_POSITION_WORD),
+    ));
+    let axis = normalize3(light.xyz::<LIGHTS_B>(lights, LIGHT_DIRECTION_WORD));
     let cos_theta = dot3(axis.x, axis.y, axis.z, to_frag.x, to_frag.y, to_frag.z);
     let cone = mix(
         1.0,
         smoothstep(
-            light.word(lights, LIGHT_PARAMS_WORD + 2),
-            light.word(lights, LIGHT_PARAMS_WORD + 1),
+            light.word::<LIGHTS_B>(lights, LIGHT_PARAMS_WORD + 2),
+            light.word::<LIGHTS_B>(lights, LIGHT_PARAMS_WORD + 1),
             cos_theta,
         ),
         step(SPOT_KIND_EDGE, kind),
@@ -193,20 +203,38 @@ pub(crate) fn shaded_radiance(
     if is_csm > LIGHT_SELECTOR_SPLIT {
         radiance = scale3(
             radiance,
-            csm_visibility(lighting, csm_tex, shadow_sampler, *world_pos, *cam_pos),
+            csm_visibility::<LB, CSMB, SSB>(
+                lighting,
+                csm_tex,
+                shadow_sampler,
+                *world_pos,
+                *cam_pos,
+            ),
         );
     }
-    if light.word(lights, LIGHT_SHADOW_LAYER_WORD) >= 0.0 {
+    if light.word::<LIGHTS_B>(lights, LIGHT_SHADOW_LAYER_WORD) >= 0.0 {
         if is_point <= LIGHT_SELECTOR_SPLIT {
             radiance = scale3(
                 radiance,
-                spot_shadow(shadow_tex, shadow_sampler, light, lights, world_pos),
+                spot_shadow::<STB, SSB, LIGHTS_B>(
+                    shadow_tex,
+                    shadow_sampler,
+                    light,
+                    lights,
+                    world_pos,
+                ),
             );
         }
         if is_point > LIGHT_SELECTOR_SPLIT {
             radiance = scale3(
                 radiance,
-                point_shadow(shadow_cube_tex, shadow_sampler, light, lights, world_pos),
+                point_shadow::<SCB, SSB, LIGHTS_B>(
+                    shadow_cube_tex,
+                    shadow_sampler,
+                    light,
+                    lights,
+                    world_pos,
+                ),
             );
         }
     }
