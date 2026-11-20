@@ -29,11 +29,10 @@
 
 use glam::Mat4;
 use ornis_animation::{JointLimit, SkinError};
-use ornis_macros::{WgslInterface, WgslStruct, stage};
+use ornis_macros::{WgslInterface, WgslStruct};
 
 use crate::renderer::{CameraUniform, PerObjectGpu};
-use crate::shaders::interface::GbufferVertexOutput as VertexOutput;
-use crate::shaders::{Resource, ResourceKind, ShaderModule, wgsl_decl};
+use crate::shaders::{Resource, ResourceKind};
 
 /// GPU parity and A/B harness for the experimental wasm2gpu compute
 /// skinning guest (issue #228): a Rust→Wasm→WGSL pre-pass next to the
@@ -130,104 +129,17 @@ pub(crate) struct SkinnedVertexInput {
     pub weights: [f32; 4],
 }
 
-/// Skinned vertex resources as a context bundle (`ctx.per_objects`, …).
-#[allow(dead_code)]
-#[derive(ornis_macros::ShaderContext)]
-pub(crate) struct SkinnedGbufferContext {
-    pub per_objects: Vec<PerObjectGpu>,
-    pub camera: CameraUniform,
-    pub palette: Vec<SkinJoint>,
-    pub previous_palette: Vec<SkinJoint>,
-}
-
-/// Skinned g-buffer vertex entry, translated by [`stage`](ornis_macros::stage):
-/// linear blend skinning over the joint palette, then the instance
-/// transform and the shared world-space varying. DSL-only — `per_objects` /
-/// `camera` / `palette` globals declared via the context bundle.
+/// Skinned g-buffer vertex shader, translated from `ornis-gpu-skinning`.
 ///
-/// Normals blend through each joint's inverse-transpose (`normal_matrix`).
-/// Positions and tangents blend through the joint matrix. A degenerate
-/// joint uploads an identity normal matrix, matching the CPU path.
-#[stage(vertex)]
-fn vs_main_skinned(
-    input: SkinnedVertexInput,
-    instance_index: crate::shaders::InstanceIndex,
-    ctx: Context<SkinnedGbufferContext>,
-) -> VertexOutput {
-    let obj = ctx.per_objects[instance_index];
-    let joint0 = ctx.palette[input.joints.x];
-    let joint1 = ctx.palette[input.joints.y];
-    let joint2 = ctx.palette[input.joints.z];
-    let joint3 = ctx.palette[input.joints.w];
-    let previous_joint0 = ctx.previous_palette[input.joints.x];
-    let previous_joint1 = ctx.previous_palette[input.joints.y];
-    let previous_joint2 = ctx.previous_palette[input.joints.z];
-    let previous_joint3 = ctx.previous_palette[input.joints.w];
-    let weight0 = input.weights.x;
-    let weight1 = input.weights.y;
-    let weight2 = input.weights.z;
-    let weight3 = input.weights.w;
-    let skinned_pos = (joint0.matrix * Vec4::new(input.position, 1.0)).xyz * weight0
-        + (joint1.matrix * Vec4::new(input.position, 1.0)).xyz * weight1
-        + (joint2.matrix * Vec4::new(input.position, 1.0)).xyz * weight2
-        + (joint3.matrix * Vec4::new(input.position, 1.0)).xyz * weight3;
-    let previous_skinned_pos = (previous_joint0.matrix * Vec4::new(input.position, 1.0)).xyz
-        * weight0
-        + (previous_joint1.matrix * Vec4::new(input.position, 1.0)).xyz * weight1
-        + (previous_joint2.matrix * Vec4::new(input.position, 1.0)).xyz * weight2
-        + (previous_joint3.matrix * Vec4::new(input.position, 1.0)).xyz * weight3;
-    let skinned_nrm = normalize(
-        (joint0.normal_matrix * Vec4::new(input.normal, 0.0)).xyz * weight0
-            + (joint1.normal_matrix * Vec4::new(input.normal, 0.0)).xyz * weight1
-            + (joint2.normal_matrix * Vec4::new(input.normal, 0.0)).xyz * weight2
-            + (joint3.normal_matrix * Vec4::new(input.normal, 0.0)).xyz * weight3,
-    );
-    let skinned_tan = normalize(
-        (joint0.matrix * Vec4::new(input.tangent, 0.0)).xyz * weight0
-            + (joint1.matrix * Vec4::new(input.tangent, 0.0)).xyz * weight1
-            + (joint2.matrix * Vec4::new(input.tangent, 0.0)).xyz * weight2
-            + (joint3.matrix * Vec4::new(input.tangent, 0.0)).xyz * weight3,
-    );
-    let world_pos = obj.model * Vec4::new(skinned_pos, 1.0);
-    let mut previous_world_pos = obj.previous_model * Vec4::new(previous_skinned_pos, 1.0);
-    if obj.motion_valid == 0 {
-        previous_world_pos = Vec4::new(previous_world_pos.xyz, 0.0);
-    }
-    let mut world_normal = normalize((obj.normal_matrix * Vec4::new(skinned_nrm, 0.0)).xyz);
-    // Instance tangent uses the model matrix (a direction). The normal
-    // keeps the instance inverse-transpose. Joint normals already used
-    // each joint's inverse-transpose (`normal_matrix`).
-    let mut world_tangent = normalize((obj.model * Vec4::new(skinned_tan, 0.0)).xyz);
-    let mut output: VertexOutput;
-    output.clip_position = ctx.camera.view_proj * world_pos;
-    output.world_position = world_pos.xyz;
-    output.previous_world_position = previous_world_pos;
-    output.world_normal = world_normal;
-    output.uv = input.uv;
-    output.world_tangent = world_tangent;
-    output.material_index = obj.material_index;
-    return output;
-}
-
-/// Skinned g-buffer vertex shader: palette blend + instance transform.
-///
-/// Assembled from the derived `Camera`/`PerObject`/`SkinJoint` layouts plus
-/// the skinned entry body; the varying matches the classic vertex output,
-/// so the fragment stage is shared. Entry point `vs_main_skinned` is new
-/// (no legacy shape to preserve).
+/// `xtask build-shaders --package ornis-gpu-skinning --entry vs_main_skinned`
+/// writes `skinning_generated.wgsl`; the varying matches the classic vertex
+/// output, so the fragment stage stays shared.
 pub fn wgsl_vertex_source_skinned() -> String {
-    /// Camera / per-object / joint-palette bind-group slots.
-    const SKINNED_BINDINGS: [u32; 4] = [0, 1, 3, 4];
-    ShaderModule::new()
-        .decl(CameraUniform::WGSL_SOURCE)
-        .decl(PerObjectGpu::WGSL_SOURCE)
-        .decl(SkinJoint::WGSL_SOURCE)
-        .resources(&GBUFFER_SKINNED_RESOURCES, &SKINNED_BINDINGS)
-        .decl(wgsl_decl(SkinnedVertexInput::WGSL_SOURCE))
-        .decl(wgsl_decl(VertexOutput::WGSL_SOURCE))
-        .entry(vs_main_skinned::wgsl_source())
-        .emit()
+    include_str!("shaders/skinning_generated.wgsl").to_string()
 }
+
+/// Entry-point name of the translated skinned vertex module.
+pub const SKINNED_ENTRY: &str = "vs_main_skinned";
 
 /// Resource layout of the skinned g-buffer vertex stage: the classic rows
 /// plus the current and previous joint palettes. Type names come from the
@@ -482,7 +394,7 @@ pub fn palette_upload_bytes(joints: &[[[f32; 4]; 4]]) -> Result<Vec<u8>, SkinBin
 /// pipelines (color + depth pre-pass) target this, sharing the classic
 /// fragment stage.
 pub fn skinned_entry_point() -> &'static str {
-    vs_main_skinned::entry_point()
+    SKINNED_ENTRY
 }
 
 #[cfg(test)]
@@ -549,53 +461,67 @@ mod tests {
         assert_valid_wgsl("skinned_vertex", &wgsl_vertex_source_skinned());
     }
 
+    /// The translated entry keeps the DSL's shape: palette blend, instance
+    /// transform and the shared varying. SSA locals are unreadable, so the
+    /// bands are pinned structurally; `custom_skinned_pixel` and the CPU
+    /// parity tests carry the numbers.
     #[test]
     fn skinned_entry_keeps_gpu_shape() {
-        let entry = vs_main_skinned::wgsl_source();
-        assert!(entry.starts_with(
-            "@vertex\nfn vs_main_skinned(input: SkinnedVertexInput, @builtin(instance_index) instance_index: u32)"
-        ));
-        // Skinned motion reuses the g-buffer previous-world varying: pin the
-        // palette history and validity flag, not the unrolled contains-chain
-        // the forward-fragment shape test uses.
-        let needles = [
-            "-> VertexOutput",
-            "let joint0 = palette[input.joints.x];",
-            "let joint3 = palette[input.joints.w];",
-            "let previous_joint3 = previous_palette[input.joints.w];",
-            "obj.previous_model",
-            "obj.motion_valid",
-            "output.previous_world_position = previous_world_pos;",
-            "joint0.matrix * ",
-            "joint0.normal_matrix * ",
-            "input.weights.x",
-            "output.clip_position = camera.view_proj * world_pos;",
-            "output.material_index = obj.material_index;",
-            "return output;",
-        ];
-        for needle in needles {
-            assert!(entry.contains(needle), "{needle}");
+        let src = wgsl_vertex_source_skinned();
+        let start = src.find(&format!("fn {SKINNED_ENTRY}(")).expect("entry");
+        assert!(
+            src[..start].trim_end().ends_with("@vertex"),
+            "entry lost its @vertex attribute"
+        );
+        // Interface: the classic prefix, then joints and weights.
+        for line in [
+            "@location(0) in0_: vec3<f32>",
+            "@location(1) in1_: vec3<f32>",
+            "@location(2) in2_: vec2<f32>",
+            "@location(3) in3_: vec3<f32>",
+            "@location(4) @interpolate(flat) in4_: vec4<u32>",
+            "@location(5) in5_: vec4<f32>",
+            "@builtin(instance_index) instance_index: u32",
+        ] {
+            assert!(src.contains(line), "input drifted: {line}");
         }
+        let entry = &src[start..];
+        assert!(entry.contains("-> VertexOut"));
+        // Both palettes are read, and the material index comes from the
+        // object record rather than from a vertex attribute.
+        assert!(
+            entry.matches("storage_0_3_").count() > 0,
+            "the palette is never read"
+        );
+        assert!(
+            entry.matches("storage_0_4_").count() > 0,
+            "no previous palette"
+        );
+        assert!(entry.contains("in4_.x"), "joint 0 is not read");
+        assert!(entry.contains("in5_.w"), "weight 3 is not read");
     }
 
     #[test]
     fn skinned_resources_cover_stages_and_layout() {
-        use crate::shaders::{bgl_entry, resource_decl};
-        let src = wgsl_vertex_source_skinned();
+        use crate::shaders::{bgl_entry, declared_bindings};
+        let module = naga::front::wgsl::parse_str(&wgsl_vertex_source_skinned()).expect("vertex");
+        let bindings = declared_bindings(&module);
         assert_eq!(GBUFFER_SKINNED_RESOURCES.len(), 5);
         for r in GBUFFER_SKINNED_RESOURCES {
-            // The palette row is vertex-only; the materials row belongs to
-            // the shared fragment stage (declared by its own assembly).
+            // The materials row belongs to the shared fragment stage, which
+            // this module does not carry.
             if r.binding != 2 {
-                assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
+                assert!(
+                    bindings.contains(&(r.group, r.binding)),
+                    "missing {} at {}:{}",
+                    r.name,
+                    r.group,
+                    r.binding
+                );
             }
             let e = bgl_entry(&r, false);
             assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
         }
-        assert!(src.contains("@group(0) @binding(3) var<storage, read> palette: array<SkinJoint>"));
-        assert!(src.contains(
-            "@group(0) @binding(4) var<storage, read> previous_palette: array<SkinJoint>"
-        ));
     }
 
     #[test]

@@ -253,6 +253,8 @@ unsafe extern "C" {
     fn import_vertex_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
     #[link_name = "vertex_input_u32"]
     fn import_vertex_input_u32(location: u32) -> u32;
+    #[link_name = "vertex_input_u32x4"]
+    fn import_vertex_input_u32x4(location: u32, lane: u32) -> u32;
     #[link_name = "vertex_position"]
     fn import_vertex_position(x: f32, y: f32, z: f32, w: f32);
     #[link_name = "vertex_store_f32x2"]
@@ -900,6 +902,13 @@ pub(crate) fn vertex_input_lane(location: u32, lanes: u32, lane: u32) -> f32 {
 #[inline(always)]
 pub(crate) fn vertex_input_u32(location: u32) -> u32 {
     call!(import_vertex_input_u32(location))
+}
+
+/// Lane `lane` of the `vec4<u32>` vertex input at `location`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+#[inline(always)]
+pub(crate) fn vertex_input_u32x4(location: u32, lane: u32) -> u32 {
+    call!(import_vertex_input_u32x4(location, lane))
 }
 
 /// Write the clip-space `@builtin(position)` of the vertex entry.

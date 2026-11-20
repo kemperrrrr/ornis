@@ -307,6 +307,8 @@ enum IoValue {
     Vec(u32),
     /// Scalar `u32`: `@interpolate(flat)` as a varying, a plain `u32` target.
     U32,
+    /// `vec4<u32>`: one flat four-word varying (a `vec4<u32>` joint index).
+    U32x4,
 }
 
 impl IoValue {
@@ -320,6 +322,19 @@ impl IoValue {
         match self {
             Self::Vec(lanes) => vec_f32_type(module, lanes).ok_or(TranslateError::Unsupported),
             Self::U32 => Ok(scalar(module, naga::ScalarKind::Uint)),
+            Self::U32x4 => Ok(module.types.insert(
+                naga::Type {
+                    name: None,
+                    inner: naga::TypeInner::Vector {
+                        size: naga::VectorSize::Quad,
+                        scalar: naga::Scalar {
+                            kind: naga::ScalarKind::Uint,
+                            width: SCALAR_WIDTH,
+                        },
+                    },
+                },
+                naga::Span::default(),
+            )),
         }
     }
 }
@@ -335,6 +350,8 @@ enum IoImport {
     VertexInput,
     /// Scalar `u32` vertex `@location` input.
     VertexInputU32,
+    /// Lane of a `vec4<u32>` vertex `@location` input.
+    VertexInputU32x4,
     /// Clip-space `@builtin(position)` of a vertex entry.
     VertexPosition,
     /// Two-lane vertex `@location` output.
@@ -365,10 +382,16 @@ enum IoImport {
 
 /// Order matters only where one import name is a prefix of another, which is
 /// why the located fragment output precedes the `@location(0)` one.
-const IO_IMPORTS: [(&str, IoImport); 17] = [
+const IO_IMPORTS: [(&str, IoImport); 18] = [
     (
         ornis_gpu_abi::symbols::VERTEX_INPUT_LANE,
         IoImport::VertexInput,
+    ),
+    // `vertex_input_u32` is a prefix of `vertex_input_u32x4`: the longer
+    // name goes first, because the lookup is a substring match.
+    (
+        ornis_gpu_abi::symbols::VERTEX_INPUT_U32X4,
+        IoImport::VertexInputU32x4,
     ),
     (
         ornis_gpu_abi::symbols::VERTEX_INPUT_U32,
@@ -464,6 +487,9 @@ fn scan_io(func: &LlvmFunc, stage: Stage) -> Result<StageIo, TranslateError> {
                 }
                 (Stage::Vertex, IoImport::VertexInputU32) => {
                     record_io(&mut io.inputs, location_of(args)?, IoValue::U32)?;
+                }
+                (Stage::Vertex, IoImport::VertexInputU32x4) => {
+                    record_io(&mut io.inputs, location_of(args)?, IoValue::U32x4)?;
                 }
                 (Stage::Vertex, IoImport::VertexPosition) => io.position_out = true,
                 (Stage::Vertex, IoImport::VertexOutputU32) => {
@@ -590,7 +616,7 @@ fn value_binding(location: u32, value: IoValue, output: bool) -> naga::Binding {
     } = &mut binding
     {
         match (value, output) {
-            (IoValue::U32, false) => {
+            (IoValue::U32 | IoValue::U32x4, false) => {
                 *interpolation = Some(naga::Interpolation::Flat);
                 *sampling = None;
             }
@@ -638,6 +664,7 @@ impl OutputLayout {
             IoValue::Vec(VEC3_LANES) => (VEC3_LANES * WORD_BYTES, VEC4_LANES * WORD_BYTES),
             IoValue::Vec(_) => (VEC4_LANES * WORD_BYTES, VEC4_LANES * WORD_BYTES),
             IoValue::U32 => (WORD_BYTES, WORD_BYTES),
+            IoValue::U32x4 => (VEC4_LANES * WORD_BYTES, VEC4_LANES * WORD_BYTES),
         };
         self.specs.push(ornis_gpu_abi::FieldLayout { size, align });
         self.slots.insert(slot, self.members.len() as u32);
@@ -4360,6 +4387,17 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains("fragment_uv_lane") {
             return self.input_lane(out, 0, args.first().ok_or(TranslateError::Unsupported)?);
         }
+        if callee.contains(ornis_gpu_abi::symbols::VERTEX_INPUT_U32X4) {
+            if args.len() != 2 {
+                return Err(TranslateError::Unsupported);
+            }
+            return self.input_word_lane(
+                out,
+                const_u32(&args[0])?,
+                const_u32(&args[1])?,
+                IoValue::U32x4,
+            );
+        }
         if callee.contains(ornis_gpu_abi::symbols::FRAGMENT_INPUT_U32)
             || callee.contains(ornis_gpu_abi::symbols::VERTEX_INPUT_U32)
         {
@@ -5412,7 +5450,6 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         out: &mut naga::Block,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
-        // qual:allow(dry, fragment) reason: "the argument decode of a nested import; a shared helper would hide which field is the struct and which the vector"
         let (sid, field, inner, component) = self.nested_ids(args)?;
         let global =
             self.builders
@@ -5896,6 +5933,30 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             .get(&location)
             .copied()
             .ok_or(TranslateError::Unsupported)
+    }
+
+    /// Lane `lane` of the integer `@location(location)` input declared `kind`.
+    fn input_word_lane(
+        &mut self,
+        out: &mut naga::Block,
+        location: u32,
+        lane: u32,
+        kind: IoValue,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if self.io.inputs.get(&location) != Some(&kind) || lane >= VEC4_LANES {
+            return Err(TranslateError::Unsupported);
+        }
+        let input = *self
+            .inputs
+            .get(&location)
+            .ok_or(TranslateError::Unsupported)?;
+        Ok(self.expr(
+            out,
+            naga::Expression::AccessIndex {
+                base: input,
+                index: lane,
+            },
+        ))
     }
 
     /// `storage_write_u32x4(group, binding, index, x, y, z, w)`.
