@@ -63,7 +63,6 @@ use ornis_gpu_shader::fragment_store;
 use ornis_gpu_shader::gpu_entry;
 use ornis_gpu_shader::mix;
 
-use crate::direct::Frame;
 use crate::direct::direct;
 use crate::layout::AMBIENT_FIELD;
 use crate::layout::BRDF_LUT_BINDING;
@@ -95,6 +94,7 @@ use crate::layout::Y_LANE;
 use crate::layout::Y_LANE_U;
 use crate::layout::Z_LANE;
 use crate::layout::Z_LANE_U;
+use crate::lights::Frame;
 use crate::material::Material;
 
 /// Fragment input location of the world position.
@@ -217,7 +217,6 @@ pub fn fs_main(
 #[gpu_entry(fragment)]
 // qual:allow(complexity, max_function_lines=85) reason: "one fragment entry: the interface decode, the map fold and the shading call"
 // qual:allow(srp, max_parameters=19) reason: "one parameter per binding the pass declares; the attributes above are the table"
-// qual:allow(iosp) reason: "the textured entry ships before the renderer points its textured pipeline at it; the artifact gate builds it every run"
 #[allow(clippy::too_many_arguments)]
 pub fn fs_main_textured(
     #[gpu(uniform, group = 0, binding = 0)] camera: Uniform<Camera>,
