@@ -150,6 +150,26 @@ pub fn vertex_input_u32<const LOC: u32>() -> u32 {
     }
 }
 
+/// Lane `LANE` of the `vec4<u32>` vertex input at `LOC`.
+///
+/// A `vec4<u32>` occupies one location and is declared flat, so a joint index
+/// is one lane of that value rather than a location of its own.
+// qual:allow(test_quality, untested) reason: "shader builtin; the translator test lowers the same call from LLVM IR"
+#[inline(always)]
+#[must_use]
+pub fn vertex_input_u32x4<const LOC: u32, const LANE: u32>() -> u32 {
+    const { assert!(LOC < 16, "a vertex input is one of 16 locations") };
+    const { assert!(LANE < 4, "a vec4<u32> input has four lanes") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_input_u32x4(LOC, LANE)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::host_unavailable()
+    }
+}
+
 /// Clip-space `@builtin(position)` of the vertex output.
 #[inline(always)]
 pub fn vertex_position(x: f32, y: f32, z: f32, w: f32) {

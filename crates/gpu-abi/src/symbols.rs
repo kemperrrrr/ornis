@@ -309,6 +309,13 @@ pub const VERTEX_INPUT_LANE: &str = "vertex_input_lane";
 /// lane.
 pub const VERTEX_INPUT_U32: &str = "vertex_input_u32";
 
+/// Vertex entry. `(i32, i32) -> i32`: lane of a `vec4<u32>` `@location` input.
+///
+/// A `vec4<u32>` is one location, not four: joint indices must be read lane by
+/// lane out of the declared four-component integer varying, which is flat
+/// because WGSL forbids interpolating an integer.
+pub const VERTEX_INPUT_U32X4: &str = "vertex_input_u32x4";
+
 /// `(param f32 f32 f32 f32)` — clip-space `@builtin(position)` of a vertex
 /// entry.
 pub const VERTEX_POSITION: &str = "vertex_position";
