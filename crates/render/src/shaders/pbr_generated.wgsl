@@ -91,14 +91,14 @@ var tex_0_9_: texture_2d<f32>;
 @fragment 
 fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>, @location(1) in1_: vec3<f32>, @location(3) in3_: vec3<f32>, @location(4) @interpolate(flat) in4_: u32) -> @location(0) vec4<f32> {
     var fragment_out: vec4<f32>;
+    var radiance_u002e_i_u002e_sroa_u002e_0_u002e_2_: f32;
+    var radiance_u002e_i_u002e_sroa_u002e_10_u002e_2_: f32;
+    var radiance_u002e_i_u002e_sroa_u002e_15_u002e_2_: f32;
+    var vis_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_i: f32;
     var lo_u002e_i_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
     var lo_u002e_i_u002e_sroa_u002e_6_u002e_0_u002e_lcssa: f32;
     var lo_u002e_i_u002e_sroa_u002e_9_u002e_0_u002e_lcssa: f32;
     var _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i: u32;
-    var radiance_u002e_i_u002e_sroa_u002e_0_u002e_2_: f32;
-    var radiance_u002e_i_u002e_sroa_u002e_10_u002e_2_: f32;
-    var radiance_u002e_i_u002e_sroa_u002e_15_u002e_2_: f32;
-    var vis_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
     var extinction_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
     var extinction_u002e_i_u002e_sroa_u002e_5_u002e_0_: f32;
     var extinction_u002e_i_u002e_sroa_u002e_8_u002e_0_: f32;
@@ -449,11 +449,11 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
                     let _e1403 = uniform_struct_0_3_.f6_.f0_[_e1273].f3_.w;
                     let _e1409 = (_e1403 + (((in0_.x * _e1382) + (in0_.y * _e1389)) + (in0_.z * _e1396)));
                     let _e1426 = textureSampleCompareLevel(tex_0_11_, sampler_0_5_, vec2<f32>(((((_e1301 + (((in0_.x * _e1280) + (in0_.y * _e1287)) + (in0_.z * _e1294))) / _e1409) * 0.5f) + 0.5f), (0.5f - (((_e1335 + (((in0_.x * _e1314) + (in0_.y * _e1321)) + (in0_.z * _e1328))) / _e1409) * 0.5f))), _e1273, (((_e1369 + (((in0_.x * _e1348) + (in0_.y * _e1355)) + (in0_.z * _e1362))) / _e1409) + -0.001f));
-                    vis_u002e_sroa_u002e_0_u002e_0_u002e_i = mix(_e1426, _e1252, select(_e1267, 1f, (_e1267 > 1f)));
+                    vis_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_i = mix(_e1426, _e1252, select(_e1267, 1f, (_e1267 > 1f)));
                 } else {
-                    vis_u002e_sroa_u002e_0_u002e_0_u002e_i = _e1252;
+                    vis_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_i = _e1252;
                 }
-                let _e1431 = vis_u002e_sroa_u002e_0_u002e_0_u002e_i;
+                let _e1431 = vis_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_i;
                 radiance_u002e_i_u002e_sroa_u002e_0_u002e_0_ = (_e1021 * _e1431);
                 radiance_u002e_i_u002e_sroa_u002e_10_u002e_0_ = (_e1022 * _e1431);
                 radiance_u002e_i_u002e_sroa_u002e_15_u002e_0_ = (_e1023 * _e1431);

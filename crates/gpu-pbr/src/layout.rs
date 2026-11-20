@@ -326,8 +326,8 @@ pub(crate) fn material_word(
 
 /// One float word of a `Light` record in `clustered_lights`.
 #[inline(always)]
-pub(crate) fn light_word(
-    lights: &Storage<u32, GROUP, CLUSTERED_LIGHTS_BINDING, ReadOnly>,
+pub fn light_word<const LIGHTS_B: u32>(
+    lights: &Storage<u32, GROUP, LIGHTS_B, ReadOnly>,
     base: u32,
     word: u32,
 ) -> f32 {
