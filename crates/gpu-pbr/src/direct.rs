@@ -35,6 +35,7 @@ use crate::layout::Lighting;
 use crate::layout::SHADOW_CUBE_BINDING;
 use crate::layout::SHADOW_SAMPLER_BINDING;
 use crate::layout::SHADOW_TEX_BINDING;
+use crate::lights::Frame;
 use crate::lights::LightRef;
 use crate::lights::light_base;
 use crate::lights::light_dir;
@@ -48,28 +49,6 @@ const EPS: f32 = 0.000001;
 #[inline(always)]
 fn max_f32(a: f32, b: f32) -> f32 {
     if b > a { b } else { a }
-}
-
-/// Everything the walk needs that does not change between lights.
-pub(crate) struct Frame {
-    /// Fragment position in world space.
-    pub(crate) world_pos: Vec3,
-    /// Eye position.
-    pub(crate) cam_pos: Vec3,
-    /// Shading normal.
-    pub(crate) n: Vec3,
-    /// Eye direction.
-    pub(crate) v: Vec3,
-    /// Tangent frame's first axis.
-    pub(crate) t: Vec3,
-    /// Tangent frame's second axis.
-    pub(crate) b: Vec3,
-    /// `dot(n, v)`, floored at `EPS`.
-    pub(crate) nov: f32,
-    /// Thin-film modulation of the base layer.
-    pub(crate) thin_film_mod: Vec3,
-    /// How far the coat darkens the layers under it.
-    pub(crate) coat_darken: Vec3,
 }
 
 /// Sum of the direct layers over every light the fragment's cell names.
@@ -117,8 +96,7 @@ pub(crate) fn direct(
             shadow_sampler,
             &light,
             lights,
-            &frame.world_pos,
-            &frame.cam_pos,
+            frame,
         );
         let l = light_dir::<CLUSTERED_LIGHTS_BINDING>(lights, &light, frame);
         let h = normalize3(add3(add3(frame.v, l), v3(0.0, 0.0, EPS)));

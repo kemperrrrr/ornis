@@ -21,7 +21,6 @@ use ornis_gpu_shader::length3;
 use ornis_gpu_shader::mix;
 use ornis_gpu_shader::smoothstep;
 
-use crate::direct::Frame;
 use crate::layout::CLUSTER_INDICES_BINDING;
 use crate::layout::GROUP;
 use crate::layout::LIGHT_COLOR_WORD;
@@ -61,6 +60,28 @@ fn step(edge: f32, x: f32) -> f32 {
 #[inline(always)]
 fn max_f32(a: f32, b: f32) -> f32 {
     if b > a { b } else { a }
+}
+
+/// Everything the walk needs that does not change between lights.
+pub struct Frame {
+    /// Fragment position in world space.
+    pub world_pos: Vec3,
+    /// Eye position.
+    pub cam_pos: Vec3,
+    /// Shading normal.
+    pub n: Vec3,
+    /// Eye direction.
+    pub v: Vec3,
+    /// Tangent frame's first axis.
+    pub t: Vec3,
+    /// Tangent frame's second axis.
+    pub b: Vec3,
+    /// `dot(n, v)`, floored at `EPS`.
+    pub nov: f32,
+    /// Thin-film modulation of the base layer.
+    pub thin_film_mod: Vec3,
+    /// How far the coat darkens the layers under it.
+    pub coat_darken: Vec3,
 }
 
 /// `mix(a, b, t)` lane by lane.
@@ -145,7 +166,6 @@ pub fn light_dir<const LIGHTS_B: u32>(
 /// Radiance arriving from one light: colour × intensity, range cutoff, spot
 /// cone, distance attenuation and shadow.
 // quant:allow(srp, max_parameters=8) reason: "the two shadow families and the cascade block are three different bindings; bundling them would be a struct the translator has to keep in registers"
-// qual:allow(srp, max_parameters=9) reason: "two shadow textures, the cascade block and the sampler they share, plus the light record and the frame position"
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn shaded_radiance<
@@ -163,9 +183,10 @@ pub fn shaded_radiance<
     shadow_sampler: ComparisonSampler<GROUP, SSB>,
     light: &LightRef,
     lights: &Storage<u32, GROUP, LIGHTS_B, ReadOnly>,
-    world_pos: &Vec3,
-    cam_pos: &Vec3,
+    frame: &Frame,
 ) -> Vec3 {
+    let world_pos = &frame.world_pos;
+    let cam_pos = &frame.cam_pos;
     let kind = light.word::<LIGHTS_B>(lights, LIGHT_KIND_WORD);
     let to_light = sub3(
         light.xyz::<LIGHTS_B>(lights, LIGHT_POSITION_WORD),
