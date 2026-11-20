@@ -2948,6 +2948,68 @@ fn pointer_helpers_match_the_cpu_on_gpu() {
     }
 }
 
+/// A `&mut` record accumulated across loop iterations.
+///
+/// This is the shape a deferred-lighting walk would like: the loop cannot
+/// return three sums, so it writes them into a caller-owned struct through a
+/// pointer WGSL cannot name. Pinning the rejection keeps the answer recorded —
+/// the walk has to stay one function so its accumulators are plain locals.
+const POINTER_ACCUMULATOR_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+
+#[derive(Clone, Copy)]
+struct Sums {
+    lit: f32,
+    specular: f32,
+    lowest: f32,
+}
+
+#[inline(always)]
+fn accumulate(sums: &mut Sums, lit: f32, specular: f32) {
+    sums.lit += lit;
+    sums.specular += specular;
+    if lit < sums.lowest {
+        sums.lowest = lit;
+    }
+}
+
+#[inline(never)]
+fn walk(count: u32, sums: &mut Sums) {
+    let mut k = 0u32;
+    while k < count {
+        let value = k as f32 * 0.25 - 0.5;
+        accumulate(sums, value, value * 0.5);
+        k += 1;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut sums = Sums { lit: 0.0, specular: 1.0, lowest: 1.5 };
+    walk(id & 7, &mut sums);
+    sums.lit + sums.specular + sums.lowest
+}
+"#;
+
+#[test]
+fn a_pointer_accumulated_across_a_loop_is_outside_the_subset() {
+    let Some(ir) = compile_ir(POINTER_ACCUMULATOR_RS) else {
+        return;
+    };
+    // The rejection is the documented boundary, not a bug: a `&mut` record
+    // whose fields are updated on every iteration outlives the single
+    // alloca the pointer inliner can follow, so the walker has to write its
+    // accumulators as locals in one function.
+    assert!(
+        translate(&ir).is_err(),
+        "a loop-carried `&mut` record translated — the lighting walk could be split into helpers"
+    );
+}
+
 /// A slice parameter: rustc passes the data pointer, the length is constant.
 const SLICE_HELPER_RS: &str = r#"
 #![no_std]
