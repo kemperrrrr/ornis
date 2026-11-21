@@ -161,7 +161,7 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
 @vertex 
 fn vs_main(@builtin(instance_index) instance_index: u32, @location(0) in0_1: vec3<f32>, @location(1) in1_1: vec3<f32>, @location(2) in2_: vec2<f32>, @location(3) in3_: vec3<f32>) -> VertexOut {
     var vertex_out: VertexOut;
-    var previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
+    var previous_w_u002e_sroa_u002e_0_u002e_0_: f32;
 
     let _e6 = (instance_index * 52u);
     let _e12 = storage_0_1_[_e6];
@@ -225,8 +225,8 @@ fn vs_main(@builtin(instance_index) instance_index: u32, @location(0) in0_1: vec
     vertex_out.o4_ = _e326;
     let _e333 = storage_0_1_[(_e6 + 49u)];
     if (_e333 == 0u) {
-        previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
-        let _e339 = previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i;
+        previous_w_u002e_sroa_u002e_0_u002e_0_ = 0f;
+        let _e339 = previous_w_u002e_sroa_u002e_0_u002e_0_;
         let _e347 = storage_0_1_[(_e6 + 32u)];
         let _e354 = storage_0_1_[(_e6 + 36u)];
         let _e362 = storage_0_1_[(_e6 + 40u)];
@@ -279,8 +279,8 @@ fn vs_main(@builtin(instance_index) instance_index: u32, @location(0) in0_1: vec
     let _e624 = storage_0_1_[(_e6 + 39u)];
     let _e632 = storage_0_1_[(_e6 + 43u)];
     let _e640 = storage_0_1_[(_e6 + 47u)];
-    previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i = ((((in0_1.x * bitcast<f32>(_e617)) + (in0_1.y * bitcast<f32>(_e624))) + (in0_1.z * bitcast<f32>(_e632))) + bitcast<f32>(_e640));
-    let _e645 = previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i;
+    previous_w_u002e_sroa_u002e_0_u002e_0_ = ((((in0_1.x * bitcast<f32>(_e617)) + (in0_1.y * bitcast<f32>(_e624))) + (in0_1.z * bitcast<f32>(_e632))) + bitcast<f32>(_e640));
+    let _e645 = previous_w_u002e_sroa_u002e_0_u002e_0_;
     let _e653 = storage_0_1_[(_e6 + 32u)];
     let _e660 = storage_0_1_[(_e6 + 36u)];
     let _e668 = storage_0_1_[(_e6 + 40u)];
@@ -333,7 +333,7 @@ fn vs_main(@builtin(instance_index) instance_index: u32, @location(0) in0_1: vec
 @vertex 
 fn vs_main_indirect(@builtin(instance_index) instance_index_1: u32, @location(0) in0_2: vec3<f32>, @location(1) in1_2: vec3<f32>, @location(2) in2_1: vec2<f32>, @location(3) in3_1: vec3<f32>) -> VertexOut {
     var vertex_out_1: VertexOut;
-    var previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i_1: f32;
+    var previous_w_u002e_sroa_u002e_0_u002e_0_1: f32;
 
     let _e7 = storage_1_0_[instance_index_1];
     let _e9 = (_e7 * 52u);
@@ -398,8 +398,8 @@ fn vs_main_indirect(@builtin(instance_index) instance_index_1: u32, @location(0)
     vertex_out_1.o4_ = _e329;
     let _e336 = storage_0_1_[(_e9 + 49u)];
     if (_e336 == 0u) {
-        previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i_1 = 0f;
-        let _e342 = previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i_1;
+        previous_w_u002e_sroa_u002e_0_u002e_0_1 = 0f;
+        let _e342 = previous_w_u002e_sroa_u002e_0_u002e_0_1;
         let _e350 = storage_0_1_[(_e9 + 32u)];
         let _e357 = storage_0_1_[(_e9 + 36u)];
         let _e365 = storage_0_1_[(_e9 + 40u)];
@@ -452,8 +452,8 @@ fn vs_main_indirect(@builtin(instance_index) instance_index_1: u32, @location(0)
     let _e627 = storage_0_1_[(_e9 + 39u)];
     let _e635 = storage_0_1_[(_e9 + 43u)];
     let _e643 = storage_0_1_[(_e9 + 47u)];
-    previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i_1 = ((((in0_2.x * bitcast<f32>(_e620)) + (in0_2.y * bitcast<f32>(_e627))) + (in0_2.z * bitcast<f32>(_e635))) + bitcast<f32>(_e643));
-    let _e648 = previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i_1;
+    previous_w_u002e_sroa_u002e_0_u002e_0_1 = ((((in0_2.x * bitcast<f32>(_e620)) + (in0_2.y * bitcast<f32>(_e627))) + (in0_2.z * bitcast<f32>(_e635))) + bitcast<f32>(_e643));
+    let _e648 = previous_w_u002e_sroa_u002e_0_u002e_0_1;
     let _e656 = storage_0_1_[(_e9 + 32u)];
     let _e663 = storage_0_1_[(_e9 + 36u)];
     let _e671 = storage_0_1_[(_e9 + 40u)];

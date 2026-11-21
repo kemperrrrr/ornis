@@ -27,25 +27,25 @@ var<storage, read_write> storage_0_4_: array<u32>;
 
 @compute @workgroup_size(64, 1, 1) 
 fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
-    var count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa: u32;
-    var _9_u002e_i5_u002e_sroa_u002e_0_u002e_0_: f32;
-    var _9_u002e_i5_u002e_sroa_u002e_5_u002e_0_: f32;
-    var _9_u002e_i5_u002e_sroa_u002e_6_u002e_0_: f32;
-    var _9_u002e_i5_u002e_sroa_u002e_7_u002e_0_: f32;
-    var _15_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
-    var _15_u002e_i_u002e_sroa_u002e_5_u002e_0_: f32;
-    var _15_u002e_i_u002e_sroa_u002e_6_u002e_0_: f32;
-    var _15_u002e_i_u002e_sroa_u002e_7_u002e_0_: f32;
-    var z_lo_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i: u32;
-    var _0_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
+    var count_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: u32;
+    var _9_u002e_sroa_u002e_0_u002e_0_: f32;
+    var _9_u002e_sroa_u002e_5_u002e_0_: f32;
+    var _9_u002e_sroa_u002e_6_u002e_0_: f32;
+    var _9_u002e_sroa_u002e_7_u002e_0_: f32;
+    var _15_u002e_sroa_u002e_0_u002e_0_: f32;
+    var _15_u002e_sroa_u002e_5_u002e_0_: f32;
+    var _15_u002e_sroa_u002e_6_u002e_0_: f32;
+    var _15_u002e_sroa_u002e_7_u002e_0_: f32;
+    var z_lo_u002e_sroa_u002e_0_u002e_0_: f32;
+    var _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_: u32;
+    var _0_u002e_sroa_u002e_0_u002e_0_: f32;
     var span_u002e_sroa_u002e_0_u002e_0_: u32;
     var head_u002e_sroa_u002e_0_u002e_0_: u32;
     var count_u002e_sroa_u002e_0_u002e_0_: u32;
     var head_u002e_sroa_u002e_0_u002e_0_1: u32;
     var cursor_u002e_sroa_u002e_0_u002e_0_: u32;
-    var cursor_u002e_sroa_u002e_0_u002e_1_u002e_i: u32;
-    var out_u002e_spec_u002e_select_u002e_i: u32;
+    var cursor_u002e_sroa_u002e_0_u002e_1_: u32;
+    var out_u002e_spec_u002e_select: u32;
 
     if (global_invocation_id.x > 3455u) {
         return;
@@ -72,17 +72,17 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let _e89 = uniform_struct_0_0_.f2_.w;
     let _e93 = uniform_struct_0_0_.f3_.w;
     if (global_invocation_id.x < 144u) {
-        z_lo_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+        z_lo_u002e_sroa_u002e_0_u002e_0_ = 0f;
     } else {
-        z_lo_u002e_sroa_u002e_0_u002e_0_u002e_i = (exp(((f32((_e15 + 4294967295u)) / 23f) * 6.684612f)) * 0.5f);
+        z_lo_u002e_sroa_u002e_0_u002e_0_ = (exp(((f32((_e15 + 4294967295u)) / 23f) * 6.684612f)) * 0.5f);
     }
-    let _e110 = z_lo_u002e_sroa_u002e_0_u002e_0_u002e_i;
+    let _e110 = z_lo_u002e_sroa_u002e_0_u002e_0_;
     if (global_invocation_id.x > 3311u) {
-        _0_u002e_sroa_u002e_0_u002e_0_u002e_i = 1000000000f;
+        _0_u002e_sroa_u002e_0_u002e_0_ = 1000000000f;
     } else {
-        _0_u002e_sroa_u002e_0_u002e_0_u002e_i = (exp(((f32(_e15) / 23f) * 6.684612f)) * 0.5f);
+        _0_u002e_sroa_u002e_0_u002e_0_ = (exp(((f32(_e15) / 23f) * 6.684612f)) * 0.5f);
     }
-    let _e125 = _0_u002e_sroa_u002e_0_u002e_0_u002e_i;
+    let _e125 = _0_u002e_sroa_u002e_0_u002e_0_;
     let _e127 = (_e49 - (_e24 * _e81));
     let _e129 = (_e53 - (_e24 * _e85));
     let _e131 = (_e57 - (_e24 * _e89));
@@ -118,10 +118,10 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
             let _e197 = storage_0_2_[(_e172 + 18u)];
             let _e200 = storage_0_2_[_e172];
             if ((_e197 < 0.1f) | (_e200 < 2f)) {
-                _9_u002e_i5_u002e_sroa_u002e_0_u002e_0_ = _e177;
-                _9_u002e_i5_u002e_sroa_u002e_5_u002e_0_ = _e182;
-                _9_u002e_i5_u002e_sroa_u002e_6_u002e_0_ = _e187;
-                _9_u002e_i5_u002e_sroa_u002e_7_u002e_0_ = _e192;
+                _9_u002e_sroa_u002e_0_u002e_0_ = _e177;
+                _9_u002e_sroa_u002e_5_u002e_0_ = _e182;
+                _9_u002e_sroa_u002e_6_u002e_0_ = _e187;
+                _9_u002e_sroa_u002e_7_u002e_0_ = _e192;
             } else {
                 let _e210 = (_e197 * _e197);
                 let _e218 = ((_e192 * (((1f - _e210) / _e210) + 1f)) * 0.5f);
@@ -129,39 +129,39 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
                 let _e228 = storage_0_2_[(_e172 + 5u)];
                 let _e233 = storage_0_2_[(_e172 + 6u)];
                 let _e235 = length(vec3<f32>(_e223, _e228, _e233));
-                _9_u002e_i5_u002e_sroa_u002e_0_u002e_0_ = (_e177 + (_e218 * (_e223 / _e235)));
-                _9_u002e_i5_u002e_sroa_u002e_5_u002e_0_ = (_e182 + (_e218 * (_e228 / _e235)));
-                _9_u002e_i5_u002e_sroa_u002e_6_u002e_0_ = (_e187 + (_e218 * (_e233 / _e235)));
-                _9_u002e_i5_u002e_sroa_u002e_7_u002e_0_ = _e218;
+                _9_u002e_sroa_u002e_0_u002e_0_ = (_e177 + (_e218 * (_e223 / _e235)));
+                _9_u002e_sroa_u002e_5_u002e_0_ = (_e182 + (_e218 * (_e228 / _e235)));
+                _9_u002e_sroa_u002e_6_u002e_0_ = (_e187 + (_e218 * (_e233 / _e235)));
+                _9_u002e_sroa_u002e_7_u002e_0_ = _e218;
             }
-            let _e250 = _9_u002e_i5_u002e_sroa_u002e_0_u002e_0_;
-            let _e252 = _9_u002e_i5_u002e_sroa_u002e_5_u002e_0_;
-            let _e254 = _9_u002e_i5_u002e_sroa_u002e_6_u002e_0_;
-            let _e256 = _9_u002e_i5_u002e_sroa_u002e_7_u002e_0_;
+            let _e250 = _9_u002e_sroa_u002e_0_u002e_0_;
+            let _e252 = _9_u002e_sroa_u002e_5_u002e_0_;
+            let _e254 = _9_u002e_sroa_u002e_6_u002e_0_;
+            let _e256 = _9_u002e_sroa_u002e_7_u002e_0_;
             if ((_e133 + dot(vec3<f32>(_e127, _e129, _e131), vec3<f32>(_e250, _e252, _e254))) < (_e256 * -(length(vec3<f32>(_e127, _e129, _e131))))) {
-                _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i = 0u;
+                _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_ = 0u;
             } else {
                 if ((_e141 + dot(vec3<f32>(_e135, _e137, _e139), vec3<f32>(_e250, _e252, _e254))) < (_e256 * -(length(vec3<f32>(_e135, _e137, _e139))))) {
-                    _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i = 0u;
+                    _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_ = 0u;
                 } else {
                     if ((_e149 + dot(vec3<f32>(_e143, _e145, _e147), vec3<f32>(_e250, _e252, _e254))) < (_e256 * -(length(vec3<f32>(_e143, _e145, _e147))))) {
-                        _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i = 0u;
+                        _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_ = 0u;
                     } else {
                         if ((_e157 + dot(vec3<f32>(_e151, _e153, _e155), vec3<f32>(_e250, _e252, _e254))) < (_e256 * -(length(vec3<f32>(_e151, _e153, _e155))))) {
-                            _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i = 0u;
+                            _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_ = 0u;
                         } else {
                             if ((_e158 + dot(vec3<f32>(_e81, _e85, _e89), vec3<f32>(_e250, _e252, _e254))) < (_e256 * -(length(vec3<f32>(_e81, _e85, _e89))))) {
-                                _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i = 0u;
+                                _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_ = 0u;
                             } else {
-                                _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i = select(0u, 1u, !(((_e162 + dot(vec3<f32>(_e159, _e160, _e161), vec3<f32>(_e250, _e252, _e254))) < (_e256 * -(length(vec3<f32>(_e159, _e160, _e161)))))));
+                                _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_ = select(0u, 1u, !(((_e162 + dot(vec3<f32>(_e159, _e160, _e161), vec3<f32>(_e250, _e252, _e254))) < (_e256 * -(length(vec3<f32>(_e159, _e160, _e161)))))));
                             }
                         }
                     }
                 }
             }
-            let _e327 = _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i;
+            let _e327 = _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_;
             let _e328 = (_e327 + _e170);
-            out_u002e_spec_u002e_select_u002e_i = _e328;
+            out_u002e_spec_u002e_select = _e328;
             let _e331 = (_e168 + 1u);
             if (_e331 == _e6) {
                 break;
@@ -171,12 +171,12 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
                 continue;
             }
         }
-        let _e336 = out_u002e_spec_u002e_select_u002e_i;
-        count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = min(_e336, 128u);
+        let _e336 = out_u002e_spec_u002e_select;
+        count_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = min(_e336, 128u);
     } else {
-        count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = 0u;
+        count_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 0u;
     }
-    let _e343 = count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa;
+    let _e343 = count_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
     let _e347 = atomicAdd((&atomic_storage_0_5_[0u]), _e343);
     if ((_e347 + _e343) > 442368u) {
         let _e356 = select((442368u - _e347), 0u, (_e347 > 442367u));
@@ -206,10 +206,10 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         let _e411 = storage_0_2_[(_e386 + 18u)];
         let _e414 = storage_0_2_[_e386];
         if ((_e411 < 0.1f) | (_e414 < 2f)) {
-            _15_u002e_i_u002e_sroa_u002e_0_u002e_0_ = _e391;
-            _15_u002e_i_u002e_sroa_u002e_5_u002e_0_ = _e396;
-            _15_u002e_i_u002e_sroa_u002e_6_u002e_0_ = _e401;
-            _15_u002e_i_u002e_sroa_u002e_7_u002e_0_ = _e406;
+            _15_u002e_sroa_u002e_0_u002e_0_ = _e391;
+            _15_u002e_sroa_u002e_5_u002e_0_ = _e396;
+            _15_u002e_sroa_u002e_6_u002e_0_ = _e401;
+            _15_u002e_sroa_u002e_7_u002e_0_ = _e406;
         } else {
             let _e424 = (_e411 * _e411);
             let _e432 = ((_e406 * (((1f - _e424) / _e424) + 1f)) * 0.5f);
@@ -217,42 +217,42 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
             let _e442 = storage_0_2_[(_e386 + 5u)];
             let _e447 = storage_0_2_[(_e386 + 6u)];
             let _e449 = length(vec3<f32>(_e437, _e442, _e447));
-            _15_u002e_i_u002e_sroa_u002e_0_u002e_0_ = (_e391 + (_e432 * (_e437 / _e449)));
-            _15_u002e_i_u002e_sroa_u002e_5_u002e_0_ = (_e396 + (_e432 * (_e442 / _e449)));
-            _15_u002e_i_u002e_sroa_u002e_6_u002e_0_ = (_e401 + (_e432 * (_e447 / _e449)));
-            _15_u002e_i_u002e_sroa_u002e_7_u002e_0_ = _e432;
+            _15_u002e_sroa_u002e_0_u002e_0_ = (_e391 + (_e432 * (_e437 / _e449)));
+            _15_u002e_sroa_u002e_5_u002e_0_ = (_e396 + (_e432 * (_e442 / _e449)));
+            _15_u002e_sroa_u002e_6_u002e_0_ = (_e401 + (_e432 * (_e447 / _e449)));
+            _15_u002e_sroa_u002e_7_u002e_0_ = _e432;
         }
-        let _e464 = _15_u002e_i_u002e_sroa_u002e_0_u002e_0_;
-        let _e466 = _15_u002e_i_u002e_sroa_u002e_5_u002e_0_;
-        let _e468 = _15_u002e_i_u002e_sroa_u002e_6_u002e_0_;
-        let _e470 = _15_u002e_i_u002e_sroa_u002e_7_u002e_0_;
+        let _e464 = _15_u002e_sroa_u002e_0_u002e_0_;
+        let _e466 = _15_u002e_sroa_u002e_5_u002e_0_;
+        let _e468 = _15_u002e_sroa_u002e_6_u002e_0_;
+        let _e470 = _15_u002e_sroa_u002e_7_u002e_0_;
         if ((_e133 + dot(vec3<f32>(_e127, _e129, _e131), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e127, _e129, _e131))))) {
-            cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
+            cursor_u002e_sroa_u002e_0_u002e_1_ = _e384;
         } else {
             if ((_e141 + dot(vec3<f32>(_e135, _e137, _e139), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e135, _e137, _e139))))) {
-                cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
+                cursor_u002e_sroa_u002e_0_u002e_1_ = _e384;
             } else {
                 if ((_e149 + dot(vec3<f32>(_e143, _e145, _e147), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e143, _e145, _e147))))) {
-                    cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
+                    cursor_u002e_sroa_u002e_0_u002e_1_ = _e384;
                 } else {
                     if ((_e157 + dot(vec3<f32>(_e151, _e153, _e155), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e151, _e153, _e155))))) {
-                        cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
+                        cursor_u002e_sroa_u002e_0_u002e_1_ = _e384;
                     } else {
                         if ((_e158 + dot(vec3<f32>(_e81, _e85, _e89), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e81, _e85, _e89))))) {
-                            cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
+                            cursor_u002e_sroa_u002e_0_u002e_1_ = _e384;
                         } else {
                             if ((_e162 + dot(vec3<f32>(_e159, _e160, _e161), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e159, _e160, _e161))))) {
-                                cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
+                                cursor_u002e_sroa_u002e_0_u002e_1_ = _e384;
                             } else {
                                 storage_0_4_[(_e384 + _e347)] = _e382;
-                                cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = (_e384 + 1u);
+                                cursor_u002e_sroa_u002e_0_u002e_1_ = (_e384 + 1u);
                             }
                         }
                     }
                 }
             }
         }
-        let _e538 = cursor_u002e_sroa_u002e_0_u002e_1_u002e_i;
+        let _e538 = cursor_u002e_sroa_u002e_0_u002e_1_;
         let _e540 = (_e382 + 1u);
         if select((_e538 >= _e365), true, (_e540 >= _e6)) {
             break;

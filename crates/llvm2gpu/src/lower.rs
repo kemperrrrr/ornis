@@ -729,38 +729,30 @@ struct StageArguments {
 /// LLVM disambiguates inlined copies by appending an SSA-index counter to the
 /// value's name — `%lo.sroa.9.01521` here, `%k.sroa.0.0.i1522` elsewhere — and
 /// that counter numbers every value of the *function*, so it moves when the
-/// compiler inlines differently. The same shader built by a different rustc
-/// build then carries `…01519`, and the checked-in WGSL stops matching the
-/// machine that generated it. The counter says nothing about the shader, so the
-/// last name segment is dropped when it is four or more digits (optionally
-/// prefixed by `i`); real member indices (`lo.sroa.9.0`) are one or two digits
-/// and stay. Two values that still collide are renamed by the WGSL writer in
-/// declaration order, which follows the IR.
-fn local_label(mut name: &str) -> &str {
-    // A counter can hide behind the bare inlining marker —
-    // `%0..sroa.0.0.0.i554.i` ends in an empty `i` segment — so drop segments
-    // until the last one is a real member index. A lone `.i` that no counter
-    // precedes is part of the name and stays.
-    loop {
-        let Some((base, tail)) = name.rsplit_once('.') else {
-            return name;
-        };
-        let marker_of_a_counter =
-            tail == "i" && is_counter_segment(base.rsplit_once('.').map_or("", |(_, t)| t));
-        if is_counter_segment(tail) || marker_of_a_counter {
-            name = base;
-            continue;
-        }
-        return name;
-    }
+/// compiler inlines differently. The same shader built on another target then
+/// carries `…01519`, and the checked-in WGSL stops matching the machine that
+/// generated it. A counter says nothing about the shader, so every counter
+/// segment is dropped, wherever it sits: `%0..sroa.0.0.0.i554.i` puts one in
+/// front of the bare inlining marker and `%15.i156.sroa.0.0` in the middle.
+/// Real member indices (`lo.sroa.9.0`) are one or two digits and stay. Two
+/// values that still collide are renamed by the WGSL writer in declaration
+/// order, which follows the IR.
+fn local_label(name: &str) -> String {
+    name.split('.')
+        .filter(|segment| *segment != INLINING_MARKER && !is_counter_segment(segment))
+        .collect::<Vec<_>>()
+        .join(".")
 }
+
+/// Segment LLVM appends to a value that went through an inlining step.
+const INLINING_MARKER: &str = "i";
 
 /// Whether one SSA name segment is an LLVM counter rather than a field index.
 ///
 /// An `i`-prefixed run is a counter at any length (`i11`), but a *bare* short
 /// run is an aggregate member index (`lo.sroa.9.0`) and is not.
 fn is_counter_segment(segment: &str) -> bool {
-    match segment.strip_prefix('i') {
+    match segment.strip_prefix(INLINING_MARKER) {
         Some(digits) => !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()),
         None => {
             segment.len() >= UNSTABLE_COUNTER_DIGITS && segment.bytes().all(|b| b.is_ascii_digit())
@@ -2606,7 +2598,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 let ty = self.ty(phi.ty)?;
                 let var = self.func.local_variables.append(
                     naga::LocalVariable {
-                        name: Some(local_label(&phi.dst).to_string()),
+                        name: Some(local_label(&phi.dst)),
                         ty,
                         init: None,
                     },
@@ -2741,7 +2733,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let ty = self.word_array_type(words);
         let var = self.func.local_variables.append(
             naga::LocalVariable {
-                name: Some(local_label(dst).to_string()),
+                name: Some(local_label(dst)),
                 ty,
                 init: None,
             },
@@ -6680,20 +6672,21 @@ mod tests {
         assert_eq!(local_label("sum_y.sroa.0.0.i101"), "sum_y.sroa.0.0");
         assert_eq!(local_label("_0.sroa.0.0.i11"), "_0.sroa.0.0");
         assert_eq!(local_label("lo.sroa.9.01519"), "lo.sroa.9");
+        // A counter in the middle of the name goes with the trailing ones: it
+        // numbers the same function-wide stream.
+        assert_eq!(local_label("15.i156.sroa.0.0"), "15.sroa.0.0");
+        assert_eq!(local_label("15.i77.sroa.0.0"), "15.sroa.0.0");
+        // A counter can also hide behind the bare inlining marker.
+        assert_eq!(local_label("0..sroa.0.0.0.i554.i"), "0..sroa.0.0.0");
+        assert_eq!(local_label("0..sroa.0.0.0.i267.i"), "0..sroa.0.0.0");
         // Member indices are one or two digits and stay.
         assert_eq!(local_label("lo.sroa.9.0"), "lo.sroa.9.0");
         assert_eq!(local_label("lo.sroa.12.lcssa"), "lo.sroa.12.lcssa");
         assert_eq!(local_label("lo.sroa.0.0"), "lo.sroa.0.0");
         assert_eq!(local_label("west.blue"), "west.blue");
-        // A name that only looks numeric keeps its suffix.
-        assert_eq!(local_label("lo.sroa.0.i0.x"), "lo.sroa.0.i0.x");
-        // A counter can sit behind an empty `i` segment, and both go.
-        assert_eq!(local_label("0..sroa.0.0.0.i554.i"), "0..sroa.0.0.0");
-        assert_eq!(local_label("0..sroa.0.0.0.i267.i"), "0..sroa.0.0.0");
+        // A segment that only looks like a counter keeps its place.
+        assert_eq!(local_label("lo.sroa.0.quad.x"), "lo.sroa.0.quad.x");
         assert_eq!(local_label("value.inline"), "value.inline");
-        // A bare `.i` only goes when it is the marker of a counter before it.
-        assert_eq!(local_label("x.i"), "x.i");
-        assert_eq!(local_label("lo.sroa.0.i0.i"), "lo.sroa.0");
     }
 
     #[test]
