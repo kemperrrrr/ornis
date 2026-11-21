@@ -847,7 +847,7 @@ fn fs_main_msaa(
     return mix(single, averaged, edge);
 }
 
-/// The translated 1x artifact: `fs_main` of `ornis-gpu-lighting`.
+/// The translated 1x artifact: `fs_main_lighting` of `ornis-gpu-lighting`.
 pub const LIGHTING_1X: &str = include_str!("lighting_generated.wgsl");
 
 /// Full WGSL source for deferred lighting, assembled from Rust.
@@ -857,9 +857,10 @@ pub fn wgsl_source() -> String {
 
 /// Full WGSL source for deferred lighting at a sample count.
 ///
-/// At 1x this is the translated artifact: `ornis-gpu-lighting`'s `fs_main`,
+/// At 1x this is the translated artifact: `ornis-gpu-lighting`'s
+/// `fs_main_lighting`,
 /// checked in as [`LIGHTING_1X`] and rebuilt by
-/// `cargo xtask build-shaders --package ornis-gpu-lighting --entry fs_main`.
+/// `cargo xtask build-shaders --package ornis-gpu-lighting --entry fs_main_lighting`.
 /// The 4x path still runs through the DSL assembly below — the MSAA entry
 /// loads every covered sample, which is the next pass to move.
 pub fn wgsl_source_for_samples(sample_count: u32) -> String {
@@ -882,7 +883,7 @@ pub fn wgsl_source_for_samples(sample_count: u32) -> String {
 }
 
 /// Name of the translated 1x fragment entry.
-pub const LIGHTING_1X_ENTRY: &str = "fs_main";
+pub const LIGHTING_1X_ENTRY: &str = "fs_main_lighting";
 
 /// Vertex entry, translated by [`stage`](ornis_macros::stage).
 /// DSL-only — replaced by `vs_main::wgsl_source()`.
@@ -1082,7 +1083,7 @@ mod tests {
         }
         assert!(src.contains("@fragment"));
         assert!(src.contains(
-            "fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>)"
+            "fn fs_main_lighting(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>)"
         ));
         // Alpha cut plus the debug views are what the deferred pass adds on top
         // of forward PBR: both must survive the port.

@@ -109,6 +109,7 @@ const NANOMETERS_PER_MICROMETER: f32 = 1000.0;
 
 /// The per-fragment frame the walk reuses: the two precomputed layer factors
 /// and the floored `dot(n, v)`.
+// qual:allow(test_quality, untested) reason: "the layer factors it reads come out of the material storage buffer, so the body has no host path"
 // qual:allow(srp, max_parameters=8) reason: "the material record and the seven frame values the layers take; a struct would be `Frame` itself"
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
@@ -572,4 +573,34 @@ pub(crate) fn tangent_frame(n: Vec3) -> (Vec3, Vec3) {
         cross_lane::<2>(n.x, n.y, n.z, t.x, t.y, t.z),
     );
     (t, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use ornis_gpu_shader::dot3;
+
+    use super::tangent_frame;
+    use super::v3;
+
+    /// The frame is a frame: `t` and `b` are unit length and both stand off the
+    /// normal, which is what the anisotropic layers rotate by.
+    #[test]
+    fn the_tangent_frame_is_orthonormal_against_the_normal() {
+        let n = ornis_gpu_openpbr::layers::normalize3(v3(0.3, 0.9, -0.2));
+        let (t, b) = tangent_frame(n);
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        assert!(near(dot3(t.x, t.y, t.z, t.x, t.y, t.z), 1.0));
+        assert!(near(dot3(n.x, n.y, n.z, t.x, t.y, t.z), 0.0));
+        assert!(near(dot3(n.x, n.y, n.z, b.x, b.y, b.z), 0.0));
+        // The bitangent is not normalised: it carries `|n|`, which is one here.
+        assert!(b.length() > 0.9);
+    }
+
+    /// Up-facing normals make `n × up` vanish, so the `EPS` lift in `t` is the
+    /// only thing keeping the frame from collapsing to zero.
+    #[test]
+    fn a_normal_along_up_still_yields_a_usable_tangent() {
+        let (t, _b) = tangent_frame(v3(0.0, 1.0, 0.0));
+        assert!(t.length() > 0.9);
+    }
 }

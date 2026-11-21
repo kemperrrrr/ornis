@@ -105,14 +105,14 @@ var tex_0_14_: texture_cube<f32>;
 var tex_0_15_: texture_2d<f32>;
 
 @fragment 
-fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+fn fs_main_lighting(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     var fragment_out: vec4<f32>;
     var _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i: u32;
     var radiance_u002e_i_u002e_sroa_u002e_0_u002e_2_: f32;
     var radiance_u002e_i_u002e_sroa_u002e_12_u002e_2_: f32;
     var radiance_u002e_i_u002e_sroa_u002e_20_u002e_2_: f32;
     var vis_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_i: f32;
-    var _0_u002e_sroa_u002e_0_u002e_0_u002e_i267_u002e_i: f32;
+    var _0_u002e_sroa_u002e_0_u002e_0_: f32;
     var extinction_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
     var extinction_u002e_i_u002e_sroa_u002e_5_u002e_0_: f32;
     var extinction_u002e_i_u002e_sroa_u002e_8_u002e_0_: f32;
@@ -709,13 +709,13 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                         let _e2335 = uniform_struct_0_1_.f6_.f0_[_e2205].f3_.w;
                         let _e2341 = (_e2335 + (((_e138 * _e2314) + (_e139 * _e2321)) + (_e140 * _e2328)));
                         let _e2358 = textureSampleCompareLevel(tex_0_18_, sampler_0_11_, vec2<f32>(((((_e2233 + (((_e138 * _e2212) + (_e139 * _e2219)) + (_e140 * _e2226))) / _e2341) * 0.5f) + 0.5f), (0.5f - (((_e2267 + (((_e138 * _e2246) + (_e139 * _e2253)) + (_e140 * _e2260))) / _e2341) * 0.5f))), _e2205, (((_e2301 + (((_e138 * _e2280) + (_e139 * _e2287)) + (_e140 * _e2294))) / _e2341) + -0.001f));
-                        _0_u002e_sroa_u002e_0_u002e_0_u002e_i267_u002e_i = mix(_e2358, _e2184, select(_e2199, 1f, (_e2199 > 1f)));
+                        _0_u002e_sroa_u002e_0_u002e_0_ = mix(_e2358, _e2184, select(_e2199, 1f, (_e2199 > 1f)));
                     } else {
-                        _0_u002e_sroa_u002e_0_u002e_0_u002e_i267_u002e_i = _e2184;
+                        _0_u002e_sroa_u002e_0_u002e_0_ = _e2184;
                     }
                 } else {
                     if (bitcast<f32>(_e1951) < 0f) {
-                        _0_u002e_sroa_u002e_0_u002e_0_u002e_i267_u002e_i = 1f;
+                        _0_u002e_sroa_u002e_0_u002e_0_ = 1f;
                     } else {
                         if ((_e1944 < 1.5f) & (_e1956 > 0.5f)) {
                             let _e2372 = storage_0_20_[_e1125];
@@ -733,7 +733,7 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                             let _e2402 = (_e2400 + -0.1f);
                             let _e2413 = storage_0_20_[_e1703];
                             let _e2419 = textureSampleCompareLevel(tex_0_12_, sampler_0_11_, vec3<f32>(_e2380, _e2382, _e2384), u32(bitcast<f32>(_e2413)), (((_e2400 / _e2402) - ((_e2400 * 0.1f) / (select(_e2388, _e2389, (_e2389 > _e2388)) * _e2402))) + -0.001f));
-                            _0_u002e_sroa_u002e_0_u002e_0_u002e_i267_u002e_i = _e2419;
+                            _0_u002e_sroa_u002e_0_u002e_0_ = _e2419;
                         } else {
                             let _e2425 = storage_0_20_[(_e1119 + 20u)];
                             let _e2431 = storage_0_20_[(_e1119 + 24u)];
@@ -754,11 +754,11 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                             let _e2540 = ((((_e138 * bitcast<f32>(_e2515)) + (_e139 * bitcast<f32>(_e2521))) + (_e140 * bitcast<f32>(_e2527))) + bitcast<f32>(_e2533));
                             let _e2553 = storage_0_20_[_e1703];
                             let _e2562 = textureSampleCompareLevel(tex_0_10_, sampler_0_11_, vec2<f32>((((((((_e138 * bitcast<f32>(_e2425)) + (_e139 * bitcast<f32>(_e2431))) + (_e140 * bitcast<f32>(_e2437))) + bitcast<f32>(_e2443)) / _e2540) * 0.5f) + 0.5f), (0.5f - ((((((_e138 * bitcast<f32>(_e2455)) + (_e139 * bitcast<f32>(_e2461))) + (_e140 * bitcast<f32>(_e2467))) + bitcast<f32>(_e2473)) / _e2540) * 0.5f))), u32(bitcast<f32>(_e2553)), ((((((_e138 * bitcast<f32>(_e2485)) + (_e139 * bitcast<f32>(_e2491))) + (_e140 * bitcast<f32>(_e2497))) + bitcast<f32>(_e2503)) / _e2540) + -0.001f));
-                            _0_u002e_sroa_u002e_0_u002e_0_u002e_i267_u002e_i = _e2562;
+                            _0_u002e_sroa_u002e_0_u002e_0_ = _e2562;
                         }
                     }
                 }
-                let _e2565 = _0_u002e_sroa_u002e_0_u002e_0_u002e_i267_u002e_i;
+                let _e2565 = _0_u002e_sroa_u002e_0_u002e_0_;
                 shadow_vis_u002e_sroa_u002e_0_u002e_1_u002e_i = select(_e2565, _e1088, (_e1088 < _e2565));
             } else {
                 shadow_vis_u002e_sroa_u002e_0_u002e_1_u002e_i = _e1088;

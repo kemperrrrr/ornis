@@ -736,20 +736,36 @@ struct StageArguments {
 /// prefixed by `i`); real member indices (`lo.sroa.9.0`) are one or two digits
 /// and stay. Two values that still collide are renamed by the WGSL writer in
 /// declaration order, which follows the IR.
-fn local_label(name: &str) -> &str {
-    let Some((base, tail)) = name.rsplit_once('.') else {
+fn local_label(mut name: &str) -> &str {
+    // A counter can hide behind the bare inlining marker —
+    // `%0..sroa.0.0.0.i554.i` ends in an empty `i` segment — so drop segments
+    // until the last one is a real member index. A lone `.i` that no counter
+    // precedes is part of the name and stays.
+    loop {
+        let Some((base, tail)) = name.rsplit_once('.') else {
+            return name;
+        };
+        let marker_of_a_counter =
+            tail == "i" && is_counter_segment(base.rsplit_once('.').map_or("", |(_, t)| t));
+        if is_counter_segment(tail) || marker_of_a_counter {
+            name = base;
+            continue;
+        }
         return name;
-    };
-    let (digits, inlined) = match tail.strip_prefix('i') {
-        Some(digits) => (digits, true),
-        None => (tail, false),
-    };
-    let counter = if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        false
-    } else {
-        inlined || digits.len() >= UNSTABLE_COUNTER_DIGITS
-    };
-    if counter { base } else { name }
+    }
+}
+
+/// Whether one SSA name segment is an LLVM counter rather than a field index.
+///
+/// An `i`-prefixed run is a counter at any length (`i11`), but a *bare* short
+/// run is an aggregate member index (`lo.sroa.9.0`) and is not.
+fn is_counter_segment(segment: &str) -> bool {
+    match segment.strip_prefix('i') {
+        Some(digits) => !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()),
+        None => {
+            segment.len() >= UNSTABLE_COUNTER_DIGITS && segment.bytes().all(|b| b.is_ascii_digit())
+        }
+    }
 }
 
 /// Local variable the entry returns, holding the stage output.
@@ -6671,8 +6687,13 @@ mod tests {
         assert_eq!(local_label("west.blue"), "west.blue");
         // A name that only looks numeric keeps its suffix.
         assert_eq!(local_label("lo.sroa.0.i0.x"), "lo.sroa.0.i0.x");
+        // A counter can sit behind an empty `i` segment, and both go.
+        assert_eq!(local_label("0..sroa.0.0.0.i554.i"), "0..sroa.0.0.0");
+        assert_eq!(local_label("0..sroa.0.0.0.i267.i"), "0..sroa.0.0.0");
         assert_eq!(local_label("value.inline"), "value.inline");
+        // A bare `.i` only goes when it is the marker of a counter before it.
         assert_eq!(local_label("x.i"), "x.i");
+        assert_eq!(local_label("lo.sroa.0.i0.i"), "lo.sroa.0");
     }
 
     #[test]
