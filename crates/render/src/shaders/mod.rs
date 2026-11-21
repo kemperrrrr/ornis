@@ -725,7 +725,12 @@ mod tests {
     fn entry_points_match_pass_abi() {
         use naga::ShaderStage::{Fragment, Vertex};
 
-        let modules: [(&str, String, &[(&str, naga::ShaderStage)]); 8] = [
+        /// One entry a pass asks for, and the stage it binds it at.
+        type Entry = (&'static str, naga::ShaderStage);
+        /// An artifact, and every entry a pass asks that artifact for.
+        type Module = (&'static str, String, &'static [Entry]);
+
+        let modules: [Module; 8] = [
             (
                 "hdr_composite",
                 hdr_composite_generated::wgsl_source(),
