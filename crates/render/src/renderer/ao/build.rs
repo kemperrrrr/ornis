@@ -27,7 +27,7 @@ impl Renderer3D {
             layout: Some(layout),
             vertex: wgpu::VertexState {
                 module: vertex_module,
-                entry_point: Some(shaders::ao_generated::vs_main::entry_point()),
+                entry_point: Some(shaders::ao_generated::VS_ENTRY),
                 buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },

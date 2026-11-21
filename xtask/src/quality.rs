@@ -174,7 +174,7 @@ impl QualityFlags {
         // artifact: cull, clusters, gtao, histogram, adapt, ssao, gtao 4x,
         // ssao 4x, the AO blur, and the translated post passes (composite, hdr,
         // fog 1x/4x, bloom, aa edge, aa taa 1x/4x, gbuffer, gbuffer vertex-only).
-        let shader_checks = 25 * usize::from(self.ci && self.enabled("build-shaders"));
+        let shader_checks = 26 * usize::from(self.ci && self.enabled("build-shaders"));
         stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
@@ -2201,6 +2201,13 @@ fn ci_stages(stages: &mut StageList<'_>) {
     );
     check_shader_artifact(
         stages,
+        Some("ornis-gpu-quad"),
+        Some("vs_main_quad"),
+        "crates/render/src/shaders/quad_vertex_generated.wgsl",
+        "cargo xtask build-shaders --check (shared quad vertex WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
         Some("ornis-gpu-skinning"),
         Some("vs_main_skinned"),
         "crates/render/src/shaders/skinning_generated.wgsl",
@@ -3898,7 +3905,7 @@ mod tests {
         assert_eq!(only_fmt.total_stages(), 1);
         let only_shaders =
             QualityFlags::parse(&["--ci".to_string(), "--only=build-shaders".to_string()]);
-        assert_eq!(only_shaders.total_stages(), 26);
+        assert_eq!(only_shaders.total_stages(), 27);
     }
 
     #[test]

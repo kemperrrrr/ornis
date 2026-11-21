@@ -1,19 +1,15 @@
-//! Lighting shader generated from Rust (Render path 2).
+//! Deferred lighting shader: translated from Rust through LLVM IR.
 //!
-//! Canonical source is the Rust code in this module; WGSL is assembled
-//! from constants + `math::*::wgsl_source()` kernels (OpenPBR BRDF).
-//! The former handwritten `shaders/wgsl/lighting.wgsl` was deleted after the
-//! `#[stage]` translation of `fs_main`; `lighting_fragment` is now assembled
-//! only from here. Prepares
-//! PBR lighting for the full Rust→WGSL transition (path 2).
+//! Both fragment entries are checked-in llvm2gpu artifacts of
+//! `crates/gpu-lighting` (`fs_main_lighting` at 1x,
+//! `fs_main_lighting_msaa` at 4x), and the vertex stage is the shared
+//! [`quad_vertex_generated`](super::quad_vertex_generated) module — the pass
+//! has no hand-written WGSL left. What lives here is the resource table the
+//! bind-group layout is built from, the per-sample rule that table follows at
+//! 4x, and the mapping from a sample count to the artifact.
 
-use super::interface::HdrFragmentOut as QuadVertexOutput;
-use super::{
-    OPENPBR_WGSL_NAME, Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, ShaderModule, naga_ir,
-    wgsl_decl,
-};
+use super::{OPENPBR_WGSL_NAME, Resource, ResourceKind};
 use crate::renderer::{CameraUniform, ClusterParams, ClusterSpan, GpuLight, LightingUniform};
-use ornis_macros::stage;
 
 /// Depth, the material id and the normal stay per-sample at 4x.
 ///
@@ -262,29 +258,18 @@ pub const LIGHTING_1X_ENTRY: &str = "fs_main_lighting";
 /// Name of the translated 4x fragment entry.
 pub const LIGHTING_MSAA_ENTRY: &str = "fs_main_lighting_msaa";
 
-/// Vertex entry, translated by [`stage`](ornis_macros::stage).
-/// DSL-only — replaced by `vs_main::wgsl_source()`.
-#[stage(vertex)]
-fn vs_main(
-    vertex_index: super::VertexIndex,
-    consts: Context<super::QuadConsts>,
-) -> QuadVertexOutput {
-    return QuadVertexOutput {
-        clip_position: consts.quad[vertex_index],
-        uv: consts.uvs[vertex_index],
-    };
-}
+/// Vertex entry-point name (the pipeline-convention ABI).
+///
+/// The stage is the shared quad module: the lighting pass draws the same
+/// triangle-strip quad as every other post pass, so it binds
+/// [`quad_vertex_generated`](super::quad_vertex_generated) for the vertex stage
+/// and its own artifact for the fragment.
+pub use super::quad_vertex_generated::VS_ENTRY;
 
-/// Vertex WGSL: full-screen quad (triangle strip) — quad constants built
-/// from the shared `STANDARD_QUAD`/`STANDARD_UVS` Rust data; the varying
-/// splices the shared `QuadVertexOutput` declaration (`HdrFragmentOut`)
-/// and the entry is translated.
+/// Full WGSL source for the shared quad vertex stage.
+#[must_use]
 pub fn wgsl_vertex_source() -> String {
-    ShaderModule::new()
-        .consts(naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS))
-        .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
-        .entry(vs_main::wgsl_source())
-        .emit()
+    super::quad_vertex_generated::wgsl_vertex_source()
 }
 
 #[cfg(test)]

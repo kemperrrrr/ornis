@@ -2,11 +2,12 @@
 //!
 //! Every post pass draws one quad from `@builtin(vertex_index)` and nothing
 //! else, so the corner table and the two `@location(0)` writes live here once.
-//! A pass keeps its own `#[gpu_entry(vertex)]` — one entry per crate, because
-//! the metadata global carries a fixed export name — and calls
-//! [`standard_quad`] or [`ui_quad`] from it. Both are `#[inline(always)]`, so
-//! the compiled entry is the same straight-line code it would be written by
-//! hand, and the translator never sees a call.
+//! The crate also exports the vertex stage itself, [`vs_main_quad`], so a pass
+//! points its pipeline at that entry instead of assembling a vertex stage of
+//! its own. It is not named plain `vs_main`: a pass keeps its own
+//! `#[gpu_entry(vertex)]` under that name (the metadata global is named after
+//! the entry, so two `vs_main`s in one crate's build would collide), and a pass
+//! that depends on this crate would then carry both.
 
 #![no_std]
 #![warn(missing_docs)]
@@ -17,6 +18,20 @@ use ornis_gpu_shader::vertex_store_2;
 
 /// Bit of `vertex_index` that selects the right column of the quad.
 const COLUMN_BIT: u32 = 1;
+
+/// Standard quad vertex stage: one triangle strip, corners from
+/// `vertex_index`.
+///
+/// Named for the shape rather than for the stage, so a pass that keeps its own
+/// `vs_main` can depend on this crate without two entries colliding. The name
+/// still starts with `vs_main` — `xtask build-shaders` reads the stage from
+/// that prefix, and so does the translator.
+// qual:api — wasm export declared by `#[gpu_entry]`; rustqual reads the source
+// attribute, not the macro's `#[unsafe(export_name = "vs_main_quad")]`.
+#[ornis_gpu_shader::gpu_entry(vertex)]
+pub fn vs_main_quad() {
+    standard_quad();
+}
 /// Bit of `vertex_index` that selects the top row of the quad.
 const ROW_BIT: u32 = 2;
 

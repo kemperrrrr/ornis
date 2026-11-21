@@ -70,7 +70,7 @@ impl Renderer3D {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &vs_module,
-                entry_point: Some(shaders::lighting_generated::vs_main::entry_point()),
+                entry_point: Some(shaders::lighting_generated::VS_ENTRY),
                 buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },

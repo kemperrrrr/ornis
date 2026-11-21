@@ -75,8 +75,6 @@ pub use forward::{
     forward_blend_state, sort_by_depth,
 };
 pub use gbuffer::{GBufferTextures, GbufferTargets};
-#[cfg(test)]
-pub(crate) use lights::CsmBlock;
 pub use lights::CsmCamera;
 pub(crate) use lights::{GpuLight, LIGHT_KIND_DIRECTIONAL, LightingUniform};
 pub use lights::{LightUploadStats, MAX_LIGHTS, ShadingDebug, count_light_drops};
