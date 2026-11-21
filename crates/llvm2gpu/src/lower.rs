@@ -4435,6 +4435,15 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if let Some(shape) = compare_import(callee) {
             return self.image_sample_compare(out, args, shape);
         }
+        if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_F32X4_SAMPLE) {
+            return self.texture_load_lane_sample(out, args);
+        }
+        if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_U32_SAMPLE) {
+            return self.texture_load_sample_of(out, args, TextureKind::Unsigned, None);
+        }
+        if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_F32_SAMPLE) {
+            return self.texture_load_sample_of(out, args, TextureKind::Depth, None);
+        }
         if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_U32) {
             return self.texture_load_u32(out, args);
         }
@@ -5167,6 +5176,77 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         ))
     }
 
+    /// `texture_load_2d_f32x4_sample(group, binding, x, y, lane, sample)`:
+    /// lane `lane` of one sample of a multisampled `texture_2d<f32>`.
+    fn texture_load_lane_sample(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if args.len() != UNIFORM_PREFIX + 2 {
+            return Err(TranslateError::Unsupported);
+        }
+        let lane = const_u32(&args[UNIFORM_PREFIX])?;
+        if lane >= VEC4_LANES {
+            return Err(TranslateError::Unsupported);
+        }
+        self.texture_load_sample_of(
+            out,
+            &args[..UNIFORM_PREFIX + 2],
+            TextureKind::Sampled,
+            Some(lane),
+        )
+    }
+
+    /// A load of one sample of a multisampled image, optionally a lane of it.
+    ///
+    /// The sample index is the last argument and stays an operand: the resolve
+    /// walks the samples in a loop. With a lane, the arguments are
+    /// `(group, binding, x, y, lane, sample)`; the lane is the literal the texel
+    /// access indexes by and the sample is what `textureLoad` reads.
+    fn texture_load_sample_of(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+        kind: TextureKind,
+        lane: Option<u32>,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let expected = if lane.is_some() {
+            UNIFORM_PREFIX + 2
+        } else {
+            UNIFORM_PREFIX + 1
+        };
+        if args.len() != expected {
+            return Err(TranslateError::Unsupported);
+        }
+        let group = const_u32(&args[0])?;
+        let binding = const_u32(&args[1])?;
+        let sample = &args[expected - 1];
+        let image = self.builders.texture(group, binding, kind)?;
+        if !self.builders.sampling.multisampled_at(group, binding) {
+            // The sample operand only exists on a multisampled image; a plain
+            // one has mip levels instead, so the build is missing the flag.
+            return Err(TranslateError::Unsupported);
+        }
+        let texel = self.image_load(out, image, true, &args[2], &args[3], Some(sample))?;
+        // An integer target is read word-wise: the SDK returns the first lane,
+        // the texel load returns the whole `vec4<u32>`.
+        let lane = match (kind, lane) {
+            (TextureKind::Unsigned, None) => Some(0),
+            _ => lane,
+        };
+        let Some(lane) = lane else {
+            return Ok(texel);
+        };
+        Ok(self.expr(
+            out,
+            naga::Expression::AccessIndex {
+                base: texel,
+                index: lane,
+            },
+        ))
+    }
+
     /// `texture_load_2d_f32x4(group, binding, x, y, lane)` at mip 0.
     /// One lane of the `vec4<f32>` a sampled `texture_2d<f32>` returns.
     fn texture_load_lane(
@@ -5194,7 +5274,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let (group, binding, x, y) = texture_xy(args)?;
         let image = self.builders.texture(group, binding, kind)?;
         let multisampled = self.builders.sampling.multisampled_at(group, binding);
-        self.image_load(out, image, multisampled, x, y)
+        self.image_load(out, image, multisampled, x, y, None)
     }
 
     /// `textureLoad` at mip 0, lane `lane` of the loaded texel.
@@ -5216,6 +5296,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     }
 
     /// `textureLoad` at mip 0. Depth images yield `f32`; sampled images yield `vec4<f32>`.
+    ///
+    /// `sample` names the sample to read; `None` reads sample zero, which is
+    /// what a pass that only needs one sample of a 4x target binds.
     fn image_load(
         &mut self,
         out: &mut naga::Block,
@@ -5223,12 +5306,15 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         multisampled: bool,
         x: &Operand,
         y: &Operand,
+        sample: Option<&Operand>,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let coordinate = self.texel_coord(out, x, y)?;
         let (sample, level) = if multisampled {
-            // A multisampled image has samples, not mip levels. Sample 0 is
-            // what the renderer binds for the 4x AO pass.
-            let sample = self.expr(out, naga::Expression::Literal(naga::Literal::U32(0)));
+            // A multisampled image has samples, not mip levels.
+            let sample = match sample {
+                Some(sample) => self.operand(out, sample)?,
+                None => self.expr(out, naga::Expression::Literal(naga::Literal::U32(0))),
+            };
             (Some(sample), None)
         } else {
             let level = self.expr(out, naga::Expression::Literal(naga::Literal::I32(0)));
@@ -6284,6 +6370,9 @@ fn unary_math(callee: &str) -> Option<naga::MathFunction> {
     const FNS: &[(&str, naga::MathFunction)] = &[
         (ornis_gpu_abi::symbols::GPU_SQRT, naga::MathFunction::Sqrt),
         ("llvm.sqrt.f32", naga::MathFunction::Sqrt),
+        // `abs_f32` as a branch is what a shader writes; rustc folds it into the
+        // intrinsic, so the intrinsic is what the translator sees.
+        ("llvm.fabs.f32", naga::MathFunction::Abs),
         ("fract", naga::MathFunction::Fract),
         ("acos", naga::MathFunction::Acos),
         ("sin", naga::MathFunction::Sin),
@@ -6662,6 +6751,7 @@ mod tests {
         assert_eq!(unary_math("gpu_floor"), Some(naga::MathFunction::Floor));
         assert_eq!(unary_math("gpu_ceil"), Some(naga::MathFunction::Ceil));
         assert_eq!(unary_math("llvm.sqrt.f32"), Some(naga::MathFunction::Sqrt));
+        assert_eq!(unary_math("llvm.fabs.f32"), Some(naga::MathFunction::Abs));
     }
 
     #[test]

@@ -83,7 +83,7 @@ const NO_SHADOW_LAYER: f32 = 0.0;
 
 /// `mix(a, b, t)` lane by lane.
 #[inline(always)]
-fn mix3(a: Vec3, b: Vec3, t: f32) -> Vec3 {
+pub(crate) fn mix3(a: Vec3, b: Vec3, t: f32) -> Vec3 {
     v3(
         ornis_gpu_shader::mix(a.x, b.x, t),
         ornis_gpu_shader::mix(a.y, b.y, t),
@@ -93,13 +93,13 @@ fn mix3(a: Vec3, b: Vec3, t: f32) -> Vec3 {
 
 /// WGSL `max(a, b)` for two scalars.
 #[inline(always)]
-fn max_f32(a: f32, b: f32) -> f32 {
+pub(crate) fn max_f32(a: f32, b: f32) -> f32 {
     if b > a { b } else { a }
 }
 
 /// WGSL `min(a, b)` for two scalars.
 #[inline(always)]
-fn min_f32(a: f32, b: f32) -> f32 {
+pub(crate) fn min_f32(a: f32, b: f32) -> f32 {
     if a < b { a } else { b }
 }
 
@@ -557,6 +557,7 @@ pub(crate) fn shade(
 ///
 /// The deferred pass has no tangent varying: the g-buffer normal is the only
 /// axis it carries, so the frame is built from it and world up.
+#[inline(always)]
 pub(crate) fn tangent_frame(n: Vec3) -> (Vec3, Vec3) {
     let up = v3(0.0, 1.0, 0.0);
     let t = normalize3(add3(

@@ -31,9 +31,26 @@ impl<const G: u32, const B: u32> Texture2dU32<G, B> {
             crate::host_unavailable()
         }
     }
+
+    /// First lane of sample `sample` at `(x, y)`, mip 0.
+    // qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+    #[inline(always)]
+    pub fn load_sample(&self, x: u32, y: u32, sample: u32) -> u32 {
+        let _ = self;
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::texture_load_u32_sample(G, B, x, y, sample)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (x, y, sample);
+            crate::host_unavailable()
+        }
+    }
 }
 
 /// Sampled `texture_2d<f32>` at `(G, B)`.
+// qual:allow(srp, god_struct) reason: "one handle that names every way a pass reads a colour target: a mip-0 lane, a sample of it, a sampled lane, and the size"
 pub struct Texture2d<const G: u32, const B: u32> {
     _binding: core::marker::PhantomData<fn() -> u32>,
 }
@@ -53,6 +70,27 @@ impl<const G: u32, const B: u32> Texture2d<G, B> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let _ = (x, y);
+            crate::host_unavailable()
+        }
+    }
+
+    /// Lane `LANE` of sample `sample` at `(x, y)`, mip 0.
+    ///
+    /// The lane stays a const generic — the translator only accepts a literal
+    /// there — while the sample index is an operand, so a resolve loop can walk
+    /// the samples of one texel.
+    // qual:allow(test_quality, untested) reason: "wasm import shim: the host build panics on every texture read, so the method has no host caller; the import it wraps is lowered from LLVM IR in the translator test"
+    #[inline(always)]
+    pub fn load_sample<const LANE: u32>(&self, x: u32, y: u32, sample: u32) -> f32 {
+        const { assert!(LANE < 4, "a texel is a vec4") };
+        let _ = self;
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::texture_load_f32x4_sample(G, B, x, y, LANE, sample)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (x, y, sample);
             crate::host_unavailable()
         }
     }
@@ -331,6 +369,25 @@ impl<const G: u32, const B: u32> DepthTexture2d<G, B> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let _ = (x, y);
+            crate::host_unavailable()
+        }
+    }
+
+    /// Depth of sample `sample` of a `texture_depth_multisampled_2d`.
+    ///
+    /// The sample index is an argument rather than a constant: the g-buffer
+    /// resolve walks every sample the pipeline covers, so it is a loop counter.
+    // qual:allow(test_quality, untested) reason: "wasm import shim: the host build panics on every texture read, so the method has no host caller; the import it wraps is lowered from LLVM IR in the translator test"
+    #[inline(always)]
+    pub fn load_sample(&self, x: u32, y: u32, sample: u32) -> f32 {
+        let _ = self;
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::texture_load_depth_sample(G, B, x, y, sample)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (x, y, sample);
             crate::host_unavailable()
         }
     }

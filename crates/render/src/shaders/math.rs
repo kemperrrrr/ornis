@@ -1008,18 +1008,24 @@ mod tests {
             "const REC709_LUMA_R: f32 = {};",
             super::super::f32_lit(REC709_LUMA_R)
         );
-        // The 1x fragment stage is the translated `ornis-gpu-lighting` artifact,
-        // which carries the constants' values; the DSL assembly that still
-        // splices the coefficient block is the 4x one.
-        let passes = [(
-            "lighting",
-            crate::shaders::lighting_generated::wgsl_source_for_samples(4),
-            true,
-        )];
-        for (name, src, wants_luma) in passes {
-            if wants_luma {
-                assert!(src.contains(&decl), "{name} missing {decl}");
-            }
+        // Both lighting paths are translated artifacts now: the coefficient
+        // *values* survive as literals inside the ported `luminance`, but the
+        // declaration the DSL kernel spliced in is gone. Pin the absence, so a
+        // DSL path that comes back here is caught, and validate what is left.
+        for (name, src) in [
+            (
+                "lighting 1x",
+                crate::shaders::lighting_generated::wgsl_source_for_samples(1),
+            ),
+            (
+                "lighting 4x",
+                crate::shaders::lighting_generated::wgsl_source_for_samples(4),
+            ),
+        ] {
+            assert!(
+                !src.contains(&decl),
+                "{name} still splices the coefficient block"
+            );
             assert_valid_wgsl(name, &src);
         }
         // The translated passes keep their own copy of the math their DSL kernel
