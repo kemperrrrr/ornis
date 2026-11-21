@@ -36,7 +36,7 @@ var<uniform> uniform_struct_0_0_: UniformStruct0_;
 @vertex 
 fn vs_main_skinned(@builtin(instance_index) instance_index: u32, @location(0) in0_: vec3<f32>, @location(1) in1_: vec3<f32>, @location(2) in2_: vec2<f32>, @location(3) in3_: vec3<f32>, @location(4) @interpolate(flat) in4_: vec4<u32>, @location(5) in5_: vec4<f32>) -> VertexOut {
     var vertex_out: VertexOut;
-    var previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
+    var previous_w_u002e_sroa_u002e_0_u002e_0_: f32;
 
     let _e8 = (instance_index * 52u);
     let _e14 = (in4_.x << 5u);
@@ -355,8 +355,8 @@ fn vs_main_skinned(@builtin(instance_index) instance_index: u32, @location(0) in
     let _e2052 = ((((in5_.x * ((((in0_.x * bitcast<f32>(_e1917)) + (in0_.y * bitcast<f32>(_e1924))) + (in0_.z * bitcast<f32>(_e1932))) + bitcast<f32>(_e1940))) + (in5_.y * ((((in0_.x * bitcast<f32>(_e1952)) + (in0_.y * bitcast<f32>(_e1959))) + (in0_.z * bitcast<f32>(_e1967))) + bitcast<f32>(_e1975)))) + (in5_.z * ((((in0_.x * bitcast<f32>(_e1988)) + (in0_.y * bitcast<f32>(_e1995))) + (in0_.z * bitcast<f32>(_e2003))) + bitcast<f32>(_e2011)))) + (in5_.w * ((((in0_.x * bitcast<f32>(_e2024)) + (in0_.y * bitcast<f32>(_e2031))) + (in0_.z * bitcast<f32>(_e2039))) + bitcast<f32>(_e2047))));
     let _e2057 = storage_0_1_[(_e8 + 49u)];
     if (_e2057 == 0u) {
-        previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
-        let _e2063 = previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i;
+        previous_w_u002e_sroa_u002e_0_u002e_0_ = 0f;
+        let _e2063 = previous_w_u002e_sroa_u002e_0_u002e_0_;
         let _e2068 = storage_0_1_[(_e8 + 32u)];
         let _e2075 = storage_0_1_[(_e8 + 36u)];
         let _e2083 = storage_0_1_[(_e8 + 40u)];
@@ -394,8 +394,8 @@ fn vs_main_skinned(@builtin(instance_index) instance_index: u32, @location(0) in
     let _e2261 = storage_0_1_[(_e8 + 39u)];
     let _e2269 = storage_0_1_[(_e8 + 43u)];
     let _e2277 = storage_0_1_[(_e8 + 47u)];
-    previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i = ((((_e1766 * bitcast<f32>(_e2254)) + (_e1909 * bitcast<f32>(_e2261))) + (_e2052 * bitcast<f32>(_e2269))) + bitcast<f32>(_e2277));
-    let _e2282 = previous_w_u002e_sroa_u002e_0_u002e_0_u002e_i;
+    previous_w_u002e_sroa_u002e_0_u002e_0_ = ((((_e1766 * bitcast<f32>(_e2254)) + (_e1909 * bitcast<f32>(_e2261))) + (_e2052 * bitcast<f32>(_e2269))) + bitcast<f32>(_e2277));
+    let _e2282 = previous_w_u002e_sroa_u002e_0_u002e_0_;
     let _e2287 = storage_0_1_[(_e8 + 32u)];
     let _e2294 = storage_0_1_[(_e8 + 36u)];
     let _e2302 = storage_0_1_[(_e8 + 40u)];

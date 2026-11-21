@@ -37,19 +37,19 @@ var tex_0_5_: texture_2d<f32>;
 @fragment 
 fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -> FragmentOut {
     var fragment_out: FragmentOut;
-    var bounds_u002e_i_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_6_u002e_0_u002e_lcssa: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_10_u002e_0_u002e_lcssa: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_14_u002e_0_u002e_lcssa: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_18_u002e_0_u002e_lcssa: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_22_u002e_0_u002e_lcssa: f32;
-    var count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa: f32;
-    var sum_sq_cg_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa: f32;
-    var sum_sq_co_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa: f32;
-    var sum_sq_y_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa: f32;
-    var sum_cg_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa: f32;
-    var sum_co_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa: f32;
-    var sum_y_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa: f32;
+    var bounds_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
+    var bounds_u002e_sroa_u002e_6_u002e_0_u002e_lcssa: f32;
+    var bounds_u002e_sroa_u002e_10_u002e_0_u002e_lcssa: f32;
+    var bounds_u002e_sroa_u002e_14_u002e_0_u002e_lcssa: f32;
+    var bounds_u002e_sroa_u002e_18_u002e_0_u002e_lcssa: f32;
+    var bounds_u002e_sroa_u002e_22_u002e_0_u002e_lcssa: f32;
+    var count_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
+    var sum_sq_cg_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
+    var sum_sq_co_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
+    var sum_sq_y_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
+    var sum_cg_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
+    var sum_co_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
+    var sum_y_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
     var sum_y_u002e_sroa_u002e_0_u002e_0_: f32;
     var sum_co_u002e_sroa_u002e_0_u002e_0_: f32;
     var sum_cg_u002e_sroa_u002e_0_u002e_0_: f32;
@@ -58,12 +58,12 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
     var sum_sq_cg_u002e_sroa_u002e_0_u002e_0_: f32;
     var count_u002e_sroa_u002e_0_u002e_0_: f32;
     var dy_u002e_sroa_u002e_0_u002e_0_: u32;
-    var bounds_u002e_i_u002e_sroa_u002e_22_u002e_093_: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_18_u002e_092_: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_14_u002e_091_: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_10_u002e_090_: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_6_u002e_089_: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_0_u002e_088_: f32;
+    var bounds_u002e_sroa_u002e_22_u002e_093_: f32;
+    var bounds_u002e_sroa_u002e_18_u002e_092_: f32;
+    var bounds_u002e_sroa_u002e_14_u002e_091_: f32;
+    var bounds_u002e_sroa_u002e_10_u002e_090_: f32;
+    var bounds_u002e_sroa_u002e_6_u002e_089_: f32;
+    var bounds_u002e_sroa_u002e_0_u002e_088_: f32;
     var result_b_u002e_sroa_u002e_0_u002e_0_: f32;
     var result_g_u002e_sroa_u002e_0_u002e_0_: f32;
     var result_r_u002e_sroa_u002e_0_u002e_0_: f32;
@@ -75,12 +75,12 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
     var sum_sq_cg_u002e_sroa_u002e_0_u002e_1_: f32;
     var count_u002e_sroa_u002e_0_u002e_1_: f32;
     var dx_u002e_sroa_u002e_0_u002e_0_: u32;
-    var bounds_u002e_i_u002e_sroa_u002e_22_u002e_166_: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_18_u002e_165_: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_14_u002e_164_: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_10_u002e_163_: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_6_u002e_162_: f32;
-    var bounds_u002e_i_u002e_sroa_u002e_0_u002e_161_: f32;
+    var bounds_u002e_sroa_u002e_22_u002e_166_: f32;
+    var bounds_u002e_sroa_u002e_18_u002e_165_: f32;
+    var bounds_u002e_sroa_u002e_14_u002e_164_: f32;
+    var bounds_u002e_sroa_u002e_10_u002e_163_: f32;
+    var bounds_u002e_sroa_u002e_6_u002e_162_: f32;
+    var bounds_u002e_sroa_u002e_0_u002e_161_: f32;
     var out_u002e_6_: f32;
     var out_u002e_7_: f32;
     var out_u002e_8_: f32;
@@ -117,19 +117,19 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                 let _e85 = bitcast<u32>(i32(_e83));
                 let _e87 = (0u - _e85);
                 if (bitcast<i32>(_e85) < bitcast<i32>(_e87)) {
-                    bounds_u002e_i_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 340282350000000000000000000000000000000f;
-                    bounds_u002e_i_u002e_sroa_u002e_6_u002e_0_u002e_lcssa = 340282350000000000000000000000000000000f;
-                    bounds_u002e_i_u002e_sroa_u002e_10_u002e_0_u002e_lcssa = 340282350000000000000000000000000000000f;
-                    bounds_u002e_i_u002e_sroa_u002e_14_u002e_0_u002e_lcssa = -340282350000000000000000000000000000000f;
-                    bounds_u002e_i_u002e_sroa_u002e_18_u002e_0_u002e_lcssa = -340282350000000000000000000000000000000f;
-                    bounds_u002e_i_u002e_sroa_u002e_22_u002e_0_u002e_lcssa = -340282350000000000000000000000000000000f;
-                    count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = 0f;
-                    sum_sq_cg_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = 0f;
-                    sum_sq_co_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = 0f;
-                    sum_sq_y_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = 0f;
-                    sum_cg_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = 0f;
-                    sum_co_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = 0f;
-                    sum_y_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = 0f;
+                    bounds_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 340282350000000000000000000000000000000f;
+                    bounds_u002e_sroa_u002e_6_u002e_0_u002e_lcssa = 340282350000000000000000000000000000000f;
+                    bounds_u002e_sroa_u002e_10_u002e_0_u002e_lcssa = 340282350000000000000000000000000000000f;
+                    bounds_u002e_sroa_u002e_14_u002e_0_u002e_lcssa = -340282350000000000000000000000000000000f;
+                    bounds_u002e_sroa_u002e_18_u002e_0_u002e_lcssa = -340282350000000000000000000000000000000f;
+                    bounds_u002e_sroa_u002e_22_u002e_0_u002e_lcssa = -340282350000000000000000000000000000000f;
+                    count_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 0f;
+                    sum_sq_cg_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 0f;
+                    sum_sq_co_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 0f;
+                    sum_sq_y_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 0f;
+                    sum_cg_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 0f;
+                    sum_co_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 0f;
+                    sum_y_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 0f;
                 } else {
                     sum_y_u002e_sroa_u002e_0_u002e_0_ = 0f;
                     sum_co_u002e_sroa_u002e_0_u002e_0_ = 0f;
@@ -139,12 +139,12 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                     sum_sq_cg_u002e_sroa_u002e_0_u002e_0_ = 0f;
                     count_u002e_sroa_u002e_0_u002e_0_ = 0f;
                     dy_u002e_sroa_u002e_0_u002e_0_ = _e87;
-                    bounds_u002e_i_u002e_sroa_u002e_22_u002e_093_ = -340282350000000000000000000000000000000f;
-                    bounds_u002e_i_u002e_sroa_u002e_18_u002e_092_ = -340282350000000000000000000000000000000f;
-                    bounds_u002e_i_u002e_sroa_u002e_14_u002e_091_ = -340282350000000000000000000000000000000f;
-                    bounds_u002e_i_u002e_sroa_u002e_10_u002e_090_ = 340282350000000000000000000000000000000f;
-                    bounds_u002e_i_u002e_sroa_u002e_6_u002e_089_ = 340282350000000000000000000000000000000f;
-                    bounds_u002e_i_u002e_sroa_u002e_0_u002e_088_ = 340282350000000000000000000000000000000f;
+                    bounds_u002e_sroa_u002e_22_u002e_093_ = -340282350000000000000000000000000000000f;
+                    bounds_u002e_sroa_u002e_18_u002e_092_ = -340282350000000000000000000000000000000f;
+                    bounds_u002e_sroa_u002e_14_u002e_091_ = -340282350000000000000000000000000000000f;
+                    bounds_u002e_sroa_u002e_10_u002e_090_ = 340282350000000000000000000000000000000f;
+                    bounds_u002e_sroa_u002e_6_u002e_089_ = 340282350000000000000000000000000000000f;
+                    bounds_u002e_sroa_u002e_0_u002e_088_ = 340282350000000000000000000000000000000f;
                     loop {
                         let _e145 = sum_y_u002e_sroa_u002e_0_u002e_0_;
                         let _e147 = sum_co_u002e_sroa_u002e_0_u002e_0_;
@@ -154,12 +154,12 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                         let _e155 = sum_sq_cg_u002e_sroa_u002e_0_u002e_0_;
                         let _e157 = count_u002e_sroa_u002e_0_u002e_0_;
                         let _e159 = dy_u002e_sroa_u002e_0_u002e_0_;
-                        let _e161 = bounds_u002e_i_u002e_sroa_u002e_22_u002e_093_;
-                        let _e163 = bounds_u002e_i_u002e_sroa_u002e_18_u002e_092_;
-                        let _e165 = bounds_u002e_i_u002e_sroa_u002e_14_u002e_091_;
-                        let _e167 = bounds_u002e_i_u002e_sroa_u002e_10_u002e_090_;
-                        let _e169 = bounds_u002e_i_u002e_sroa_u002e_6_u002e_089_;
-                        let _e171 = bounds_u002e_i_u002e_sroa_u002e_0_u002e_088_;
+                        let _e161 = bounds_u002e_sroa_u002e_22_u002e_093_;
+                        let _e163 = bounds_u002e_sroa_u002e_18_u002e_092_;
+                        let _e165 = bounds_u002e_sroa_u002e_14_u002e_091_;
+                        let _e167 = bounds_u002e_sroa_u002e_10_u002e_090_;
+                        let _e169 = bounds_u002e_sroa_u002e_6_u002e_089_;
+                        let _e171 = bounds_u002e_sroa_u002e_0_u002e_088_;
                         sum_y_u002e_sroa_u002e_0_u002e_1_ = _e145;
                         sum_co_u002e_sroa_u002e_0_u002e_1_ = _e147;
                         sum_cg_u002e_sroa_u002e_0_u002e_1_ = _e149;
@@ -168,12 +168,12 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                         sum_sq_cg_u002e_sroa_u002e_0_u002e_1_ = _e155;
                         count_u002e_sroa_u002e_0_u002e_1_ = _e157;
                         dx_u002e_sroa_u002e_0_u002e_0_ = _e87;
-                        bounds_u002e_i_u002e_sroa_u002e_22_u002e_166_ = _e161;
-                        bounds_u002e_i_u002e_sroa_u002e_18_u002e_165_ = _e163;
-                        bounds_u002e_i_u002e_sroa_u002e_14_u002e_164_ = _e165;
-                        bounds_u002e_i_u002e_sroa_u002e_10_u002e_163_ = _e167;
-                        bounds_u002e_i_u002e_sroa_u002e_6_u002e_162_ = _e169;
-                        bounds_u002e_i_u002e_sroa_u002e_0_u002e_161_ = _e171;
+                        bounds_u002e_sroa_u002e_22_u002e_166_ = _e161;
+                        bounds_u002e_sroa_u002e_18_u002e_165_ = _e163;
+                        bounds_u002e_sroa_u002e_14_u002e_164_ = _e165;
+                        bounds_u002e_sroa_u002e_10_u002e_163_ = _e167;
+                        bounds_u002e_sroa_u002e_6_u002e_162_ = _e169;
+                        bounds_u002e_sroa_u002e_0_u002e_161_ = _e171;
                         loop {
                             let _e191 = sum_y_u002e_sroa_u002e_0_u002e_1_;
                             let _e193 = sum_co_u002e_sroa_u002e_0_u002e_1_;
@@ -183,12 +183,12 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                             let _e201 = sum_sq_cg_u002e_sroa_u002e_0_u002e_1_;
                             let _e203 = count_u002e_sroa_u002e_0_u002e_1_;
                             let _e205 = dx_u002e_sroa_u002e_0_u002e_0_;
-                            let _e207 = bounds_u002e_i_u002e_sroa_u002e_22_u002e_166_;
-                            let _e209 = bounds_u002e_i_u002e_sroa_u002e_18_u002e_165_;
-                            let _e211 = bounds_u002e_i_u002e_sroa_u002e_14_u002e_164_;
-                            let _e213 = bounds_u002e_i_u002e_sroa_u002e_10_u002e_163_;
-                            let _e215 = bounds_u002e_i_u002e_sroa_u002e_6_u002e_162_;
-                            let _e217 = bounds_u002e_i_u002e_sroa_u002e_0_u002e_161_;
+                            let _e207 = bounds_u002e_sroa_u002e_22_u002e_166_;
+                            let _e209 = bounds_u002e_sroa_u002e_18_u002e_165_;
+                            let _e211 = bounds_u002e_sroa_u002e_14_u002e_164_;
+                            let _e213 = bounds_u002e_sroa_u002e_10_u002e_163_;
+                            let _e215 = bounds_u002e_sroa_u002e_6_u002e_162_;
+                            let _e217 = bounds_u002e_sroa_u002e_0_u002e_161_;
                             let _e224 = clamp((uv.x + (f32(bitcast<i32>(_e205)) / _e8)), 0f, 1f);
                             let _e227 = clamp((uv.y + (f32(bitcast<i32>(_e159)) / _e13)), 0f, 1f);
                             let _e232 = textureSampleLevel(tex_0_0_, sampler_0_1_, vec2<f32>(_e224, _e227), 0f);
@@ -237,12 +237,12 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                                 sum_sq_cg_u002e_sroa_u002e_0_u002e_1_ = _e288;
                                 count_u002e_sroa_u002e_0_u002e_1_ = _e291;
                                 dx_u002e_sroa_u002e_0_u002e_0_ = _e294;
-                                bounds_u002e_i_u002e_sroa_u002e_22_u002e_166_ = _e273;
-                                bounds_u002e_i_u002e_sroa_u002e_18_u002e_165_ = _e271;
-                                bounds_u002e_i_u002e_sroa_u002e_14_u002e_164_ = _e269;
-                                bounds_u002e_i_u002e_sroa_u002e_10_u002e_163_ = _e267;
-                                bounds_u002e_i_u002e_sroa_u002e_6_u002e_162_ = _e265;
-                                bounds_u002e_i_u002e_sroa_u002e_0_u002e_161_ = _e263;
+                                bounds_u002e_sroa_u002e_22_u002e_166_ = _e273;
+                                bounds_u002e_sroa_u002e_18_u002e_165_ = _e271;
+                                bounds_u002e_sroa_u002e_14_u002e_164_ = _e269;
+                                bounds_u002e_sroa_u002e_10_u002e_163_ = _e267;
+                                bounds_u002e_sroa_u002e_6_u002e_162_ = _e265;
+                                bounds_u002e_sroa_u002e_0_u002e_161_ = _e263;
                                 continue;
                             }
                         }
@@ -261,19 +261,19 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                         let _e337 = out_u002e_6_;
                         let _e339 = (_e159 + 1u);
                         if (bitcast<i32>(_e339) > bitcast<i32>(_e85)) {
-                            bounds_u002e_i_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = _e337;
-                            bounds_u002e_i_u002e_sroa_u002e_6_u002e_0_u002e_lcssa = _e335;
-                            bounds_u002e_i_u002e_sroa_u002e_10_u002e_0_u002e_lcssa = _e333;
-                            bounds_u002e_i_u002e_sroa_u002e_14_u002e_0_u002e_lcssa = _e331;
-                            bounds_u002e_i_u002e_sroa_u002e_18_u002e_0_u002e_lcssa = _e329;
-                            bounds_u002e_i_u002e_sroa_u002e_22_u002e_0_u002e_lcssa = _e327;
-                            count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = _e325;
-                            sum_sq_cg_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = _e323;
-                            sum_sq_co_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = _e321;
-                            sum_sq_y_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = _e319;
-                            sum_cg_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = _e317;
-                            sum_co_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = _e315;
-                            sum_y_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = _e313;
+                            bounds_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = _e337;
+                            bounds_u002e_sroa_u002e_6_u002e_0_u002e_lcssa = _e335;
+                            bounds_u002e_sroa_u002e_10_u002e_0_u002e_lcssa = _e333;
+                            bounds_u002e_sroa_u002e_14_u002e_0_u002e_lcssa = _e331;
+                            bounds_u002e_sroa_u002e_18_u002e_0_u002e_lcssa = _e329;
+                            bounds_u002e_sroa_u002e_22_u002e_0_u002e_lcssa = _e327;
+                            count_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = _e325;
+                            sum_sq_cg_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = _e323;
+                            sum_sq_co_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = _e321;
+                            sum_sq_y_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = _e319;
+                            sum_cg_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = _e317;
+                            sum_co_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = _e315;
+                            sum_y_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = _e313;
                             break;
                         } else {
                             sum_y_u002e_sroa_u002e_0_u002e_0_ = _e313;
@@ -284,29 +284,29 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                             sum_sq_cg_u002e_sroa_u002e_0_u002e_0_ = _e323;
                             count_u002e_sroa_u002e_0_u002e_0_ = _e325;
                             dy_u002e_sroa_u002e_0_u002e_0_ = _e339;
-                            bounds_u002e_i_u002e_sroa_u002e_22_u002e_093_ = _e327;
-                            bounds_u002e_i_u002e_sroa_u002e_18_u002e_092_ = _e329;
-                            bounds_u002e_i_u002e_sroa_u002e_14_u002e_091_ = _e331;
-                            bounds_u002e_i_u002e_sroa_u002e_10_u002e_090_ = _e333;
-                            bounds_u002e_i_u002e_sroa_u002e_6_u002e_089_ = _e335;
-                            bounds_u002e_i_u002e_sroa_u002e_0_u002e_088_ = _e337;
+                            bounds_u002e_sroa_u002e_22_u002e_093_ = _e327;
+                            bounds_u002e_sroa_u002e_18_u002e_092_ = _e329;
+                            bounds_u002e_sroa_u002e_14_u002e_091_ = _e331;
+                            bounds_u002e_sroa_u002e_10_u002e_090_ = _e333;
+                            bounds_u002e_sroa_u002e_6_u002e_089_ = _e335;
+                            bounds_u002e_sroa_u002e_0_u002e_088_ = _e337;
                             continue;
                         }
                     }
                 }
-                let _e397 = bounds_u002e_i_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
-                let _e399 = bounds_u002e_i_u002e_sroa_u002e_6_u002e_0_u002e_lcssa;
-                let _e401 = bounds_u002e_i_u002e_sroa_u002e_10_u002e_0_u002e_lcssa;
-                let _e403 = bounds_u002e_i_u002e_sroa_u002e_14_u002e_0_u002e_lcssa;
-                let _e405 = bounds_u002e_i_u002e_sroa_u002e_18_u002e_0_u002e_lcssa;
-                let _e407 = bounds_u002e_i_u002e_sroa_u002e_22_u002e_0_u002e_lcssa;
-                let _e409 = count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa;
-                let _e411 = sum_sq_cg_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa;
-                let _e413 = sum_sq_co_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa;
-                let _e415 = sum_sq_y_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa;
-                let _e417 = sum_cg_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa;
-                let _e419 = sum_co_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa;
-                let _e421 = sum_y_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa;
+                let _e397 = bounds_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
+                let _e399 = bounds_u002e_sroa_u002e_6_u002e_0_u002e_lcssa;
+                let _e401 = bounds_u002e_sroa_u002e_10_u002e_0_u002e_lcssa;
+                let _e403 = bounds_u002e_sroa_u002e_14_u002e_0_u002e_lcssa;
+                let _e405 = bounds_u002e_sroa_u002e_18_u002e_0_u002e_lcssa;
+                let _e407 = bounds_u002e_sroa_u002e_22_u002e_0_u002e_lcssa;
+                let _e409 = count_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
+                let _e411 = sum_sq_cg_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
+                let _e413 = sum_sq_co_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
+                let _e415 = sum_sq_y_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
+                let _e417 = sum_cg_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
+                let _e419 = sum_co_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
+                let _e421 = sum_y_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
                 let _e422 = (_e421 / _e409);
                 let _e423 = (_e419 / _e409);
                 let _e424 = (_e417 / _e409);
@@ -363,33 +363,33 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
 @vertex 
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     var vertex_out: VertexOut;
-    var _11_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var _10_u002e_sroa_u002e_0_u002e_2_u002e_i: f32;
+    var _11_u002e_sroa_u002e_0_u002e_0_: f32;
+    var _10_u002e_sroa_u002e_0_u002e_2_: f32;
 
     let _e6 = ((vertex_index & 2u) == 0u);
     if ((vertex_index & 1u) == 0u) {
         if _e6 {
             vertex_out.position = vec4<f32>(-1f, -1f, 0f, 1f);
-            _11_u002e_sroa_u002e_0_u002e_0_u002e_i = 1f;
-            _10_u002e_sroa_u002e_0_u002e_2_u002e_i = 0f;
+            _11_u002e_sroa_u002e_0_u002e_0_ = 1f;
+            _10_u002e_sroa_u002e_0_u002e_2_ = 0f;
         } else {
             vertex_out.position = vec4<f32>(-1f, 1f, 0f, 1f);
-            _11_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
-            _10_u002e_sroa_u002e_0_u002e_2_u002e_i = 0f;
+            _11_u002e_sroa_u002e_0_u002e_0_ = 0f;
+            _10_u002e_sroa_u002e_0_u002e_2_ = 0f;
         }
     } else {
         if _e6 {
             vertex_out.position = vec4<f32>(1f, -1f, 0f, 1f);
-            _11_u002e_sroa_u002e_0_u002e_0_u002e_i = 1f;
-            _10_u002e_sroa_u002e_0_u002e_2_u002e_i = 1f;
+            _11_u002e_sroa_u002e_0_u002e_0_ = 1f;
+            _10_u002e_sroa_u002e_0_u002e_2_ = 1f;
         } else {
             vertex_out.position = vec4<f32>(1f, 1f, 0f, 1f);
-            _11_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
-            _10_u002e_sroa_u002e_0_u002e_2_u002e_i = 1f;
+            _11_u002e_sroa_u002e_0_u002e_0_ = 0f;
+            _10_u002e_sroa_u002e_0_u002e_2_ = 1f;
         }
     }
-    let _e54 = _11_u002e_sroa_u002e_0_u002e_0_u002e_i;
-    let _e56 = _10_u002e_sroa_u002e_0_u002e_2_u002e_i;
+    let _e54 = _11_u002e_sroa_u002e_0_u002e_0_;
+    let _e56 = _10_u002e_sroa_u002e_0_u002e_2_;
     vertex_out.o0_ = vec2<f32>(_e56, _e54);
     let _e61 = vertex_out;
     return _e61;

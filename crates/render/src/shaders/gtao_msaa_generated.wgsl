@@ -33,8 +33,8 @@ var<uniform> uniform_struct_0_3_: UniformStruct1_;
 @fragment 
 fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     var fragment_out: vec4<f32>;
-    var cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
     var cos_h_u002e_sroa_u002e_0_u002e_0_: f32;
+    var cos_h_u002e_sroa_u002e_0_u002e_0_1: f32;
     var visibility_u002e_sroa_u002e_0_: f32;
     var slice_u002e_sroa_u002e_0_: u32;
     var horizon_pos_u002e_sroa_u002e_0_: f32;
@@ -239,17 +239,17 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                         let _e946 = (((_e919 + (((_e804 * _e902) + (_e808 * _e907)) + (_e798 * _e913))) / (_e941 + (((_e804 * _e924) + (_e808 * _e929)) + (_e798 * _e935)))) - _e211);
                         let _e948 = length(vec3<f32>(_e944, _e945, _e946));
                         if ((_e948 > 0.000001f) & (_e948 < _e548)) {
-                            cos_h_u002e_sroa_u002e_0_u002e_0_ = mix(_e754, dot(vec3<f32>((_e944 / _e948), (_e945 / _e948), (_e946 / _e948)), vec3<f32>(_e231, _e232, _e233)), clamp((1f - (_e948 / max(_e548, 0.000001f))), 0f, 1f));
+                            cos_h_u002e_sroa_u002e_0_u002e_0_1 = mix(_e754, dot(vec3<f32>((_e944 / _e948), (_e945 / _e948), (_e946 / _e948)), vec3<f32>(_e231, _e232, _e233)), clamp((1f - (_e948 / max(_e548, 0.000001f))), 0f, 1f));
                         } else {
-                            cos_h_u002e_sroa_u002e_0_u002e_0_ = -1f;
+                            cos_h_u002e_sroa_u002e_0_u002e_0_1 = -1f;
                         }
                     } else {
-                        cos_h_u002e_sroa_u002e_0_u002e_0_ = -1f;
+                        cos_h_u002e_sroa_u002e_0_u002e_0_1 = -1f;
                     }
                 } else {
-                    cos_h_u002e_sroa_u002e_0_u002e_0_ = -1f;
+                    cos_h_u002e_sroa_u002e_0_u002e_0_1 = -1f;
                 }
-                let _e974 = cos_h_u002e_sroa_u002e_0_u002e_0_;
+                let _e974 = cos_h_u002e_sroa_u002e_0_u002e_0_1;
                 let _e975 = max(_e763, _e974);
                 out_u002e_10_ = _e975;
                 let _e977 = (uv.x - _e772);
@@ -288,17 +288,17 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                         let _e1149 = (((_e1122 + (((_e1007 * _e1105) + (_e1011 * _e1110)) + (_e1001 * _e1116))) / (_e1144 + (((_e1007 * _e1127) + (_e1011 * _e1132)) + (_e1001 * _e1138)))) - _e211);
                         let _e1151 = length(vec3<f32>(_e1147, _e1148, _e1149));
                         if ((_e1151 > 0.000001f) & (_e1151 < _e548)) {
-                            cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i = mix(_e757, dot(vec3<f32>((_e1147 / _e1151), (_e1148 / _e1151), (_e1149 / _e1151)), vec3<f32>(_e231, _e232, _e233)), clamp((1f - (_e1151 / max(_e548, 0.000001f))), 0f, 1f));
+                            cos_h_u002e_sroa_u002e_0_u002e_0_ = mix(_e757, dot(vec3<f32>((_e1147 / _e1151), (_e1148 / _e1151), (_e1149 / _e1151)), vec3<f32>(_e231, _e232, _e233)), clamp((1f - (_e1151 / max(_e548, 0.000001f))), 0f, 1f));
                         } else {
-                            cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i = -1f;
+                            cos_h_u002e_sroa_u002e_0_u002e_0_ = -1f;
                         }
                     } else {
-                        cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i = -1f;
+                        cos_h_u002e_sroa_u002e_0_u002e_0_ = -1f;
                     }
                 } else {
-                    cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i = -1f;
+                    cos_h_u002e_sroa_u002e_0_u002e_0_ = -1f;
                 }
-                let _e1177 = cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i;
+                let _e1177 = cos_h_u002e_sroa_u002e_0_u002e_0_;
                 let _e1178 = max(_e765, _e1177);
                 out_u002e_11_ = _e1178;
                 let _e1181 = (_e767 + 1u);

@@ -91,54 +91,54 @@ var tex_0_9_: texture_2d<f32>;
 @fragment 
 fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>, @location(1) in1_: vec3<f32>, @location(3) in3_: vec3<f32>, @location(4) @interpolate(flat) in4_: u32) -> @location(0) vec4<f32> {
     var fragment_out: vec4<f32>;
-    var _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i: u32;
-    var radiance_u002e_i_u002e_sroa_u002e_0_u002e_2_: f32;
-    var radiance_u002e_i_u002e_sroa_u002e_10_u002e_2_: f32;
-    var radiance_u002e_i_u002e_sroa_u002e_15_u002e_2_: f32;
-    var vis_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_i: f32;
-    var lo_u002e_i_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
-    var lo_u002e_i_u002e_sroa_u002e_6_u002e_0_u002e_lcssa: f32;
-    var lo_u002e_i_u002e_sroa_u002e_9_u002e_0_u002e_lcssa: f32;
-    var extinction_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
-    var extinction_u002e_i_u002e_sroa_u002e_5_u002e_0_: f32;
-    var extinction_u002e_i_u002e_sroa_u002e_8_u002e_0_: f32;
-    var emission_u002e_i_u002e_sroa_u002e_0_u002e_1_: f32;
-    var emission_u002e_i_u002e_sroa_u002e_7_u002e_1_: f32;
-    var emission_u002e_i_u002e_sroa_u002e_10_u002e_1_: f32;
-    var subsurface_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
-    var subsurface_u002e_i_u002e_sroa_u002e_5_u002e_0_: f32;
-    var subsurface_u002e_i_u002e_sroa_u002e_8_u002e_0_: f32;
-    var transmission_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
-    var transmission_u002e_i_u002e_sroa_u002e_5_u002e_0_: f32;
-    var transmission_u002e_i_u002e_sroa_u002e_8_u002e_0_: f32;
-    var _4_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var coat_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
-    var coat_u002e_i_u002e_sroa_u002e_5_u002e_0_: f32;
-    var coat_u002e_i_u002e_sroa_u002e_8_u002e_0_: f32;
-    var fuzz_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
-    var fuzz_u002e_i_u002e_sroa_u002e_5_u002e_0_: f32;
-    var fuzz_u002e_i_u002e_sroa_u002e_8_u002e_0_: f32;
-    var coat_darken_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
-    var coat_darken_u002e_i_u002e_sroa_u002e_5_u002e_0_: f32;
-    var coat_darken_u002e_i_u002e_sroa_u002e_7_u002e_0_: f32;
+    var _0_u002e_sroa_u002e_0_u002e_0_u002e_in: u32;
+    var radiance_u002e_sroa_u002e_0_u002e_2_: f32;
+    var radiance_u002e_sroa_u002e_10_u002e_2_: f32;
+    var radiance_u002e_sroa_u002e_15_u002e_2_: f32;
+    var vis_u002e_sroa_u002e_0_u002e_0_: f32;
+    var lo_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
+    var lo_u002e_sroa_u002e_6_u002e_0_u002e_lcssa: f32;
+    var lo_u002e_sroa_u002e_9_u002e_0_u002e_lcssa: f32;
+    var extinction_u002e_sroa_u002e_0_u002e_0_: f32;
+    var extinction_u002e_sroa_u002e_5_u002e_0_: f32;
+    var extinction_u002e_sroa_u002e_8_u002e_0_: f32;
+    var emission_u002e_sroa_u002e_0_u002e_1_: f32;
+    var emission_u002e_sroa_u002e_7_u002e_1_: f32;
+    var emission_u002e_sroa_u002e_10_u002e_1_: f32;
+    var subsurface_u002e_sroa_u002e_0_u002e_0_: f32;
+    var subsurface_u002e_sroa_u002e_5_u002e_0_: f32;
+    var subsurface_u002e_sroa_u002e_8_u002e_0_: f32;
+    var transmission_u002e_sroa_u002e_0_u002e_0_: f32;
+    var transmission_u002e_sroa_u002e_5_u002e_0_: f32;
+    var transmission_u002e_sroa_u002e_8_u002e_0_: f32;
+    var _4_u002e_sroa_u002e_0_u002e_0_: f32;
+    var coat_u002e_sroa_u002e_0_u002e_0_: f32;
+    var coat_u002e_sroa_u002e_5_u002e_0_: f32;
+    var coat_u002e_sroa_u002e_8_u002e_0_: f32;
+    var fuzz_u002e_sroa_u002e_0_u002e_0_: f32;
+    var fuzz_u002e_sroa_u002e_5_u002e_0_: f32;
+    var fuzz_u002e_sroa_u002e_8_u002e_0_: f32;
+    var coat_darken_u002e_sroa_u002e_0_u002e_0_: f32;
+    var coat_darken_u002e_sroa_u002e_5_u002e_0_: f32;
+    var coat_darken_u002e_sroa_u002e_7_u002e_0_: f32;
     var k_u002e_sroa_u002e_0_u002e_0_: u32;
-    var lo_u002e_i_u002e_sroa_u002e_9_: f32;
-    var lo_u002e_i_u002e_sroa_u002e_6_: f32;
-    var lo_u002e_i_u002e_sroa_u002e_0_: f32;
-    var _2_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var lo_u002e_i_u002e_sroa_u002e_0_u002e_1_: f32;
-    var lo_u002e_i_u002e_sroa_u002e_6_u002e_1_: f32;
-    var lo_u002e_i_u002e_sroa_u002e_9_u002e_1_: f32;
-    var radiance_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
-    var radiance_u002e_i_u002e_sroa_u002e_10_u002e_0_: f32;
-    var radiance_u002e_i_u002e_sroa_u002e_15_u002e_0_: f32;
-    var radiance_u002e_i_u002e_sroa_u002e_0_u002e_1_: f32;
-    var radiance_u002e_i_u002e_sroa_u002e_10_u002e_1_: f32;
-    var radiance_u002e_i_u002e_sroa_u002e_15_u002e_1_: f32;
-    var _3_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var out_u002e_lo_u002e_i_u002e_sroa_u002e_0_u002e_1_: f32;
-    var out_u002e_lo_u002e_i_u002e_sroa_u002e_6_u002e_1_: f32;
-    var out_u002e_lo_u002e_i_u002e_sroa_u002e_9_u002e_1_: f32;
+    var lo_u002e_sroa_u002e_9_: f32;
+    var lo_u002e_sroa_u002e_6_: f32;
+    var lo_u002e_sroa_u002e_0_: f32;
+    var _2_u002e_sroa_u002e_0_u002e_0_: f32;
+    var lo_u002e_sroa_u002e_0_u002e_1_: f32;
+    var lo_u002e_sroa_u002e_6_u002e_1_: f32;
+    var lo_u002e_sroa_u002e_9_u002e_1_: f32;
+    var radiance_u002e_sroa_u002e_0_u002e_0_: f32;
+    var radiance_u002e_sroa_u002e_10_u002e_0_: f32;
+    var radiance_u002e_sroa_u002e_15_u002e_0_: f32;
+    var radiance_u002e_sroa_u002e_0_u002e_1_: f32;
+    var radiance_u002e_sroa_u002e_10_u002e_1_: f32;
+    var radiance_u002e_sroa_u002e_15_u002e_1_: f32;
+    var _3_u002e_sroa_u002e_0_u002e_0_: f32;
+    var out_u002e_lo_u002e_sroa_u002e_0_u002e_1_: f32;
+    var out_u002e_lo_u002e_sroa_u002e_6_u002e_1_: f32;
+    var out_u002e_lo_u002e_sroa_u002e_9_u002e_1_: f32;
 
     let _e14 = (1f / length(vec3<f32>(in1_.x, in1_.y, in1_.z)));
     let _e15 = (in1_.x * _e14);
@@ -297,22 +297,22 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
         let _e668 = (_e642 * _e110);
         let _e681 = (_e641 * _e110);
         let _e695 = (_e337 * bitcast<f32>(_e354));
-        coat_darken_u002e_i_u002e_sroa_u002e_0_u002e_0_ = ((_e695 * ((_e654 / max((1f - ((_e681 + (((((_e92 - _e277) * _e253) + _e277) - _e681) * _e86)) * _e652)), 0.000001f)) + -1f)) + 1f);
-        coat_darken_u002e_i_u002e_sroa_u002e_5_u002e_0_ = ((_e695 * ((_e654 / max((1f - ((_e668 + (((((_e98 - _e283) * _e253) + _e283) - _e668) * _e86)) * _e652)), 0.000001f)) + -1f)) + 1f);
-        coat_darken_u002e_i_u002e_sroa_u002e_7_u002e_0_ = ((_e695 * ((_e654 / max((1f - ((_e655 + (((((_e104 - _e289) * _e253) + _e289) - _e655) * _e86)) * _e652)), 0.000001f)) + -1f)) + 1f);
+        coat_darken_u002e_sroa_u002e_0_u002e_0_ = ((_e695 * ((_e654 / max((1f - ((_e681 + (((((_e92 - _e277) * _e253) + _e277) - _e681) * _e86)) * _e652)), 0.000001f)) + -1f)) + 1f);
+        coat_darken_u002e_sroa_u002e_5_u002e_0_ = ((_e695 * ((_e654 / max((1f - ((_e668 + (((((_e98 - _e283) * _e253) + _e283) - _e668) * _e86)) * _e652)), 0.000001f)) + -1f)) + 1f);
+        coat_darken_u002e_sroa_u002e_7_u002e_0_ = ((_e695 * ((_e654 / max((1f - ((_e655 + (((((_e104 - _e289) * _e253) + _e289) - _e655) * _e86)) * _e652)), 0.000001f)) + -1f)) + 1f);
     } else {
-        coat_darken_u002e_i_u002e_sroa_u002e_0_u002e_0_ = 1f;
-        coat_darken_u002e_i_u002e_sroa_u002e_5_u002e_0_ = 1f;
-        coat_darken_u002e_i_u002e_sroa_u002e_7_u002e_0_ = 1f;
+        coat_darken_u002e_sroa_u002e_0_u002e_0_ = 1f;
+        coat_darken_u002e_sroa_u002e_5_u002e_0_ = 1f;
+        coat_darken_u002e_sroa_u002e_7_u002e_0_ = 1f;
     }
-    let _e721 = coat_darken_u002e_i_u002e_sroa_u002e_0_u002e_0_;
-    let _e723 = coat_darken_u002e_i_u002e_sroa_u002e_5_u002e_0_;
-    let _e725 = coat_darken_u002e_i_u002e_sroa_u002e_7_u002e_0_;
+    let _e721 = coat_darken_u002e_sroa_u002e_0_u002e_0_;
+    let _e723 = coat_darken_u002e_sroa_u002e_5_u002e_0_;
+    let _e725 = coat_darken_u002e_sroa_u002e_7_u002e_0_;
     let _e726 = ((_e562 * _e550) + _e553);
     if (_e726 == 0u) {
-        lo_u002e_i_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 0f;
-        lo_u002e_i_u002e_sroa_u002e_6_u002e_0_u002e_lcssa = 0f;
-        lo_u002e_i_u002e_sroa_u002e_9_u002e_0_u002e_lcssa = 0f;
+        lo_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = 0f;
+        lo_u002e_sroa_u002e_6_u002e_0_u002e_lcssa = 0f;
+        lo_u002e_sroa_u002e_9_u002e_0_u002e_lcssa = 0f;
     } else {
         let _e743 = ((_e163 + -1f) / (_e163 + 1f));
         let _e744 = (_e743 * _e743);
@@ -332,21 +332,21 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
         let _e794 = (2f / ((_e789 * _e789) + 1f));
         let _e798 = (_e313 * _e313);
         k_u002e_sroa_u002e_0_u002e_0_ = 0u;
-        lo_u002e_i_u002e_sroa_u002e_9_ = 0f;
-        lo_u002e_i_u002e_sroa_u002e_6_ = 0f;
-        lo_u002e_i_u002e_sroa_u002e_0_ = 0f;
+        lo_u002e_sroa_u002e_9_ = 0f;
+        lo_u002e_sroa_u002e_6_ = 0f;
+        lo_u002e_sroa_u002e_0_ = 0f;
         loop {
             let _e848 = k_u002e_sroa_u002e_0_u002e_0_;
-            let _e850 = lo_u002e_i_u002e_sroa_u002e_9_;
-            let _e852 = lo_u002e_i_u002e_sroa_u002e_6_;
-            let _e854 = lo_u002e_i_u002e_sroa_u002e_0_;
+            let _e850 = lo_u002e_sroa_u002e_9_;
+            let _e852 = lo_u002e_sroa_u002e_6_;
+            let _e854 = lo_u002e_sroa_u002e_0_;
             if (_e848 < _e553) {
-                _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i = _e848;
+                _0_u002e_sroa_u002e_0_u002e_0_u002e_in = _e848;
             } else {
                 let _e860 = storage_0_14_[(((_e556 * _e550) - _e553) + _e848)];
-                _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i = _e860;
+                _0_u002e_sroa_u002e_0_u002e_0_u002e_in = _e860;
             }
-            let _e863 = _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i;
+            let _e863 = _0_u002e_sroa_u002e_0_u002e_0_u002e_in;
             let _e865 = (_e863 * 36u);
             let _e868 = storage_0_13_[_e865];
             let _e869 = bitcast<f32>(_e868);
@@ -449,33 +449,33 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
                     let _e1403 = uniform_struct_0_3_.f6_.f0_[_e1273].f3_.w;
                     let _e1409 = (_e1403 + (((in0_.x * _e1382) + (in0_.y * _e1389)) + (in0_.z * _e1396)));
                     let _e1426 = textureSampleCompareLevel(tex_0_11_, sampler_0_5_, vec2<f32>(((((_e1301 + (((in0_.x * _e1280) + (in0_.y * _e1287)) + (in0_.z * _e1294))) / _e1409) * 0.5f) + 0.5f), (0.5f - (((_e1335 + (((in0_.x * _e1314) + (in0_.y * _e1321)) + (in0_.z * _e1328))) / _e1409) * 0.5f))), _e1273, (((_e1369 + (((in0_.x * _e1348) + (in0_.y * _e1355)) + (in0_.z * _e1362))) / _e1409) + -0.001f));
-                    vis_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_i = mix(_e1426, _e1252, select(_e1267, 1f, (_e1267 > 1f)));
+                    vis_u002e_sroa_u002e_0_u002e_0_ = mix(_e1426, _e1252, select(_e1267, 1f, (_e1267 > 1f)));
                 } else {
-                    vis_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_i = _e1252;
+                    vis_u002e_sroa_u002e_0_u002e_0_ = _e1252;
                 }
-                let _e1431 = vis_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_i;
-                radiance_u002e_i_u002e_sroa_u002e_0_u002e_0_ = (_e1021 * _e1431);
-                radiance_u002e_i_u002e_sroa_u002e_10_u002e_0_ = (_e1022 * _e1431);
-                radiance_u002e_i_u002e_sroa_u002e_15_u002e_0_ = (_e1023 * _e1431);
+                let _e1431 = vis_u002e_sroa_u002e_0_u002e_0_;
+                radiance_u002e_sroa_u002e_0_u002e_0_ = (_e1021 * _e1431);
+                radiance_u002e_sroa_u002e_10_u002e_0_ = (_e1022 * _e1431);
+                radiance_u002e_sroa_u002e_15_u002e_0_ = (_e1023 * _e1431);
             } else {
-                radiance_u002e_i_u002e_sroa_u002e_0_u002e_0_ = _e1021;
-                radiance_u002e_i_u002e_sroa_u002e_10_u002e_0_ = _e1022;
-                radiance_u002e_i_u002e_sroa_u002e_15_u002e_0_ = _e1023;
+                radiance_u002e_sroa_u002e_0_u002e_0_ = _e1021;
+                radiance_u002e_sroa_u002e_10_u002e_0_ = _e1022;
+                radiance_u002e_sroa_u002e_15_u002e_0_ = _e1023;
             }
-            let _e1442 = radiance_u002e_i_u002e_sroa_u002e_0_u002e_0_;
-            let _e1444 = radiance_u002e_i_u002e_sroa_u002e_10_u002e_0_;
-            let _e1446 = radiance_u002e_i_u002e_sroa_u002e_15_u002e_0_;
+            let _e1442 = radiance_u002e_sroa_u002e_0_u002e_0_;
+            let _e1444 = radiance_u002e_sroa_u002e_10_u002e_0_;
+            let _e1446 = radiance_u002e_sroa_u002e_15_u002e_0_;
             let _e1448 = (_e865 + 19u);
             let _e1451 = storage_0_13_[_e1448];
             if !((bitcast<f32>(_e1451) >= 0f)) {
-                radiance_u002e_i_u002e_sroa_u002e_0_u002e_2_ = _e1442;
-                radiance_u002e_i_u002e_sroa_u002e_10_u002e_2_ = _e1444;
-                radiance_u002e_i_u002e_sroa_u002e_15_u002e_2_ = _e1446;
+                radiance_u002e_sroa_u002e_0_u002e_2_ = _e1442;
+                radiance_u002e_sroa_u002e_10_u002e_2_ = _e1444;
+                radiance_u002e_sroa_u002e_15_u002e_2_ = _e1446;
             } else {
                 if !((_e1026 <= 0.5f)) {
-                    radiance_u002e_i_u002e_sroa_u002e_0_u002e_1_ = _e1442;
-                    radiance_u002e_i_u002e_sroa_u002e_10_u002e_1_ = _e1444;
-                    radiance_u002e_i_u002e_sroa_u002e_15_u002e_1_ = _e1446;
+                    radiance_u002e_sroa_u002e_0_u002e_1_ = _e1442;
+                    radiance_u002e_sroa_u002e_10_u002e_1_ = _e1444;
+                    radiance_u002e_sroa_u002e_15_u002e_1_ = _e1446;
                 } else {
                     let _e1469 = storage_0_13_[(_e865 + 20u)];
                     let _e1475 = storage_0_13_[(_e865 + 24u)];
@@ -496,13 +496,13 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
                     let _e1584 = ((((in0_.x * bitcast<f32>(_e1559)) + (in0_.y * bitcast<f32>(_e1565))) + (in0_.z * bitcast<f32>(_e1571))) + bitcast<f32>(_e1577));
                     let _e1597 = storage_0_13_[_e1448];
                     let _e1606 = textureSampleCompareLevel(tex_0_4_, sampler_0_5_, vec2<f32>((((((((in0_.x * bitcast<f32>(_e1469)) + (in0_.y * bitcast<f32>(_e1475))) + (in0_.z * bitcast<f32>(_e1481))) + bitcast<f32>(_e1487)) / _e1584) * 0.5f) + 0.5f), (0.5f - ((((((in0_.x * bitcast<f32>(_e1499)) + (in0_.y * bitcast<f32>(_e1505))) + (in0_.z * bitcast<f32>(_e1511))) + bitcast<f32>(_e1517)) / _e1584) * 0.5f))), u32(bitcast<f32>(_e1597)), ((((((in0_.x * bitcast<f32>(_e1529)) + (in0_.y * bitcast<f32>(_e1535))) + (in0_.z * bitcast<f32>(_e1541))) + bitcast<f32>(_e1547)) / _e1584) + -0.001f));
-                    radiance_u002e_i_u002e_sroa_u002e_0_u002e_1_ = (_e1442 * _e1606);
-                    radiance_u002e_i_u002e_sroa_u002e_10_u002e_1_ = (_e1444 * _e1606);
-                    radiance_u002e_i_u002e_sroa_u002e_15_u002e_1_ = (_e1446 * _e1606);
+                    radiance_u002e_sroa_u002e_0_u002e_1_ = (_e1442 * _e1606);
+                    radiance_u002e_sroa_u002e_10_u002e_1_ = (_e1444 * _e1606);
+                    radiance_u002e_sroa_u002e_15_u002e_1_ = (_e1446 * _e1606);
                 }
-                let _e1614 = radiance_u002e_i_u002e_sroa_u002e_0_u002e_1_;
-                let _e1616 = radiance_u002e_i_u002e_sroa_u002e_10_u002e_1_;
-                let _e1618 = radiance_u002e_i_u002e_sroa_u002e_15_u002e_1_;
+                let _e1614 = radiance_u002e_sroa_u002e_0_u002e_1_;
+                let _e1616 = radiance_u002e_sroa_u002e_10_u002e_1_;
+                let _e1618 = radiance_u002e_sroa_u002e_15_u002e_1_;
                 if (_e1026 > 0.5f) {
                     let _e1623 = storage_0_13_[_e871];
                     let _e1627 = storage_0_13_[_e877];
@@ -520,18 +520,18 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
                     let _e1652 = (_e1650 + -0.1f);
                     let _e1663 = storage_0_13_[_e1448];
                     let _e1669 = textureSampleCompareLevel(tex_0_6_, sampler_0_5_, vec3<f32>(_e1633, _e1634, _e1635), u32(bitcast<f32>(_e1663)), (((_e1650 / _e1652) - ((_e1650 * 0.1f) / (select(_e1639, _e1640, (_e1640 > _e1639)) * _e1652))) + -0.001f));
-                    radiance_u002e_i_u002e_sroa_u002e_0_u002e_2_ = (_e1614 * _e1669);
-                    radiance_u002e_i_u002e_sroa_u002e_10_u002e_2_ = (_e1616 * _e1669);
-                    radiance_u002e_i_u002e_sroa_u002e_15_u002e_2_ = (_e1618 * _e1669);
+                    radiance_u002e_sroa_u002e_0_u002e_2_ = (_e1614 * _e1669);
+                    radiance_u002e_sroa_u002e_10_u002e_2_ = (_e1616 * _e1669);
+                    radiance_u002e_sroa_u002e_15_u002e_2_ = (_e1618 * _e1669);
                 } else {
-                    radiance_u002e_i_u002e_sroa_u002e_0_u002e_2_ = _e1614;
-                    radiance_u002e_i_u002e_sroa_u002e_10_u002e_2_ = _e1616;
-                    radiance_u002e_i_u002e_sroa_u002e_15_u002e_2_ = _e1618;
+                    radiance_u002e_sroa_u002e_0_u002e_2_ = _e1614;
+                    radiance_u002e_sroa_u002e_10_u002e_2_ = _e1616;
+                    radiance_u002e_sroa_u002e_15_u002e_2_ = _e1618;
                 }
             }
-            let _e1680 = radiance_u002e_i_u002e_sroa_u002e_0_u002e_2_;
-            let _e1682 = radiance_u002e_i_u002e_sroa_u002e_10_u002e_2_;
-            let _e1684 = radiance_u002e_i_u002e_sroa_u002e_15_u002e_2_;
+            let _e1680 = radiance_u002e_sroa_u002e_0_u002e_2_;
+            let _e1682 = radiance_u002e_sroa_u002e_10_u002e_2_;
+            let _e1684 = radiance_u002e_sroa_u002e_15_u002e_2_;
             let _e1687 = storage_0_13_[_e865];
             let _e1691 = storage_0_13_[_e871];
             let _e1695 = storage_0_13_[_e877];
@@ -632,107 +632,107 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
                     let _e2084 = dot(vec3<f32>(_e1746, _e1747, _e1748), vec3<f32>(_e54, _e55, _e56));
                     let _e2087 = dot(vec3<f32>(_e1746, _e1747, _e1748), vec3<f32>(cross(vec3<f32>(_e15, _e16, _e17), vec3<f32>(_e54, _e55, _e56)).x, cross(vec3<f32>(_e15, _e16, _e17), vec3<f32>(_e54, _e55, _e56)).y, cross(vec3<f32>(_e15, _e16, _e17), vec3<f32>(_e54, _e55, _e56)).z));
                     let _e2114 = ((_e784 + ((1f - _e784) * pow(_e1810, 5f))) * ((1f / (_e2068 * (((_e2051 * 3.1415927f) * _e2054) * _e2068))) * (0.5f / max(((_e46 * sqrt(max((_e1940 + ((_e2062 * (_e2084 * _e2084)) + (_e2065 * (_e2087 * _e2087)))), 0.000001f))) + (_e1771 * sqrt(max((_e566 + ((_e2062 * (_e2078 * _e2078)) + (_e2065 * (_e2081 * _e2081)))), 0.000001f)))), 0.000001f))));
-                    coat_u002e_i_u002e_sroa_u002e_0_u002e_0_ = ((_e2114 * _e360) * _e337);
-                    coat_u002e_i_u002e_sroa_u002e_5_u002e_0_ = ((_e2114 * _e366) * _e337);
-                    coat_u002e_i_u002e_sroa_u002e_8_u002e_0_ = ((_e2114 * _e372) * _e337);
+                    coat_u002e_sroa_u002e_0_u002e_0_ = ((_e2114 * _e360) * _e337);
+                    coat_u002e_sroa_u002e_5_u002e_0_ = ((_e2114 * _e366) * _e337);
+                    coat_u002e_sroa_u002e_8_u002e_0_ = ((_e2114 * _e372) * _e337);
                 } else {
-                    coat_u002e_i_u002e_sroa_u002e_0_u002e_0_ = 0f;
-                    coat_u002e_i_u002e_sroa_u002e_5_u002e_0_ = 0f;
-                    coat_u002e_i_u002e_sroa_u002e_8_u002e_0_ = 0f;
+                    coat_u002e_sroa_u002e_0_u002e_0_ = 0f;
+                    coat_u002e_sroa_u002e_5_u002e_0_ = 0f;
+                    coat_u002e_sroa_u002e_8_u002e_0_ = 0f;
                 }
-                let _e2131 = coat_u002e_i_u002e_sroa_u002e_0_u002e_0_;
-                let _e2133 = coat_u002e_i_u002e_sroa_u002e_5_u002e_0_;
-                let _e2135 = coat_u002e_i_u002e_sroa_u002e_8_u002e_0_;
+                let _e2131 = coat_u002e_sroa_u002e_0_u002e_0_;
+                let _e2133 = coat_u002e_sroa_u002e_5_u002e_0_;
+                let _e2135 = coat_u002e_sroa_u002e_8_u002e_0_;
                 if !((_e307 <= 0f)) {
                     let _e2159 = ((_e1781 * ((1f / ((_e798 * (((1f / _e46) + (1f / _e1771)) + -2f)) + 1f)) * (_e798 / (pow((((_e798 + -1f) * _e1914) + 1f), 2f) * 3.1415927f)))) / max(((_e46 * 4f) * _e1771), 0.000001f));
-                    fuzz_u002e_i_u002e_sroa_u002e_0_u002e_0_ = ((_e2159 * bitcast<f32>(_e318)) * _e307);
-                    fuzz_u002e_i_u002e_sroa_u002e_5_u002e_0_ = ((_e2159 * bitcast<f32>(_e324)) * _e307);
-                    fuzz_u002e_i_u002e_sroa_u002e_8_u002e_0_ = ((_e2159 * bitcast<f32>(_e330)) * _e307);
+                    fuzz_u002e_sroa_u002e_0_u002e_0_ = ((_e2159 * bitcast<f32>(_e318)) * _e307);
+                    fuzz_u002e_sroa_u002e_5_u002e_0_ = ((_e2159 * bitcast<f32>(_e324)) * _e307);
+                    fuzz_u002e_sroa_u002e_8_u002e_0_ = ((_e2159 * bitcast<f32>(_e330)) * _e307);
                 } else {
-                    fuzz_u002e_i_u002e_sroa_u002e_0_u002e_0_ = 0f;
-                    fuzz_u002e_i_u002e_sroa_u002e_5_u002e_0_ = 0f;
-                    fuzz_u002e_i_u002e_sroa_u002e_8_u002e_0_ = 0f;
+                    fuzz_u002e_sroa_u002e_0_u002e_0_ = 0f;
+                    fuzz_u002e_sroa_u002e_5_u002e_0_ = 0f;
+                    fuzz_u002e_sroa_u002e_8_u002e_0_ = 0f;
                 }
-                let _e2176 = fuzz_u002e_i_u002e_sroa_u002e_0_u002e_0_;
-                let _e2178 = fuzz_u002e_i_u002e_sroa_u002e_5_u002e_0_;
-                let _e2180 = fuzz_u002e_i_u002e_sroa_u002e_8_u002e_0_;
+                let _e2176 = fuzz_u002e_sroa_u002e_0_u002e_0_;
+                let _e2178 = fuzz_u002e_sroa_u002e_5_u002e_0_;
+                let _e2180 = fuzz_u002e_sroa_u002e_8_u002e_0_;
                 if !((_e193 <= 0f)) {
                     let _e2182 = (_e745 * sqrt(_e752));
                     if !((_e199 <= 0f)) {
-                        extinction_u002e_i_u002e_sroa_u002e_0_u002e_0_ = (-(log(max(_e215, 0.000001f))) / _e199);
-                        extinction_u002e_i_u002e_sroa_u002e_5_u002e_0_ = (-(log(max(_e221, 0.000001f))) / _e199);
-                        extinction_u002e_i_u002e_sroa_u002e_8_u002e_0_ = (-(log(max(_e227, 0.000001f))) / _e199);
+                        extinction_u002e_sroa_u002e_0_u002e_0_ = (-(log(max(_e215, 0.000001f))) / _e199);
+                        extinction_u002e_sroa_u002e_5_u002e_0_ = (-(log(max(_e221, 0.000001f))) / _e199);
+                        extinction_u002e_sroa_u002e_8_u002e_0_ = (-(log(max(_e227, 0.000001f))) / _e199);
                     } else {
-                        extinction_u002e_i_u002e_sroa_u002e_0_u002e_0_ = 0f;
-                        extinction_u002e_i_u002e_sroa_u002e_5_u002e_0_ = 0f;
-                        extinction_u002e_i_u002e_sroa_u002e_8_u002e_0_ = 0f;
+                        extinction_u002e_sroa_u002e_0_u002e_0_ = 0f;
+                        extinction_u002e_sroa_u002e_5_u002e_0_ = 0f;
+                        extinction_u002e_sroa_u002e_8_u002e_0_ = 0f;
                     }
-                    let _e2202 = extinction_u002e_i_u002e_sroa_u002e_0_u002e_0_;
-                    let _e2204 = extinction_u002e_i_u002e_sroa_u002e_5_u002e_0_;
-                    let _e2206 = extinction_u002e_i_u002e_sroa_u002e_8_u002e_0_;
+                    let _e2202 = extinction_u002e_sroa_u002e_0_u002e_0_;
+                    let _e2204 = extinction_u002e_sroa_u002e_5_u002e_0_;
+                    let _e2206 = extinction_u002e_sroa_u002e_8_u002e_0_;
                     let _e2213 = (_e2182 * _e2182);
                     let _e2218 = ((_e1914 * (_e2213 + -1f)) + 1f);
                     let _e2224 = (1f - _e2213);
                     let _e2243 = ((1f - (_e744 + ((1f - _e744) * pow((1f - _e46), 5f)))) * ((_e2213 / (_e2218 * (_e2218 * 3.1415927f))) * (0.5f / max(((_e46 * sqrt(max((_e2213 + (_e1940 * _e2224)), 0.000001f))) + (_e1771 * sqrt(max((_e2213 + (_e566 * _e2224)), 0.000001f)))), 0.000001f))));
-                    transmission_u002e_i_u002e_sroa_u002e_0_u002e_0_ = (((exp((_e199 * -(_e2202))) * _e2243) * _e215) * _e193);
-                    transmission_u002e_i_u002e_sroa_u002e_5_u002e_0_ = (((exp((_e199 * -(_e2204))) * _e2243) * _e221) * _e193);
-                    transmission_u002e_i_u002e_sroa_u002e_8_u002e_0_ = (((exp((_e199 * -(_e2206))) * _e2243) * _e227) * _e193);
+                    transmission_u002e_sroa_u002e_0_u002e_0_ = (((exp((_e199 * -(_e2202))) * _e2243) * _e215) * _e193);
+                    transmission_u002e_sroa_u002e_5_u002e_0_ = (((exp((_e199 * -(_e2204))) * _e2243) * _e221) * _e193);
+                    transmission_u002e_sroa_u002e_8_u002e_0_ = (((exp((_e199 * -(_e2206))) * _e2243) * _e227) * _e193);
                 } else {
-                    transmission_u002e_i_u002e_sroa_u002e_0_u002e_0_ = 0f;
-                    transmission_u002e_i_u002e_sroa_u002e_5_u002e_0_ = 0f;
-                    transmission_u002e_i_u002e_sroa_u002e_8_u002e_0_ = 0f;
+                    transmission_u002e_sroa_u002e_0_u002e_0_ = 0f;
+                    transmission_u002e_sroa_u002e_5_u002e_0_ = 0f;
+                    transmission_u002e_sroa_u002e_8_u002e_0_ = 0f;
                 }
-                let _e2272 = transmission_u002e_i_u002e_sroa_u002e_0_u002e_0_;
-                let _e2274 = transmission_u002e_i_u002e_sroa_u002e_5_u002e_0_;
-                let _e2276 = transmission_u002e_i_u002e_sroa_u002e_8_u002e_0_;
+                let _e2272 = transmission_u002e_sroa_u002e_0_u002e_0_;
+                let _e2274 = transmission_u002e_sroa_u002e_5_u002e_0_;
+                let _e2276 = transmission_u002e_sroa_u002e_8_u002e_0_;
                 if !((_e253 <= 0f)) {
                     let _e2281 = length(vec3<f32>((_e758 - _e1986), (_e759 - _e1987), (_e760 - _e1988)));
                     let _e2283 = sqrt(3f);
                     let _e2306 = -(_e2281);
                     let _e2314 = (max(((clamp(((_e46 * _e1771) + (((_e570 + max((1f - _e1940), 0f)) - (_e2281 * _e2281)) * 0.5f)), -1f, 1f) * bitcast<f32>(_e270)) + 1f), 0f) * 0.31830987f);
-                    subsurface_u002e_i_u002e_sroa_u002e_0_u002e_0_ = (((exp((((1f / max((_e259 * bitcast<f32>(_e264)), 0.000001f)) * _e2283) * _e2306)) * _e2314) * _e277) * _e253);
-                    subsurface_u002e_i_u002e_sroa_u002e_5_u002e_0_ = (((exp((((1f / max((_e259 * bitcast<f32>(_e294)), 0.000001f)) * _e2283) * _e2306)) * _e2314) * _e283) * _e253);
-                    subsurface_u002e_i_u002e_sroa_u002e_8_u002e_0_ = (((exp((((1f / max((_e259 * bitcast<f32>(_e300)), 0.000001f)) * _e2283) * _e2306)) * _e2314) * _e289) * _e253);
+                    subsurface_u002e_sroa_u002e_0_u002e_0_ = (((exp((((1f / max((_e259 * bitcast<f32>(_e264)), 0.000001f)) * _e2283) * _e2306)) * _e2314) * _e277) * _e253);
+                    subsurface_u002e_sroa_u002e_5_u002e_0_ = (((exp((((1f / max((_e259 * bitcast<f32>(_e294)), 0.000001f)) * _e2283) * _e2306)) * _e2314) * _e283) * _e253);
+                    subsurface_u002e_sroa_u002e_8_u002e_0_ = (((exp((((1f / max((_e259 * bitcast<f32>(_e300)), 0.000001f)) * _e2283) * _e2306)) * _e2314) * _e289) * _e253);
                 } else {
-                    subsurface_u002e_i_u002e_sroa_u002e_0_u002e_0_ = 0f;
-                    subsurface_u002e_i_u002e_sroa_u002e_5_u002e_0_ = 0f;
-                    subsurface_u002e_i_u002e_sroa_u002e_8_u002e_0_ = 0f;
+                    subsurface_u002e_sroa_u002e_0_u002e_0_ = 0f;
+                    subsurface_u002e_sroa_u002e_5_u002e_0_ = 0f;
+                    subsurface_u002e_sroa_u002e_8_u002e_0_ = 0f;
                 }
-                let _e2334 = subsurface_u002e_i_u002e_sroa_u002e_0_u002e_0_;
-                let _e2336 = subsurface_u002e_i_u002e_sroa_u002e_5_u002e_0_;
-                let _e2338 = subsurface_u002e_i_u002e_sroa_u002e_8_u002e_0_;
-                lo_u002e_i_u002e_sroa_u002e_0_u002e_1_ = (_e854 + (_e1680 * (_e1771 * ((((_e721 * ((_e623 * ((((max(((_e1843 + (_e1850 * _e1874)) - ((_e1852 - (_e1852 * _e175)) * _e1872)), 0f) * _e110) * _e1922) * _e1960) * _e74)) + (_e623 * (((_e763 * _e92) * _e2030) * _e74)))) + _e2131) + (_e2176 + _e2272)) + _e2334))));
-                lo_u002e_i_u002e_sroa_u002e_6_u002e_1_ = (_e852 + (_e1682 * (_e1771 * ((((_e723 * ((_e628 * ((((max(((_e1844 + (_e1854 * _e1874)) - ((_e1856 - (_e1856 * _e181)) * _e1872)), 0f) * _e110) * _e1922) * _e1960) * _e74)) + (_e628 * (((_e763 * _e98) * _e2030) * _e74)))) + _e2133) + (_e2178 + _e2274)) + _e2336))));
-                lo_u002e_i_u002e_sroa_u002e_9_u002e_1_ = (_e850 + (_e1684 * (_e1771 * ((((_e725 * ((_e633 * ((((max(((_e1845 + (_e1858 * _e1874)) - ((_e1860 - (_e1860 * _e187)) * _e1872)), 0f) * _e110) * _e1922) * _e1960) * _e74)) + (_e633 * (((_e763 * _e104) * _e2030) * _e74)))) + _e2135) + (_e2180 + _e2276)) + _e2338))));
+                let _e2334 = subsurface_u002e_sroa_u002e_0_u002e_0_;
+                let _e2336 = subsurface_u002e_sroa_u002e_5_u002e_0_;
+                let _e2338 = subsurface_u002e_sroa_u002e_8_u002e_0_;
+                lo_u002e_sroa_u002e_0_u002e_1_ = (_e854 + (_e1680 * (_e1771 * ((((_e721 * ((_e623 * ((((max(((_e1843 + (_e1850 * _e1874)) - ((_e1852 - (_e1852 * _e175)) * _e1872)), 0f) * _e110) * _e1922) * _e1960) * _e74)) + (_e623 * (((_e763 * _e92) * _e2030) * _e74)))) + _e2131) + (_e2176 + _e2272)) + _e2334))));
+                lo_u002e_sroa_u002e_6_u002e_1_ = (_e852 + (_e1682 * (_e1771 * ((((_e723 * ((_e628 * ((((max(((_e1844 + (_e1854 * _e1874)) - ((_e1856 - (_e1856 * _e181)) * _e1872)), 0f) * _e110) * _e1922) * _e1960) * _e74)) + (_e628 * (((_e763 * _e98) * _e2030) * _e74)))) + _e2133) + (_e2178 + _e2274)) + _e2336))));
+                lo_u002e_sroa_u002e_9_u002e_1_ = (_e850 + (_e1684 * (_e1771 * ((((_e725 * ((_e633 * ((((max(((_e1845 + (_e1858 * _e1874)) - ((_e1860 - (_e1860 * _e187)) * _e1872)), 0f) * _e110) * _e1922) * _e1960) * _e74)) + (_e633 * (((_e763 * _e104) * _e2030) * _e74)))) + _e2135) + (_e2180 + _e2276)) + _e2338))));
             } else {
-                lo_u002e_i_u002e_sroa_u002e_0_u002e_1_ = _e854;
-                lo_u002e_i_u002e_sroa_u002e_6_u002e_1_ = _e852;
-                lo_u002e_i_u002e_sroa_u002e_9_u002e_1_ = _e850;
+                lo_u002e_sroa_u002e_0_u002e_1_ = _e854;
+                lo_u002e_sroa_u002e_6_u002e_1_ = _e852;
+                lo_u002e_sroa_u002e_9_u002e_1_ = _e850;
             }
-            let _e2367 = lo_u002e_i_u002e_sroa_u002e_0_u002e_1_;
-            out_u002e_lo_u002e_i_u002e_sroa_u002e_0_u002e_1_ = _e2367;
-            let _e2370 = lo_u002e_i_u002e_sroa_u002e_6_u002e_1_;
-            out_u002e_lo_u002e_i_u002e_sroa_u002e_6_u002e_1_ = _e2370;
-            let _e2373 = lo_u002e_i_u002e_sroa_u002e_9_u002e_1_;
-            out_u002e_lo_u002e_i_u002e_sroa_u002e_9_u002e_1_ = _e2373;
+            let _e2367 = lo_u002e_sroa_u002e_0_u002e_1_;
+            out_u002e_lo_u002e_sroa_u002e_0_u002e_1_ = _e2367;
+            let _e2370 = lo_u002e_sroa_u002e_6_u002e_1_;
+            out_u002e_lo_u002e_sroa_u002e_6_u002e_1_ = _e2370;
+            let _e2373 = lo_u002e_sroa_u002e_9_u002e_1_;
+            out_u002e_lo_u002e_sroa_u002e_9_u002e_1_ = _e2373;
             let _e2376 = (_e848 + 1u);
             if (_e2376 == _e726) {
-                lo_u002e_i_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = _e2367;
-                lo_u002e_i_u002e_sroa_u002e_6_u002e_0_u002e_lcssa = _e2370;
-                lo_u002e_i_u002e_sroa_u002e_9_u002e_0_u002e_lcssa = _e2373;
+                lo_u002e_sroa_u002e_0_u002e_0_u002e_lcssa = _e2367;
+                lo_u002e_sroa_u002e_6_u002e_0_u002e_lcssa = _e2370;
+                lo_u002e_sroa_u002e_9_u002e_0_u002e_lcssa = _e2373;
                 break;
             } else {
                 k_u002e_sroa_u002e_0_u002e_0_ = _e2376;
-                lo_u002e_i_u002e_sroa_u002e_9_ = _e2373;
-                lo_u002e_i_u002e_sroa_u002e_6_ = _e2370;
-                lo_u002e_i_u002e_sroa_u002e_0_ = _e2367;
+                lo_u002e_sroa_u002e_9_ = _e2373;
+                lo_u002e_sroa_u002e_6_ = _e2370;
+                lo_u002e_sroa_u002e_0_ = _e2367;
                 continue;
             }
         }
     }
-    let _e2392 = lo_u002e_i_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
-    let _e2394 = lo_u002e_i_u002e_sroa_u002e_6_u002e_0_u002e_lcssa;
-    let _e2396 = lo_u002e_i_u002e_sroa_u002e_9_u002e_0_u002e_lcssa;
+    let _e2392 = lo_u002e_sroa_u002e_0_u002e_0_u002e_lcssa;
+    let _e2394 = lo_u002e_sroa_u002e_6_u002e_0_u002e_lcssa;
+    let _e2396 = lo_u002e_sroa_u002e_9_u002e_0_u002e_lcssa;
     let _e2406 = uniform_struct_0_3_.f0_.x;
     let _e2410 = uniform_struct_0_3_.f0_.y;
     let _e2414 = uniform_struct_0_3_.f0_.z;
@@ -741,17 +741,17 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
         let _e2422 = (_e402 * bitcast<f32>(_e413));
         let _e2423 = (_e402 * bitcast<f32>(_e419));
         let _e2433 = ((1f - _e337) + ((1f - pow((1f - _e46), 5f)) * _e337));
-        emission_u002e_i_u002e_sroa_u002e_0_u002e_1_ = (_e2421 + ((((_e2421 * _e360) * _e2433) - _e2421) * _e337));
-        emission_u002e_i_u002e_sroa_u002e_7_u002e_1_ = (_e2422 + ((((_e2422 * _e366) * _e2433) - _e2422) * _e337));
-        emission_u002e_i_u002e_sroa_u002e_10_u002e_1_ = (_e2423 + ((((_e2423 * _e372) * _e2433) - _e2423) * _e337));
+        emission_u002e_sroa_u002e_0_u002e_1_ = (_e2421 + ((((_e2421 * _e360) * _e2433) - _e2421) * _e337));
+        emission_u002e_sroa_u002e_7_u002e_1_ = (_e2422 + ((((_e2422 * _e366) * _e2433) - _e2422) * _e337));
+        emission_u002e_sroa_u002e_10_u002e_1_ = (_e2423 + ((((_e2423 * _e372) * _e2433) - _e2423) * _e337));
     } else {
-        emission_u002e_i_u002e_sroa_u002e_0_u002e_1_ = 0f;
-        emission_u002e_i_u002e_sroa_u002e_7_u002e_1_ = 0f;
-        emission_u002e_i_u002e_sroa_u002e_10_u002e_1_ = 0f;
+        emission_u002e_sroa_u002e_0_u002e_1_ = 0f;
+        emission_u002e_sroa_u002e_7_u002e_1_ = 0f;
+        emission_u002e_sroa_u002e_10_u002e_1_ = 0f;
     }
-    let _e2459 = emission_u002e_i_u002e_sroa_u002e_0_u002e_1_;
-    let _e2461 = emission_u002e_i_u002e_sroa_u002e_7_u002e_1_;
-    let _e2463 = emission_u002e_i_u002e_sroa_u002e_10_u002e_1_;
+    let _e2459 = emission_u002e_sroa_u002e_0_u002e_1_;
+    let _e2461 = emission_u002e_sroa_u002e_7_u002e_1_;
+    let _e2463 = emission_u002e_sroa_u002e_10_u002e_1_;
     let _e2468 = ((_e163 + -1f) / (_e163 + 1f));
     let _e2469 = (_e2468 * _e2468);
     let _e2477 = (dot(vec3<f32>(_e15, _e16, _e17), vec3<f32>(_e37, _e38, _e39)) * 2f);
@@ -777,37 +777,37 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
     let _e2575 = select(_e2463, (((_e2396 + (mix(_e104, (_e104 * _e110), _e86) * _e2414)) + _e2463) + (_e2535 * ((_e2501.z * ((mix(_e2469, _e643, _e86) * _e2521.x) + _e2526.y)) + (((_e2529 * _e104) * _e2516.z) * _e2548)))), _e2572);
     if ((_e2573 <= _e2573) && (0f <= 0f)) {
         if (abs(_e2573) < 100000000000000000000f) {
-            _2_u002e_sroa_u002e_0_u002e_0_u002e_i = _e2573;
+            _2_u002e_sroa_u002e_0_u002e_0_ = _e2573;
         } else {
-            _2_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+            _2_u002e_sroa_u002e_0_u002e_0_ = 0f;
         }
     } else {
-        _2_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+        _2_u002e_sroa_u002e_0_u002e_0_ = 0f;
     }
-    let _e2589 = _2_u002e_sroa_u002e_0_u002e_0_u002e_i;
+    let _e2589 = _2_u002e_sroa_u002e_0_u002e_0_;
     if ((_e2574 <= _e2574) && (0f <= 0f)) {
         if (abs(_e2574) < 100000000000000000000f) {
-            _3_u002e_sroa_u002e_0_u002e_0_u002e_i = _e2574;
+            _3_u002e_sroa_u002e_0_u002e_0_ = _e2574;
         } else {
-            _3_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+            _3_u002e_sroa_u002e_0_u002e_0_ = 0f;
         }
     } else {
-        _3_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+        _3_u002e_sroa_u002e_0_u002e_0_ = 0f;
     }
-    let _e2603 = _3_u002e_sroa_u002e_0_u002e_0_u002e_i;
+    let _e2603 = _3_u002e_sroa_u002e_0_u002e_0_;
     if ((_e2575 <= _e2575) && (0f <= 0f)) {
         if (abs(_e2575) < 100000000000000000000f) {
-            _4_u002e_sroa_u002e_0_u002e_0_u002e_i = _e2575;
-            let _e2613 = _4_u002e_sroa_u002e_0_u002e_0_u002e_i;
+            _4_u002e_sroa_u002e_0_u002e_0_ = _e2575;
+            let _e2613 = _4_u002e_sroa_u002e_0_u002e_0_;
             fragment_out = vec4<f32>(_e2589, _e2603, _e2613, bitcast<f32>(_e425));
             let _e2618 = fragment_out;
             return _e2618;
         }
-        _4_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+        _4_u002e_sroa_u002e_0_u002e_0_ = 0f;
     } else {
-        _4_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+        _4_u002e_sroa_u002e_0_u002e_0_ = 0f;
     }
-    let _e2624 = _4_u002e_sroa_u002e_0_u002e_0_u002e_i;
+    let _e2624 = _4_u002e_sroa_u002e_0_u002e_0_;
     fragment_out = vec4<f32>(_e2589, _e2603, _e2624, bitcast<f32>(_e425));
     let _e2629 = fragment_out;
     return _e2629;

@@ -29,7 +29,7 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     var sum_u002e_sroa_u002e_0_u002e_0_: f32;
     var sum_weight_u002e_sroa_u002e_0_u002e_0_: f32;
     var index_u002e_sroa_u002e_0_u002e_0_1: u32;
-    var out_u002e_spec_u002e_select_u002e_i: u32;
+    var out_u002e_spec_u002e_select: u32;
     var out_u002e_4_: f32;
     var out_u002e_3_: f32;
 
@@ -45,7 +45,7 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         workgroup_scratch[_e20] = _e23;
         storage_0_0_[_e20] = 0u;
         let _e29 = (_e23 + _e18);
-        out_u002e_spec_u002e_select_u002e_i = _e29;
+        out_u002e_spec_u002e_select = _e29;
         let _e32 = (_e20 + 1u);
         if (_e32 == 256u) {
             break;
@@ -55,7 +55,7 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
             continue;
         }
     }
-    let _e38 = out_u002e_spec_u002e_select_u002e_i;
+    let _e38 = out_u002e_spec_u002e_select;
     if (_e38 == 0u) {
         return;
     }
