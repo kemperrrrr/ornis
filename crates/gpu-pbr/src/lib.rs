@@ -30,6 +30,51 @@ mod lights;
 mod material;
 mod shadows;
 
+pub use crate::clusters::cluster_index;
+pub use crate::layout::BRDF_LUT_BINDING;
+pub use crate::layout::CAMERA_BINDING;
+pub use crate::layout::CAMERA_INV_VIEW_PROJ;
+pub use crate::layout::CAMERA_POS;
+pub use crate::layout::CLUSTER_INDICES_BINDING;
+pub use crate::layout::CLUSTER_SPAN_WORDS;
+pub use crate::layout::CLUSTERED_FIELD;
+pub use crate::layout::CLUSTERED_LIGHTS_BINDING;
+pub use crate::layout::CSM_TEX_BINDING;
+pub use crate::layout::Camera;
+pub use crate::layout::ClusterParams;
+pub use crate::layout::DEBUG_VIEW_FIELD;
+pub use crate::layout::GROUP;
+pub use crate::layout::IBL_MAX_MIP_FIELD;
+pub use crate::layout::IBL_SAMPLER_BINDING;
+pub use crate::layout::IBL_WEIGHT_FIELD;
+pub use crate::layout::IRRADIANCE_BINDING;
+pub use crate::layout::LIGHT_COUNT_FIELD;
+pub use crate::layout::LIGHT_DIRECTION_WORD;
+pub use crate::layout::LIGHT_KIND_WORD;
+pub use crate::layout::LIGHT_PARAMS_WORD;
+pub use crate::layout::LIGHT_POSITION_WORD;
+pub use crate::layout::LIGHT_RANGE_WORD;
+pub use crate::layout::LIGHT_SHADOW_LAYER_WORD;
+pub use crate::layout::LIGHTING_BINDING;
+pub use crate::layout::Lighting;
+pub use crate::layout::MATERIALS_BINDING;
+pub use crate::layout::PREFILTER_BINDING;
+pub use crate::layout::SHADOW_CUBE_BINDING;
+pub use crate::layout::SHADOW_SAMPLER_BINDING;
+pub use crate::layout::SHADOW_TEX_BINDING;
+pub use crate::lights::CSM_ACTIVE_EDGE;
+pub use crate::lights::Frame;
+pub use crate::lights::LIGHT_SELECTOR_SPLIT;
+pub use crate::lights::LightRef;
+pub use crate::lights::POINT_OR_SPOT_KIND_EDGE;
+pub use crate::lights::SPOT_KIND_EDGE;
+pub use crate::lights::light_base;
+pub use crate::lights::shaded_radiance;
+pub use crate::material::Material;
+pub use crate::shadows::csm_visibility;
+pub use crate::shadows::point_shadow;
+pub use crate::shadows::spot_shadow;
+
 use ornis_gpu_openpbr::layers::evaluate_coat_darkening;
 use ornis_gpu_openpbr::layers::evaluate_emission;
 use ornis_gpu_openpbr::layers::normalize3;
@@ -65,37 +110,13 @@ use ornis_gpu_shader::mix;
 
 use crate::direct::direct;
 use crate::layout::AMBIENT_FIELD;
-use crate::layout::BRDF_LUT_BINDING;
-use crate::layout::CAMERA_BINDING;
-use crate::layout::CAMERA_POS;
-use crate::layout::CLUSTER_INDICES_BINDING;
-use crate::layout::CLUSTER_SPAN_WORDS;
-use crate::layout::CLUSTERED_FIELD;
-use crate::layout::CLUSTERED_LIGHTS_BINDING;
-use crate::layout::CSM_TEX_BINDING;
-use crate::layout::Camera;
-use crate::layout::ClusterParams;
-use crate::layout::GROUP;
-use crate::layout::IBL_MAX_MIP_FIELD;
-use crate::layout::IBL_SAMPLER_BINDING;
-use crate::layout::IBL_WEIGHT_FIELD;
-use crate::layout::IRRADIANCE_BINDING;
-use crate::layout::LIGHT_COUNT_FIELD;
-use crate::layout::LIGHTING_BINDING;
-use crate::layout::Lighting;
 use crate::layout::MATERIAL_SAMPLER_BINDING;
-use crate::layout::PREFILTER_BINDING;
-use crate::layout::SHADOW_CUBE_BINDING;
-use crate::layout::SHADOW_SAMPLER_BINDING;
-use crate::layout::SHADOW_TEX_BINDING;
 use crate::layout::X_LANE;
 use crate::layout::X_LANE_U;
 use crate::layout::Y_LANE;
 use crate::layout::Y_LANE_U;
 use crate::layout::Z_LANE;
 use crate::layout::Z_LANE_U;
-use crate::lights::Frame;
-use crate::material::Material;
 
 /// Fragment input location of the world position.
 const WORLD_POS_LOC: u32 = 0;
@@ -414,16 +435,8 @@ fn shade(
         mat.coat_color,
         nov,
     );
-    let f0_dielectric = fresnel0_from_ior(mat.specular_ior);
-    let f0 = mix3(
-        splat3(f0_dielectric),
-        scale3(mat.base_color, mat.base_weight),
-        mat.metalness,
-    );
-    let reflect_dir = sub3(
-        scale3(n, REFLECT_SCALE * dot3(n.x, n.y, n.z, v.x, v.y, v.z)),
-        v,
-    );
+    let f0 = specular_f0(&mat);
+    let reflect_dir = reflect_dir(n, v);
     let ibl_max_mip = lighting.field_f32::<IBL_MAX_MIP_FIELD>();
     let prefiltered = v3(
         prefilter_cube.sample_level_lane::<GROUP, IBL_SAMPLER_BINDING, X_LANE>(
@@ -473,6 +486,31 @@ fn shade(
         full
     });
     fragment_store(color.x, color.y, color.z, mat.opacity);
+}
+
+/// Specular `F0` of the base layer: the dielectric term, lerped to the metal
+/// value by the metalness.
+///
+/// Both lit passes build it the same way before the image-based term, and the
+/// two copies had drifted into a duplicate fragment.
+#[inline(always)]
+#[must_use]
+pub fn specular_f0(mat: &Material) -> Vec3 {
+    mix3(
+        splat3(fresnel0_from_ior(mat.specular_ior)),
+        scale3(mat.base_color, mat.base_weight),
+        mat.metalness,
+    )
+}
+
+/// Mirror reflection direction of `v` about `n`.
+#[inline(always)]
+#[must_use]
+pub fn reflect_dir(n: Vec3, v: Vec3) -> Vec3 {
+    sub3(
+        scale3(n, REFLECT_SCALE * dot3(n.x, n.y, n.z, v.x, v.y, v.z)),
+        v,
+    )
 }
 
 /// `cross(n, t)`: the bitangent of the surface frame.

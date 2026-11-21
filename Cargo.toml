@@ -17,6 +17,7 @@ members = [
     "crates/gpu-fog",
     "crates/gpu-outline",
     "crates/gpu-pbr",
+    "crates/gpu-lighting",
     "crates/gpu-quad",
     "crates/gpu-bloom",
     "crates/gpu-aa-edge",

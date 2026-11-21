@@ -91,6 +91,7 @@ var tex_0_9_: texture_2d<f32>;
 @fragment 
 fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>, @location(1) in1_: vec3<f32>, @location(3) in3_: vec3<f32>, @location(4) @interpolate(flat) in4_: u32) -> @location(0) vec4<f32> {
     var fragment_out: vec4<f32>;
+    var _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i: u32;
     var radiance_u002e_i_u002e_sroa_u002e_0_u002e_2_: f32;
     var radiance_u002e_i_u002e_sroa_u002e_10_u002e_2_: f32;
     var radiance_u002e_i_u002e_sroa_u002e_15_u002e_2_: f32;
@@ -98,7 +99,6 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
     var lo_u002e_i_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
     var lo_u002e_i_u002e_sroa_u002e_6_u002e_0_u002e_lcssa: f32;
     var lo_u002e_i_u002e_sroa_u002e_9_u002e_0_u002e_lcssa: f32;
-    var _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i: u32;
     var extinction_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
     var extinction_u002e_i_u002e_sroa_u002e_5_u002e_0_: f32;
     var extinction_u002e_i_u002e_sroa_u002e_8_u002e_0_: f32;
@@ -341,12 +341,12 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
             let _e852 = lo_u002e_i_u002e_sroa_u002e_6_;
             let _e854 = lo_u002e_i_u002e_sroa_u002e_0_;
             if (_e848 < _e553) {
-                _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i = _e848;
+                _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i = _e848;
             } else {
                 let _e860 = storage_0_14_[(((_e556 * _e550) - _e553) + _e848)];
-                _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i = _e860;
+                _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i = _e860;
             }
-            let _e863 = _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i;
+            let _e863 = _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i;
             let _e865 = (_e863 * 36u);
             let _e868 = storage_0_13_[_e865];
             let _e869 = bitcast<f32>(_e868);

@@ -99,6 +99,7 @@ var tex_0_9_: texture_2d<f32>;
 @fragment 
 fn fs_main_textured(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>, @location(1) in1_: vec3<f32>, @location(2) in2_: vec2<f32>, @location(3) in3_: vec3<f32>, @location(4) @interpolate(flat) in4_: u32) -> @location(0) vec4<f32> {
     var fragment_out: vec4<f32>;
+    var _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i: u32;
     var radiance_u002e_i_u002e_sroa_u002e_0_u002e_2_: f32;
     var radiance_u002e_i_u002e_sroa_u002e_10_u002e_2_: f32;
     var radiance_u002e_i_u002e_sroa_u002e_15_u002e_2_: f32;
@@ -106,7 +107,6 @@ fn fs_main_textured(@builtin(position) position: vec4<f32>, @location(0) in0_: v
     var lo_u002e_i_u002e_sroa_u002e_0_u002e_0_u002e_lcssa: f32;
     var lo_u002e_i_u002e_sroa_u002e_6_u002e_0_u002e_lcssa: f32;
     var lo_u002e_i_u002e_sroa_u002e_9_u002e_0_u002e_lcssa: f32;
-    var _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i: u32;
     var extinction_u002e_i_u002e_sroa_u002e_0_u002e_0_: f32;
     var extinction_u002e_i_u002e_sroa_u002e_5_u002e_0_: f32;
     var extinction_u002e_i_u002e_sroa_u002e_8_u002e_0_: f32;
@@ -370,12 +370,12 @@ fn fs_main_textured(@builtin(position) position: vec4<f32>, @location(0) in0_: v
             let _e942 = lo_u002e_i_u002e_sroa_u002e_6_;
             let _e944 = lo_u002e_i_u002e_sroa_u002e_0_;
             if (_e938 < _e643) {
-                _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i = _e938;
+                _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i = _e938;
             } else {
                 let _e950 = storage_0_14_[(((_e646 * _e640) - _e643) + _e938)];
-                _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i = _e950;
+                _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i = _e950;
             }
-            let _e953 = _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i;
+            let _e953 = _0_u002e_sroa_u002e_0_u002e_0_u002e_in_u002e_i_u002e_i;
             let _e955 = (_e953 * 36u);
             let _e958 = storage_0_13_[_e955];
             let _e959 = bitcast<f32>(_e958);

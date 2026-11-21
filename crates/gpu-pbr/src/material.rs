@@ -67,88 +67,88 @@ fn mat_rgb(
 /// are gathered before the loop rather than at the point of use.
 pub struct Material {
     /// Weight of the base layer.
-    pub(crate) base_weight: f32,
+    pub base_weight: f32,
     /// Base colour.
-    pub(crate) base_color: Vec3,
+    pub base_color: Vec3,
     /// Metalness.
-    pub(crate) metalness: f32,
+    pub metalness: f32,
     /// Diffuse roughness before the specular floor.
-    pub(crate) diffuse_roughness: f32,
+    pub diffuse_roughness: f32,
     /// Weight of the specular lobe.
-    pub(crate) specular_weight: f32,
+    pub specular_weight: f32,
     /// Roughness after the geometric specular antialiasing.
-    pub(crate) specular_roughness: f32,
+    pub specular_roughness: f32,
     /// `specular_roughness` before the screen-space filter: a roughness map
     /// scales the *authored* value and the filter runs on the product.
-    pub(crate) specular_roughness_raw: f32,
+    pub specular_roughness_raw: f32,
     /// Index of refraction of the specular lobe.
-    pub(crate) specular_ior: f32,
+    pub specular_ior: f32,
     /// Anisotropy of the specular lobe.
-    pub(crate) specular_anisotropy: f32,
+    pub specular_anisotropy: f32,
     /// Edge tint of the specular lobe.
-    pub(crate) specular_edge_tint: Vec3,
+    pub specular_edge_tint: Vec3,
     /// Weight of the transmission lobe.
-    pub(crate) transmission_weight: f32,
+    pub transmission_weight: f32,
     /// Depth the transmission colour is integrated over.
-    pub(crate) transmission_depth: f32,
+    pub transmission_depth: f32,
     /// Dispersion scale of the transmission lobe.
-    pub(crate) transmission_dispersion_scale: f32,
+    pub transmission_dispersion_scale: f32,
     /// Abbe number of the dispersion.
-    pub(crate) transmission_dispersion_abbe: f32,
+    pub transmission_dispersion_abbe: f32,
     /// Transmission tint.
-    pub(crate) transmission_color: Vec3,
+    pub transmission_color: Vec3,
     /// Scattering tint inside the medium.
-    pub(crate) transmission_scatter: Vec3,
+    pub transmission_scatter: Vec3,
     /// Anisotropy of that scattering.
-    pub(crate) transmission_scatter_anisotropy: f32,
+    pub transmission_scatter_anisotropy: f32,
     /// Weight of the subsurface lobe.
-    pub(crate) subsurface_weight: f32,
+    pub subsurface_weight: f32,
     /// Base scattering radius.
-    pub(crate) subsurface_radius: f32,
+    pub subsurface_radius: f32,
     /// Red scale of the radius.
-    pub(crate) subsurface_radius_scale_r: f32,
+    pub subsurface_radius_scale_r: f32,
     /// Green scale of the radius.
-    pub(crate) subsurface_radius_scale_g: f32,
+    pub subsurface_radius_scale_g: f32,
     /// Blue scale of the radius.
-    pub(crate) subsurface_radius_scale_b: f32,
+    pub subsurface_radius_scale_b: f32,
     /// Anisotropy of the subsurface phase.
-    pub(crate) subsurface_scatter_anisotropy: f32,
+    pub subsurface_scatter_anisotropy: f32,
     /// Subsurface colour.
-    pub(crate) subsurface_color: Vec3,
+    pub subsurface_color: Vec3,
     /// Weight of the fuzz lobe.
-    pub(crate) fuzz_weight: f32,
+    pub fuzz_weight: f32,
     /// Roughness of the fuzz lobe.
-    pub(crate) fuzz_roughness: f32,
+    pub fuzz_roughness: f32,
     /// Fuzz colour.
-    pub(crate) fuzz_color: Vec3,
+    pub fuzz_color: Vec3,
     /// Weight of the coat layer.
-    pub(crate) coat_weight: f32,
+    pub coat_weight: f32,
     /// Roughness of the coat layer.
-    pub(crate) coat_roughness: f32,
+    pub coat_roughness: f32,
     /// Anisotropy of the coat layer.
-    pub(crate) coat_anisotropy: f32,
+    pub coat_anisotropy: f32,
     /// How far the coat darkens what is under it.
-    pub(crate) coat_darkening: f32,
+    pub coat_darkening: f32,
     /// Coat tint.
-    pub(crate) coat_color: Vec3,
+    pub coat_color: Vec3,
     /// Index of refraction of the coat.
-    pub(crate) coat_ior: f32,
+    pub coat_ior: f32,
     /// Weight of the thin-film modulation.
-    pub(crate) thin_film_weight: f32,
+    pub thin_film_weight: f32,
     /// Thin-film thickness in nanometers.
-    pub(crate) thin_film_thickness_um: f32,
+    pub thin_film_thickness_um: f32,
     /// Index of refraction of the thin film.
-    pub(crate) thin_film_ior: f32,
+    pub thin_film_ior: f32,
     /// Emissive luminance.
-    pub(crate) emission_luminance: f32,
+    pub emission_luminance: f32,
     /// Emissive colour.
-    pub(crate) emission_color: Vec3,
+    pub emission_color: Vec3,
     /// Opacity, written straight to alpha.
-    pub(crate) opacity: f32,
+    pub opacity: f32,
     /// `geometry_params.y`: `1` for a wall thinner than the ray path.
-    pub(crate) thin_walled: f32,
+    pub thin_walled: f32,
     /// `geometry_params.z`: at or above `UNLIT_THRESHOLD` the surface is unlit.
-    pub(crate) unlit: f32,
+    pub unlit: f32,
 }
 
 impl Material {
@@ -161,7 +161,7 @@ impl Material {
     /// The thin-film thickness arrives in micrometers and the modulation wants
     /// nanometers, so the scale is applied here rather than in the layer.
     #[inline(always)]
-    pub(crate) fn load(
+    pub fn load(
         materials: &Storage<u32, GROUP, MATERIALS_BINDING, ReadOnly>,
         material_index: u32,
         n: Vec3,

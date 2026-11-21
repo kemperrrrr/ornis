@@ -182,6 +182,7 @@ pub fn spot_shadow<const STB: u32, const SSB: u32, const LIGHTS_B: u32>(
 }
 
 /// Lane `LANE` of `shadow_vp · (x, y, z, 1)` of the current light.
+#[inline(always)]
 pub fn shadow_lane<const LANE: usize, const LIGHTS_B: u32>(
     light: &LightRef,
     lights: &Storage<u32, GROUP, LIGHTS_B, ReadOnly>,

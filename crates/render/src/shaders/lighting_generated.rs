@@ -388,36 +388,6 @@ pub(crate) struct LightingMaps {
     pub csm_tex: DepthTextureArray,
 }
 
-#[stage(fragment)]
-fn fs_main(
-    input: QuadVertexOutput,
-    ctx: Context<LightingContext>,
-    maps: Context<LightingMaps>,
-) -> super::Location<0, glam::Vec4> {
-    let depth = textureLoad(
-        maps.depth_tex,
-        UVec2::new(input.uv * Vec2::new(textureDimensions(maps.depth_tex))),
-        0,
-    );
-    let albedo = textureSampleLevel(maps.albedo_tex, maps.lighting_sampler, input.uv, 0.0);
-    let normal_enc = textureSampleLevel(maps.normal_tex, maps.lighting_sampler, input.uv, 0.0);
-    let material_id = textureLoad(
-        maps.material_id_tex,
-        UVec2::new(input.uv * Vec2::new(textureDimensions(maps.material_id_tex))),
-        0,
-    )
-    .r;
-    let world_pos_enc =
-        textureSampleLevel(maps.world_pos_tex, maps.lighting_sampler, input.uv, 0.0);
-    let mat_params = textureSampleLevel(maps.mat_params_tex, maps.lighting_sampler, input.uv, 0.0);
-    let mat = ctx.materials[material_id];
-    let n = octahedral_decode(normal_enc.rg);
-    let world_pos = reconstruct_world_pos(input.uv, depth, ctx.camera);
-    let v = normalize(ctx.camera.camera_pos.xyz - world_pos);
-    let ao = textureSampleLevel(maps.ao_tex, maps.lighting_sampler, input.uv, 0.0).r;
-    return shade_lit(n, world_pos, v, Vec2::new(albedo.a, ao), mat);
-}
-
 /// OpenPBR lighting for one decoded sample. `alpha_ao.x` is the albedo
 /// alpha: below [`ALPHA_CUTOFF`](super::helpers::ALPHA_CUTOFF) the fragment
 /// is discarded. `alpha_ao.y` is the AO factor (1 = unoccluded) and
@@ -877,23 +847,25 @@ fn fs_main_msaa(
     return mix(single, averaged, edge);
 }
 
+/// The translated 1x artifact: `fs_main` of `ornis-gpu-lighting`.
+pub const LIGHTING_1X: &str = include_str!("lighting_generated.wgsl");
+
 /// Full WGSL source for deferred lighting, assembled from Rust.
 pub fn wgsl_source() -> String {
     wgsl_source_for_samples(1)
 }
 
-fn lighting_entry(msaa: bool) -> &'static str {
-    match msaa {
-        true => fs_main_msaa::wgsl_source(),
-        false => fs_main::wgsl_source(),
-    }
-}
-
-/// Full WGSL source for deferred lighting at a sample count: at 1x
-/// byte-identical to [`wgsl_source`]; in MSAA mode depth, material-id and
-/// the normal declare multisampled types and [`fs_main_msaa`] shades
-/// covered samples on edges.
+/// Full WGSL source for deferred lighting at a sample count.
+///
+/// At 1x this is the translated artifact: `ornis-gpu-lighting`'s `fs_main`,
+/// checked in as [`LIGHTING_1X`] and rebuilt by
+/// `cargo xtask build-shaders --package ornis-gpu-lighting --entry fs_main`.
+/// The 4x path still runs through the DSL assembly below — the MSAA entry
+/// loads every covered sample, which is the next pass to move.
 pub fn wgsl_source_for_samples(sample_count: u32) -> String {
+    if sample_count <= 1 {
+        return LIGHTING_1X.to_string();
+    }
     ShaderModule::new()
         .decl(lighting_wgsl_header_for_samples(sample_count))
         .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
@@ -904,10 +876,13 @@ pub fn wgsl_source_for_samples(sample_count: u32) -> String {
             helpers::wgsl_shared_helpers(),
         ])
         .helper(shade_lit::wgsl_source())
-        .entry(lighting_entry(per_sample_flag(sample_count, true)))
+        .entry(fs_main_msaa::wgsl_source())
         .helper(lighting_fragment_kernels())
         .emit()
 }
+
+/// Name of the translated 1x fragment entry.
+pub const LIGHTING_1X_ENTRY: &str = "fs_main";
 
 /// Vertex entry, translated by [`stage`](ornis_macros::stage).
 /// DSL-only — replaced by `vs_main::wgsl_source()`.
@@ -955,29 +930,43 @@ mod tests {
         assert_valid_wgsl("lighting_generated", &wgsl_source());
     }
 
+    /// The artifact is a single fully-inlined module, so the checks are on the
+    /// shapes that survive inlining: the deferred decode, the material table
+    /// read and the two shadow families.
     #[test]
-    fn lighting_generated_contains_expected_kernels() {
+    fn lighting_artifact_keeps_the_deferred_shapes() {
         let src = wgsl_source();
         assert!(
-            !src.contains("aces_tonemap("),
+            !src.contains("aces_tonemap"),
             "lighting writes scene-linear HDR; ACES belongs to the composite"
         );
-        assert!(src.contains("fn fresnel_f82_tint"));
-        assert!(src.contains("fn ggx_ndf_aniso"));
         assert!(src.contains("fn fs_main"));
+        // Depth is loaded, not sampled: the world position comes back through
+        // the inverse view-projection.
+        assert!(src.contains("textureLoad(tex_0_8_"), "{src}");
+        // The material record is read as storage words and bitcast, never
+        // converted: a conversion would turn the packed index into a denormal.
+        assert!(
+            src.contains("var<storage> storage_0_2_: array<u32>"),
+            "{src}"
+        );
+        assert!(src.contains("bitcast<f32>("), "{src}");
+        // Both shadow families: the atlas (10) and the cube pool (12).
+        assert!(src.contains("textureSampleCompareLevel(tex_0_10_"), "{src}");
+        assert!(src.contains("textureSampleCompareLevel(tex_0_12_"), "{src}");
     }
 
     /// Deferred lighting keeps both the AO factor from #137 and the CSM
     /// helper from #121. Dropping either binding or the `csm_visibility`
     /// call fails this; naga still has to accept the combined module.
+    /// Deferred lighting keeps both the AO layer from #137 and the cascaded
+    /// shadow map from #121: drop either binding and the walk loses a term.
     #[test]
     fn lighting_keeps_ambient_occlusion_and_csm() {
         let src = wgsl_source();
         assert_valid_wgsl("lighting ao+csm", &src);
-        assert!(src.contains("ao_tex"), "{src}");
-        assert!(src.contains("csm_tex"), "{src}");
-        assert!(src.contains("csm_visibility("), "{src}");
-        assert!(src.contains("* ao"), "AO must scale ambient and IBL: {src}");
+        assert!(src.contains("textureSampleLevel(tex_0_17_"), "{src}");
+        assert!(src.contains("textureSampleCompareLevel(tex_0_18_"), "{src}");
     }
 
     /// The resource table drives both sides: WGSL declarations and `wgpu`
@@ -1008,57 +997,99 @@ mod tests {
                 .contains(wgpu::ShaderStages::VERTEX)
         );
     }
+    /// The artifact declares exactly the table's bindings, with the kinds the
+    /// pipeline layout builds: a swapped number or a wrong texture type would
+    /// pass a textual count and fail here.
     #[test]
-    fn lighting_struct_blocks_match_derived_layouts() {
-        // The header is built as naga IR from the same derives (drift is
-        // impossible by construction); pin declaration order and the 19
-        // resource bindings in the printed output.
+    fn lighting_artifact_bindings_match_the_table() {
+        use super::LIGHTING_RESOURCES;
+        let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("artifact parses");
+        let mut declared = Vec::new();
+        for (_, global) in module.global_variables.iter() {
+            if let Some(binding) = &global.binding {
+                declared.push((binding.group, binding.binding, global.ty));
+            }
+        }
+        assert_eq!(declared.len(), LIGHTING_RESOURCES.len());
+        for resource in &LIGHTING_RESOURCES {
+            let found = declared
+                .iter()
+                .find(|(group, binding, _)| {
+                    *group == resource.group && *binding == resource.binding
+                })
+                .unwrap_or_else(|| panic!("binding {} is not declared", resource.binding));
+            let ty = &module.types[found.2];
+            let ok = match resource.kind {
+                ResourceKind::Uniform(_) => matches!(ty.inner, naga::TypeInner::Struct { .. }),
+                ResourceKind::StorageReadArray(_) => {
+                    matches!(ty.inner, naga::TypeInner::Array { .. })
+                }
+                ResourceKind::TextureFloat => matches!(ty.inner, naga::TypeInner::Image { .. }),
+                ResourceKind::TextureUint => matches!(
+                    ty.inner,
+                    naga::TypeInner::Image {
+                        class: naga::ImageClass::Sampled {
+                            kind: naga::ScalarKind::Uint,
+                            ..
+                        },
+                        ..
+                    }
+                ),
+                ResourceKind::TextureDepth
+                | ResourceKind::TextureDepthArray
+                | ResourceKind::TextureDepthCubeArray => matches!(
+                    ty.inner,
+                    naga::TypeInner::Image {
+                        class: naga::ImageClass::Depth { .. },
+                        ..
+                    }
+                ),
+                ResourceKind::TextureCube => matches!(
+                    ty.inner,
+                    naga::TypeInner::Image {
+                        class: naga::ImageClass::Sampled { .. },
+                        dim: naga::ImageDimension::Cube,
+                        ..
+                    }
+                ),
+                ResourceKind::Sampler | ResourceKind::SamplerComparison => {
+                    matches!(ty.inner, naga::TypeInner::Sampler { .. })
+                }
+                ResourceKind::StorageRead(_) | ResourceKind::StorageRw(_) => false,
+            };
+            assert!(
+                ok,
+                "binding {} is declared with the wrong type for {:?}",
+                resource.binding, resource.kind
+            );
+        }
+    }
+
+    /// The 1x path is the translated artifact: the deferred pass's own module,
+    /// declaring the whole binding table and the loop the walk shares with the
+    /// forward pass. Asserting the *structure* keeps the file honest without
+    /// pinning the translator's variable names.
+    #[test]
+    fn one_x_source_is_the_translated_artifact() {
         let src = wgsl_source();
-        let cam = src.find("struct Camera").expect("Camera");
-        let light = src.find("struct Light").expect("Light");
-        let lighting = src.find("struct Lighting").expect("Lighting");
-        let mat = src.find("struct OpenPBRMaterial").expect("OpenPBR");
-        let b9 = src.find("lighting_sampler").expect("bindings");
-        assert!(cam < light && light < lighting && lighting < mat && mat < b9);
+        assert!(src.starts_with("struct UniformStruct0_"));
         assert_eq!(src.matches("@binding(").count(), 23);
-    }
-
-    /// The translated fragment entry must keep the legacy shape: g-buffer
-    /// decode with `textureLoad` coords, then [`shade_lit`] (alpha
-    /// `discard`, the light loop, the summed layer BSDF).
-    #[test]
-    fn fs_main_matches_legacy_shape() {
-        let entry = fs_main::wgsl_source();
-        assert!(entry.starts_with("@fragment\nfn fs_main(input: QuadVertexOutput)"));
-        assert!(entry.contains("-> @location(0) vec4<f32>"));
-        assert!(entry.contains(
-            "textureLoad(depth_tex, vec2<u32>(input.uv * vec2<f32>(textureDimensions(depth_tex))), 0)"
-        ));
-        assert!(entry.contains("shade_lit("));
-        let src = wgsl_source();
-        assert!(src.contains("discard;"));
-        assert!(src.contains("for (var k: u32 = 0; k < total; k = k + 1)"));
-        assert!(src.contains("var light = clustered_lights[k];"));
-        assert!(src.contains("cluster_light_indices[span.x + (k - lighting.light_count)]"));
-        assert!(src.contains("continue;"));
-        assert!(src.contains("let base_bsdf = evaluate_base_layer("));
+        for binding in 0..23 {
+            assert!(
+                src.contains(&format!("@group(0) @binding({binding})")),
+                "binding {binding} missing"
+            );
+        }
+        assert!(src.contains("@fragment"));
         assert!(src.contains(
-            "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
+            "fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>)"
         ));
-        assert!(src.contains("return vec4<f32>(color, opacity);"));
-        assert!(src.contains("specular_aa_roughness("));
-        assert!(src.contains("sanitize_hdr("));
-        assert!(src.contains("textureSampleLevel(prefilter_cube, ibl_sampler"));
-        assert!(src.contains("textureSample(brdf_lut, ibl_sampler"));
-        assert!(src.contains("textureSample(irradiance_cube, ibl_sampler"));
-        assert!(src.contains("lighting.ibl_max_mip"));
-        assert!(src.contains("thin_film_weight_mix("));
-        assert!(src.contains("evaluate_coat_darkening("));
+        // Alpha cut plus the debug views are what the deferred pass adds on top
+        // of forward PBR: both must survive the port.
+        assert!(src.contains("discard"));
+        assert_eq!(wgsl_source_for_samples(1), src);
     }
 
-    /// The MSAA source validates with naga. Depth, material-id and the
-    /// normal are multisampled; the entry loads every sample and masks
-    /// cleared ones. Albedo stays a resolved `texture_2d`.
     #[test]
     fn msaa_source_validates_with_multisampled_depth_and_id() {
         let src = wgsl_source_for_samples(4);

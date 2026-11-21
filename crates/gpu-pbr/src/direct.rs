@@ -56,7 +56,7 @@ fn max_f32(a: f32, b: f32) -> f32 {
 /// `no_l` is floored at `EPS` and a light whose cosine stays at the floor is
 /// skipped: the layers would all return zero and the branch keeps the divide in
 /// the transmission lobe from seeing a grazing angle.
-// qual:allow(complexity, max_function_lines=130) reason: "one loop over the lights; splitting the body would split the shadow selectors from the radiance they scale"
+// qual:allow(complexity, max_function_lines=145) reason: "one loop over the lights; splitting the body would split the shadow selectors from the radiance they scale"
 // qual:allow(srp, max_parameters=12) reason: "the three bindings the shadow families read, the light tables and the frame scalars; a bundle would be a struct the translator keeps in registers"
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
@@ -79,7 +79,7 @@ pub(crate) fn direct(
     let mut k = 0;
     while k < total {
         let light = LightRef {
-            base: light_base(light_indices, k, light_count, span_offset),
+            base: light_base::<CLUSTER_INDICES_BINDING>(light_indices, k, light_count, span_offset),
         };
         let radiance = shaded_radiance::<
             LIGHTING_BINDING,

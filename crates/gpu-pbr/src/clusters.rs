@@ -35,10 +35,7 @@ use crate::layout::Y_LANE_U;
 /// plane clamps into the first tile and the first slice instead of wrapping: the
 /// GPU conversion saturates, which is what the reference clamps after.
 #[inline(always)]
-pub(crate) fn cluster_index(
-    camera: &Uniform<Camera, GROUP, CAMERA_BINDING>,
-    world_pos: Vec3,
-) -> u32 {
+pub fn cluster_index(camera: &Uniform<Camera, GROUP, CAMERA_BINDING>, world_pos: Vec3) -> u32 {
     let clip_x = clip_lane::<X_LANE_U>(camera, world_pos);
     let clip_y = clip_lane::<Y_LANE_U>(camera, world_pos);
     let clip_w = clip_lane::<W_LANE_U>(camera, world_pos);
@@ -69,6 +66,7 @@ fn clamp_index(index: u32, count: u32) -> u32 {
 /// The matrix is a uniform, so each column is read by its constant lane and
 /// scaled by that column's coordinate — reading the columns as rows would
 /// transpose the projection.
+#[inline(always)]
 fn clip_lane<const LANE: usize>(
     camera: &Uniform<Camera, GROUP, CAMERA_BINDING>,
     world_pos: Vec3,

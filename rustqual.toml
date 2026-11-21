@@ -93,6 +93,8 @@ paths = [
     "crates/gpu-aa-edge/**",
     "crates/gpu-aa-taa/**",
     "crates/gpu-gbuffer/**",
+    "crates/gpu-lighting/**",
+    "crates/gpu-pbr/**",
     "crates/gpu-skinning/**",
     "crates/gpu-openpbr/**",
     "crates/gpu-cluster/**",

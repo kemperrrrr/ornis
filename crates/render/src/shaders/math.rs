@@ -1008,9 +1008,12 @@ mod tests {
             "const REC709_LUMA_R: f32 = {};",
             super::super::f32_lit(REC709_LUMA_R)
         );
+        // The 1x fragment stage is the translated `ornis-gpu-lighting` artifact,
+        // which carries the constants' values; the DSL assembly that still
+        // splices the coefficient block is the 4x one.
         let passes = [(
             "lighting",
-            crate::shaders::lighting_generated::wgsl_source(),
+            crate::shaders::lighting_generated::wgsl_source_for_samples(4),
             true,
         )];
         for (name, src, wants_luma) in passes {
