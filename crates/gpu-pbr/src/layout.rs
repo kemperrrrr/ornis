@@ -130,6 +130,8 @@ pub const FOURTH_COLUMN_WORD: u32 = COLUMN_WORDS + COLUMN_WORDS + COLUMN_WORDS;
 pub const CAMERA_POS: usize = 8;
 /// Field index of the view-projection's first column.
 pub const CAMERA_VIEW_PROJ: usize = 0;
+/// Field index of the inverse view-projection's first column.
+pub const CAMERA_INV_VIEW_PROJ: usize = 4;
 /// Field index of `Lighting::ambient_color`.
 pub const AMBIENT_FIELD: usize = 0;
 /// Field index of `Lighting::light_count`.
@@ -138,6 +140,8 @@ pub const LIGHT_COUNT_FIELD: usize = 2;
 pub const IBL_WEIGHT_FIELD: usize = 3;
 /// Field index of `Lighting::ibl_max_mip`.
 pub const IBL_MAX_MIP_FIELD: usize = 4;
+/// Field index of `Lighting::debug_view`.
+pub const DEBUG_VIEW_FIELD: usize = 5;
 /// Field index of `Lighting::csm`.
 pub const CSM_FIELD: usize = 6;
 /// Field index of `Csm::vps`.
@@ -315,6 +319,7 @@ impl GpuStruct for ClusterParams {
 /// The record mixes `vec4` fields with counters, so it is bound as words and
 /// the float ones are reinterpreted bit for bit — a conversion would turn the
 /// packed `material_index` of the g-buffer into a denormal.
+// qual:allow(iosp) reason: "the load and the bitcast are the whole body; splitting them would move the storage read away from the only place the record layout is stated"
 #[inline(always)]
 pub(crate) fn material_word(
     materials: &Storage<u32, GROUP, MATERIALS_BINDING, ReadOnly>,
@@ -325,8 +330,9 @@ pub(crate) fn material_word(
 }
 
 /// One float word of a `Light` record in `clustered_lights`.
+// qual:allow(iosp) reason: "the load and the bitcast are the whole body, the same shape as `material_word`"
 #[inline(always)]
-pub fn light_word<const LIGHTS_B: u32>(
+pub(crate) fn light_word<const LIGHTS_B: u32>(
     lights: &Storage<u32, GROUP, LIGHTS_B, ReadOnly>,
     base: u32,
     word: u32,

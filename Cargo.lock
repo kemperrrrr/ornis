@@ -2922,6 +2922,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ornis-gpu-lighting"
+version = "0.1.0"
+dependencies = [
+ "ornis-gpu-openpbr",
+ "ornis-gpu-pbr",
+ "ornis-gpu-shader",
+]
+
+[[package]]
 name = "ornis-gpu-openpbr"
 version = "0.1.0"
 dependencies = [

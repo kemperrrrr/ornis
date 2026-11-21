@@ -1,0 +1,16 @@
+[package]
+name = "ornis-gpu-lighting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deferred lighting fragment pass on the llvm2gpu SDK"
+
+[dependencies]
+ornis-gpu-shader = { path = "../gpu-shader", version = "0.1.0" }
+ornis-gpu-openpbr = { path = "../gpu-openpbr", version = "0.1.0" }
+ornis-gpu-pbr = { path = "../gpu-pbr", version = "0.1.0" }
+
+[lints]
+workspace = true

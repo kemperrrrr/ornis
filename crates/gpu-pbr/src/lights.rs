@@ -21,7 +21,6 @@ use ornis_gpu_shader::length3;
 use ornis_gpu_shader::mix;
 use ornis_gpu_shader::smoothstep;
 
-use crate::layout::CLUSTER_INDICES_BINDING;
 use crate::layout::GROUP;
 use crate::layout::LIGHT_COLOR_WORD;
 use crate::layout::LIGHT_DIRECTION_WORD;
@@ -40,15 +39,15 @@ use crate::shadows::spot_shadow;
 /// Smallest value a divisor or a cosine is allowed to take.
 const EPS: f32 = 0.000001;
 /// `kind` at or above which a light is point or spot.
-const POINT_OR_SPOT_KIND_EDGE: f32 = 0.5;
+pub const POINT_OR_SPOT_KIND_EDGE: f32 = 0.5;
 /// `kind` at or above which a point light is a spot.
-const SPOT_KIND_EDGE: f32 = 1.5;
+pub const SPOT_KIND_EDGE: f32 = 1.5;
 /// Fraction of the range at which the cutoff starts falling off.
 const RANGE_CUTOFF_INNER_FRACTION: f32 = 0.99;
 /// `params.x` at or above which a directional light casts cascaded shadows.
-const CSM_ACTIVE_EDGE: f32 = 0.5;
+pub const CSM_ACTIVE_EDGE: f32 = 0.5;
 /// Selector threshold shared by the light-family switches.
-const LIGHT_SELECTOR_SPLIT: f32 = 0.5;
+pub const LIGHT_SELECTOR_SPLIT: f32 = 0.5;
 
 /// `1.0` when `x >= edge`, `0.0` otherwise — the WGSL `step`.
 #[inline(always)]
@@ -91,12 +90,19 @@ fn mix3(a: Vec3, b: Vec3, t: f32) -> Vec3 {
 }
 
 /// The light record the current iteration shades and where it lives.
-pub(crate) struct LightRef {
+pub struct LightRef {
     /// Word offset of the record inside `clustered_lights`.
     pub(crate) base: u32,
 }
 
 impl LightRef {
+    /// The record that starts at word offset `base`.
+    #[inline(always)]
+    #[must_use]
+    pub fn at(base: u32) -> Self {
+        Self { base }
+    }
+
     /// `f32` word `word` of this record.
     #[inline(always)]
     pub fn word<const LIGHTS_B: u32>(
@@ -127,8 +133,8 @@ impl LightRef {
 /// The uniform array is indexed directly; the clustered tail goes through the
 /// cell's list, which stores light indices rather than offsets.
 #[inline(always)]
-pub(crate) fn light_base(
-    indices: &Storage<u32, GROUP, CLUSTER_INDICES_BINDING, ReadOnly>,
+pub fn light_base<const CIB: u32>(
+    indices: &Storage<u32, GROUP, CIB, ReadOnly>,
     k: u32,
     light_count: u32,
     span_offset: u32,
@@ -165,7 +171,7 @@ pub fn light_dir<const LIGHTS_B: u32>(
 
 /// Radiance arriving from one light: colour × intensity, range cutoff, spot
 /// cone, distance attenuation and shadow.
-// quant:allow(srp, max_parameters=8) reason: "the two shadow families and the cascade block are three different bindings; bundling them would be a struct the translator has to keep in registers"
+// qual:allow(srp, max_parameters=8) reason: "the two shadow families and the cascade block are three different bindings; bundling them would be a struct the translator has to keep in registers"
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn shaded_radiance<

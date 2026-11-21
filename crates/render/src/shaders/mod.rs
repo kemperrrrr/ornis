@@ -838,7 +838,9 @@ mod tests {
     /// undeclared — an unused declaration would pass silently).
     #[test]
     fn stage_globals_declared() {
-        let lighting = lighting_generated::wgsl_source();
+        // The 1x fragment stage is the translated artifact; the DSL assembly
+        // that still splices these bundles is the 4x one.
+        let lighting = lighting_generated::wgsl_source_for_samples(4);
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
         // (bundle/entry globals, assemblies containing them). QuadConsts is
         // shared by the DSL vertex entries, so it pins against all the
@@ -885,7 +887,8 @@ mod tests {
         assert_eq!(bloom_generated::VS_ENTRY, "vs_main");
         assert_eq!(bloom_generated::FS_ENTRY, "fs_main");
         assert_eq!(lighting_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(lighting_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(lighting_generated::LIGHTING_1X_ENTRY, "fs_main");
+        assert_eq!(lighting_generated::fs_main_msaa::entry_point(), "fs_main");
         assert_eq!(composite_generated::VS_ENTRY, "vs_main");
         assert_eq!(composite_generated::FS_ENTRY, "fs_main");
         assert_eq!(gbuffer_generated::VS_ENTRY, "vs_main");
@@ -1005,7 +1008,7 @@ mod tests {
                 output: None,
             },
             Entry {
-                src: lighting_generated::fs_main::wgsl_source(),
+                src: lighting_generated::fs_main_msaa::wgsl_source(),
                 input: Some(interface::HdrFragmentOut::WGSL_FIELDS),
                 output: None,
             },
@@ -1048,9 +1051,11 @@ mod tests {
                 checked += usize::from(counted);
             }
         }
-        // Ten entries, 9+ resolved uses today; fewer means the extraction
-        // broke or coverage was dropped — update deliberately.
-        assert!(checked >= 9, "expected field uses, found {checked}");
+        // The lit vertex entry plus the 4x fragment entry: 7 resolved uses
+        // today (the 1x fragment is the translated artifact and is checked by
+        // its bindings instead); fewer means the extraction broke or coverage
+        // was dropped — update deliberately.
+        assert!(checked >= 7, "expected field uses, found {checked}");
     }
 
     /// Every call in translated entries resolves: built-ins via the
@@ -1121,7 +1126,7 @@ mod tests {
         ];
         const KEYWORDS: &[&str] = &["if", "for", "while", "return", "loop"];
         // (entry source, its assembled shader)
-        let lighting = lighting_generated::wgsl_source();
+        let lighting = lighting_generated::wgsl_source_for_samples(4);
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
         let pairs: &[(&str, &str)] = &[
             (
@@ -1129,7 +1134,7 @@ mod tests {
                 lighting_vertex.as_str(),
             ),
             (
-                lighting_generated::fs_main::wgsl_source(),
+                lighting_generated::fs_main_msaa::wgsl_source(),
                 lighting.as_str(),
             ),
         ];
@@ -1151,9 +1156,11 @@ mod tests {
                 checked += 1;
             }
         }
-        // Two DSL entries remain (the lit vertex and fragment stages);
-        // near-zero hits would mean the extraction broke and the test passes
-        // vacuously.
+        // Two DSL entries remain (the lit vertex and the 4x fragment stage):
+        // the 1x fragment is the translated `ornis-gpu-lighting` artifact, a
+        // complete module rather than a splice, validated by
+        // [`assert_valid_wgsl`] instead. Near-zero hits would mean the
+        // extraction broke and this test passes vacuously.
         assert!(checked >= 15, "expected calls, found {checked}");
     }
 
