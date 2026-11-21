@@ -934,11 +934,6 @@ pub fn wgsl_vertex_source() -> String {
         .emit()
 }
 
-/// Static view for naga validation and snapshot tests.
-pub fn wgsl_source_static() -> String {
-    wgsl_source()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
