@@ -1008,62 +1008,342 @@ mod tests {
             "const REC709_LUMA_R: f32 = {};",
             super::super::f32_lit(REC709_LUMA_R)
         );
-        let srgb_decl = format!(
-            "const SRGB_LINEAR_CUTOFF: f32 = {};",
-            super::super::f32_lit(SRGB_LINEAR_CUTOFF)
-        );
-        let passes = [
+        // Both lighting paths are translated artifacts now: the coefficient
+        // *values* survive as literals inside the ported `luminance`, but the
+        // declaration the DSL kernel spliced in is gone. Pin the absence, so a
+        // DSL path that comes back here is caught, and validate what is left.
+        for (name, src) in [
             (
-                "bloom",
-                crate::shaders::bloom_generated::wgsl_source(),
-                true,
+                "lighting 1x",
+                crate::shaders::lighting_generated::wgsl_source_for_samples(1),
             ),
             (
-                "hdr",
-                crate::shaders::hdr_composite_generated::wgsl_source(),
-                true,
+                "lighting 4x",
+                crate::shaders::lighting_generated::wgsl_source_for_samples(4),
             ),
-            ("pbr", crate::shaders::pbr_generated::wgsl_source(), true),
-            (
-                "lighting",
-                crate::shaders::lighting_generated::wgsl_source(),
-                true,
-            ),
-            (
-                "textured",
-                crate::shaders::material_textures::wgsl_source_textured(),
-                true,
-            ),
-            (
-                "composite",
-                crate::shaders::composite_generated::wgsl_source(),
-                false,
-            ),
-        ];
-        for (name, src, wants_luma) in passes {
-            if wants_luma {
-                assert!(src.contains(&decl), "{name} missing {decl}");
-            } else {
-                assert!(src.contains(&srgb_decl), "{name} missing {srgb_decl}");
-            }
+        ] {
+            assert!(
+                !src.contains(&decl),
+                "{name} still splices the coefficient block"
+            );
             assert_valid_wgsl(name, &src);
         }
-        let bloom = crate::shaders::bloom_generated::wgsl_source();
-        assert!(bloom.contains(&format!(
-            "const BLOOM_SOFT_KNEE: f32 = {};",
-            super::super::f32_lit(crate::shaders::bloom_generated::BLOOM_SOFT_KNEE)
-        )));
-        let pbr = crate::shaders::pbr_generated::wgsl_source();
-        assert!(pbr.contains("const POINT_OR_SPOT_KIND_EDGE: f32"));
-        assert!(pbr.contains("const SHADOW_CUBE_NEAR: f32"));
-        // Fog replaces the composite on the swapchain and runs the same
-        // ACES kernel, so it needs the coefficient block too.
-        let fog = crate::shaders::fog_generated::wgsl_source();
-        let aces_decl = format!(
-            "const ACES_FIT_A: f32 = {};",
-            super::super::f32_lit(ACES_FIT_A)
+        // The translated passes keep their own copy of the math their DSL kernel
+        // used to splice in, so they carry the constants' *values* rather than
+        // the declarations.
+        let hdr = crate::shaders::hdr_composite_generated::wgsl_source();
+        assert!(
+            hdr.contains(&super::super::f32_lit(ACES_FIT_A)),
+            "hdr composite missing the ACES fit"
         );
-        assert!(fog.contains(&aces_decl), "fog missing {aces_decl}");
+        assert_valid_wgsl("hdr", &hdr);
+        let composite = crate::shaders::composite_generated::wgsl_source();
+        assert!(
+            composite.contains(&super::super::f32_lit(SRGB_LINEAR_CUTOFF)),
+            "composite missing the sRGB cutoff value"
+        );
+        assert_valid_wgsl("composite", &composite);
+        // The translated bloom pass keeps its own luminance weights and knee.
+        let bloom = crate::shaders::bloom_generated::wgsl_source();
+        assert!(
+            bloom.contains(&super::super::f32_lit(REC709_LUMA_R)),
+            "bloom missing the luminance weights"
+        );
+        assert!(
+            bloom.contains(&super::super::f32_lit(
+                crate::shaders::bloom_generated::BLOOM_SOFT_KNEE
+            )),
+            "bloom missing the soft knee"
+        );
+        assert_valid_wgsl("bloom", &bloom);
+        // The translated forward pass carries its selectors as literals: the
+        // two shadow families are one comparison sample each.
+        let pbr = crate::shaders::pbr_generated::wgsl_source();
+        assert_eq!(
+            pbr.matches("textureSampleCompareLevel(").count(),
+            4,
+            "two spot/CSM compares and two cube compares, all at an explicit level"
+        );
+        assert_valid_wgsl("pbr", &pbr);
+        // Fog replaces the composite on the swapchain and runs the same ACES
+        // kernel: the translated pass carries the coefficients as literals.
+        let fog = crate::shaders::fog_generated::wgsl_source();
+        assert!(
+            fog.contains(&super::super::f32_lit(ACES_FIT_A)),
+            "fog missing the ACES fit"
+        );
         assert_valid_wgsl("fog", &fog);
+    }
+}
+
+/// Numeric parity between the reference kernels above and the shader-side port
+/// in `ornis-gpu-openpbr`.
+///
+/// The port is what the GPU translates; the kernels here are the `#[kernel]`
+/// sources the legacy WGSL is spliced from. They have to agree before a pass
+/// can move over, so every function is compared on the host, per lane.
+#[cfg(test)]
+mod openpbr_math_parity {
+    use super::*;
+    use ornis_gpu_openpbr::math as port;
+    use ornis_gpu_shader::Vec3;
+
+    /// Relative tolerance: the host arm of the shader SDK computes `libm`
+    /// values while the reference uses `std`'s, and the two round
+    /// independently by an ulp or two.
+    const TOLERANCE: f32 = 2e-5;
+
+    fn vec3(x: f32, y: f32, z: f32) -> Vec3 {
+        Vec3::new(x, y, z)
+    }
+
+    fn close(reference: f32, ported: f32, label: &str) {
+        let scale = reference.abs().max(1.0);
+        assert!(
+            (reference - ported).abs() <= TOLERANCE * scale,
+            "{label}: reference {reference}, port {ported}"
+        );
+    }
+
+    fn close3(reference: glam::Vec3, ported: Vec3, label: &str) {
+        close(reference.x, ported.x, label);
+        close(reference.y, ported.y, label);
+        close(reference.z, ported.z, label);
+    }
+
+    #[test]
+    fn colors_and_tonemapping_agree() {
+        for (r, g, b) in [(0.3, 0.6, 0.9), (0.0, 0.0, 0.0), (4.0, 1.0, 0.05)] {
+            let reference = glam::Vec3::new(r, g, b);
+            let ported = vec3(r, g, b);
+            close(
+                luminance::eval(reference),
+                port::luminance(ported),
+                "luminance",
+            );
+            close3(
+                aces_tonemap::eval(reference),
+                port::aces_tonemap(ported),
+                "aces_tonemap",
+            );
+            close3(
+                srgb_to_linear::eval(reference),
+                port::srgb_to_linear(ported),
+                "srgb_to_linear",
+            );
+        }
+    }
+
+    #[test]
+    fn fresnel_terms_agree() {
+        close(
+            fresnel0_from_ior::eval(1.5),
+            port::fresnel0_from_ior(1.5),
+            "fresnel0_from_ior",
+        );
+        for cos_theta in [0.05f32, 0.4, 0.95] {
+            close(
+                fresnel_schlick::eval(cos_theta, 0.04),
+                port::fresnel_schlick(cos_theta, 0.04),
+                "fresnel_schlick",
+            );
+            let f0 = glam::Vec3::new(0.9, 0.7, 0.3);
+            close3(
+                fresnel_schlick_vec::eval(cos_theta, f0),
+                port::fresnel_schlick_vec(cos_theta, vec3(0.9, 0.7, 0.3)),
+                "fresnel_schlick_vec",
+            );
+            close3(
+                fresnel_f82_tint::eval(cos_theta, f0, glam::Vec3::new(0.5, 0.6, 0.7)),
+                port::fresnel_f82_tint(cos_theta, vec3(0.9, 0.7, 0.3), vec3(0.5, 0.6, 0.7)),
+                "fresnel_f82_tint",
+            );
+        }
+    }
+
+    #[test]
+    fn microfacet_terms_agree() {
+        for alpha in [0.1f32, 0.45, 1.0] {
+            close(
+                ggx_ndf::eval(0.8, alpha),
+                port::ggx_ndf(0.8, alpha),
+                "ggx_ndf",
+            );
+            close(
+                smith_ggx_correlated::eval(0.7, 0.6, alpha),
+                port::smith_ggx_correlated(0.7, 0.6, alpha),
+                "smith_ggx_correlated",
+            );
+        }
+        let (alpha_u, alpha_v) = openpbr_anisotropy::eval(0.4, 0.3).into();
+        let (port_u, port_v) = port::openpbr_anisotropy(0.4, 0.3);
+        close(alpha_u, port_u, "openpbr_anisotropy.u");
+        close(alpha_v, port_v, "openpbr_anisotropy.v");
+        let h = glam::Vec3::new(0.3, 0.5, 0.81).normalize();
+        let t = glam::Vec3::new(1.0, 0.0, 0.0);
+        let b = glam::Vec3::new(0.0, 1.0, 0.0);
+        close(
+            ggx_ndf_aniso::eval(h.z, h, t, b, alpha_u, alpha_v),
+            port::ggx_ndf_aniso(
+                h.z,
+                vec3(h.x, h.y, h.z),
+                vec3(t.x, t.y, t.z),
+                vec3(b.x, b.y, b.z),
+                alpha_u,
+                alpha_v,
+            ),
+            "ggx_ndf_aniso",
+        );
+        let v = glam::Vec3::new(0.2, 0.1, 0.97).normalize();
+        let l = glam::Vec3::new(-0.4, 0.3, 0.86).normalize();
+        close(
+            smith_ggx_aniso::eval(v.z, l.z, v, l, t, b, alpha_u, alpha_v),
+            port::smith_ggx_aniso(
+                v.z,
+                l.z,
+                vec3(v.x, v.y, v.z),
+                vec3(l.x, l.y, l.z),
+                vec3(t.x, t.y, t.z),
+                vec3(b.x, b.y, b.z),
+                alpha_u,
+                alpha_v,
+            ),
+            "smith_ggx_aniso",
+        );
+    }
+
+    #[test]
+    fn diffuse_and_sheen_terms_agree() {
+        for (no_v, no_l) in [(0.9f32, 0.5f32), (0.3, 0.95)] {
+            close(
+                oren_nayar_brdf::eval(no_v, no_l, 0.45, 0.36),
+                port::oren_nayar_brdf(no_v, no_l, 0.45, 0.36),
+                "oren_nayar_brdf",
+            );
+            close(
+                sheen_brdf::eval(no_v, no_l, 0.95, 0.8, 0.3),
+                port::sheen_brdf(no_v, no_l, 0.95, 0.8, 0.3),
+                "sheen_brdf",
+            );
+        }
+        close(
+            base_diffuse_energy::eval(0.12),
+            port::base_diffuse_energy(0.12),
+            "base_diffuse_energy",
+        );
+    }
+
+    #[test]
+    fn image_based_light_terms_agree() {
+        let prefiltered = glam::Vec3::new(0.4, 0.5, 0.6);
+        let irradiance = glam::Vec3::new(0.1, 0.2, 0.3);
+        let f0 = glam::Vec3::new(0.04, 0.04, 0.04);
+        let diffuse_color = glam::Vec3::new(0.5, 0.4, 0.3);
+        close3(
+            evaluate_ibl::eval(prefiltered, irradiance, 0.8, 0.2, f0, diffuse_color, 0.75),
+            port::evaluate_ibl(
+                vec3(0.4, 0.5, 0.6),
+                vec3(0.1, 0.2, 0.3),
+                0.8,
+                0.2,
+                vec3(0.04, 0.04, 0.04),
+                vec3(0.5, 0.4, 0.3),
+                0.75,
+            ),
+            "evaluate_ibl",
+        );
+        close3(
+            evaluate_ibl_specular::eval(prefiltered, 0.8, 0.2, f0, 0.75),
+            port::evaluate_ibl_specular(
+                vec3(0.4, 0.5, 0.6),
+                0.8,
+                0.2,
+                vec3(0.04, 0.04, 0.04),
+                0.75,
+            ),
+            "evaluate_ibl_specular",
+        );
+        close3(
+            evaluate_ibl_diffuse::eval(irradiance, 0.2, diffuse_color, 0.75),
+            port::evaluate_ibl_diffuse(vec3(0.1, 0.2, 0.3), 0.2, vec3(0.5, 0.4, 0.3), 0.75),
+            "evaluate_ibl_diffuse",
+        );
+    }
+
+    #[test]
+    fn layer_terms_agree() {
+        let base_color = glam::Vec3::new(0.6, 0.5, 0.4);
+        let subsurface_color = glam::Vec3::new(0.7, 0.2, 0.2);
+        close3(
+            coat_base_darkening::eval(1.6, 0.3, base_color, 0.9, 0.8, 0.4, subsurface_color),
+            port::coat_base_darkening(
+                1.6,
+                0.3,
+                vec3(0.6, 0.5, 0.4),
+                0.9,
+                0.8,
+                0.4,
+                vec3(0.7, 0.2, 0.2),
+            ),
+            "coat_base_darkening",
+        );
+        let darkened = glam::Vec3::new(0.8, 0.85, 0.9);
+        close3(
+            coat_blend_darkened::eval(darkened, 0.7, 0.5),
+            port::coat_blend_darkened(vec3(0.8, 0.85, 0.9), 0.7, 0.5),
+            "coat_blend_darkened",
+        );
+        close3(
+            thin_film_weight_mix::eval(0.6, glam::Vec3::new(1.1, 0.9, 1.05)),
+            port::thin_film_weight_mix(0.6, vec3(1.1, 0.9, 1.05)),
+            "thin_film_weight_mix",
+        );
+        close3(
+            thin_film_modulation::eval(0.8, 1.4, 450.0, 1.0),
+            port::thin_film_modulation(0.8, 1.4, 450.0, 1.0),
+            "thin_film_modulation",
+        );
+        close3(
+            transmission_color_to_extinction::eval(glam::Vec3::new(0.8, 0.5, 0.3), 2.0),
+            port::transmission_color_to_extinction(vec3(0.8, 0.5, 0.3), 2.0),
+            "transmission_color_to_extinction",
+        );
+        close3(
+            subsurface_brdf::eval(0.8, 0.6, 0.35, glam::Vec3::new(0.2, 0.1, 0.05), 0.4),
+            port::subsurface_brdf(0.8, 0.6, 0.35, vec3(0.2, 0.1, 0.05), 0.4),
+            "subsurface_brdf",
+        );
+    }
+
+    #[test]
+    fn emission_and_normal_encoding_agree() {
+        close3(
+            coated_emission::eval(
+                glam::Vec3::new(0.9, 0.8, 0.7),
+                3.0,
+                0.6,
+                glam::Vec3::new(1.0, 1.0, 0.9),
+                0.75,
+            ),
+            port::coated_emission(vec3(0.9, 0.8, 0.7), 3.0, 0.6, vec3(1.0, 1.0, 0.9), 0.75),
+            "coated_emission",
+        );
+        for (x, y, z) in [(0.0, 0.0, 1.0), (0.5, -0.4, -0.76), (-0.3, 0.2, 0.93)] {
+            let n = glam::Vec3::new(x, y, z).normalize();
+            let reference = octahedral_encode::eval(n);
+            let ported = port::octahedral_encode(vec3(n.x, n.y, n.z));
+            close(reference.x, ported.0, "octahedral_encode.x");
+            close(reference.y, ported.1, "octahedral_encode.y");
+        }
+        // The g-buffer decode is the inverse the lighting pass runs, so it
+        // has to agree on the *packed* value the encoder produces, including
+        // the folded lower hemisphere.
+        for (u, v) in [(0.0, 0.0), (0.35, -0.62), (-0.9, 0.12), (0.5, 0.5)] {
+            close3(
+                crate::shaders::octahedral_decode_rust(glam::Vec2::new(u, v)),
+                port::octahedral_decode((u, v)),
+                "octahedral_decode",
+            );
+        }
     }
 }

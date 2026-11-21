@@ -1,13 +1,14 @@
 //! Sampled glTF material textures feeding the forward-PBR evaluator.
 //!
 //! The upload side ([`crate::textures`]) owns images, formats and CPU
-//! mirrors; this module owns the shader side: three pure `#[wgsl_fn]`
-//! combinators (one per [`crate::textures::TextureRole`]) plus a dedicated
-//! forward-fragment entry (`fs_main_textured`) that samples the bound
-//! textures with the material UV (`input.uv`) and folds the texels into
-//! the scalar factors before the shared layer evaluators run.
+//! mirrors; this module owns the shader side: a dedicated forward-fragment
+//! entry (`fs_main_textured`, translated from `ornis-gpu-pbr`) that samples
+//! the bound textures with the material UV (`input.uv`) and folds the texels
+//! into the scalar factors before the shared layer evaluators run, plus the
+//! CPU twins of those three combines so the arithmetic is pinned without an
+//! adapter.
 //!
-//! The legacy forward entry ([`crate::shaders::pbr_generated::fs_main`])
+//! The untextured forward entry ([`crate::shaders::pbr_generated::FS_ENTRY`])
 //! is untouched: textured materials are a new path (new resource table,
 //! new pipeline built by
 //! [`Renderer3D::ensure_textured_forward`](crate::renderer::Renderer3D::ensure_textured_forward)),
@@ -15,8 +16,8 @@
 //! deferred-lighting pass takes no bindings here on purpose: the g-buffer
 //! carries no material UV (only screen UV plus ids), so sampling
 //! per-material textures there would need a new MRT and break the
-//! pixel-parity gate — the combinators below are ready for it once UV
-//! storage lands.
+//! pixel-parity gate — the same combines are ready for it once UV storage
+//! lands.
 //!
 //! sRGB/linear contract (mirrors [`crate::textures`]): color roles arrive
 //! as `Rgba8UnormSrgb`, so the hardware already decoded the sample to
@@ -26,53 +27,15 @@
 //! only modulates the metallic factor. Unbound slots sample a 1x1 white
 //! fallback (`x * 1.0 == x`, IEEE-exact), which is the legacy no-op.
 
-use super::interface::GbufferFragmentInput as FragmentInput;
-use super::{
-    ComparisonSampler, DepthTextureArray, DepthTextureCubeArray, OPENPBR_WGSL_NAME, Resource,
-    ResourceKind, Sampler, ShaderModule, Texture2d, TextureCube, helpers, openpbr_material_decl,
-    wgsl_decl,
-};
+use super::{OPENPBR_WGSL_NAME, Resource, ResourceKind};
 use crate::renderer::{
-    CameraUniform, ClusterParams, ClusterSpan, CsmBlock, CsmVp, GpuLight, LightingUniform,
-    PerObjectGpu,
+    CameraUniform, ClusterParams, ClusterSpan, GpuLight, LightingUniform, PerObjectGpu,
 };
-use crate::shaders::math;
-use ornis_core::material::OpenPBRMaterial;
-use ornis_macros::stage;
-
-/// Folds a sampled albedo/emissive texel (linear RGB) into a scalar color.
-///
-/// `map_rgb` is the `.rgb` swizzle of a `textureSample` of a color-role
-/// texture (hardware sRGB-decoded, so linear); the multiply stays in
-/// linear light. White is the exact no-op.
-#[ornis_macros::wgsl_fn]
-fn apply_base_color_map(base_color: glam::Vec3, map_rgb: glam::Vec3) -> glam::Vec3 {
-    return base_color * map_rgb;
-}
-
-/// Folds a sampled metallic-roughness texel into the scalar factors.
-///
-/// `map_gb` is the `.gb` swizzle of a `textureSample` of the data-role
-/// texture (linear, never sRGB-decoded): green scales roughness, blue
-/// scales metallic (the glTF factor-times-texel rule). `(1, 1)` is the
-/// exact no-op. The scalar `is_metallic` switch is untouched.
-#[ornis_macros::wgsl_fn]
-fn apply_metallic_roughness_map(roughness: f32, metallic: f32, map_gb: glam::Vec2) -> glam::Vec2 {
-    return glam::Vec2::new(roughness * map_gb.x, metallic * map_gb.y);
-}
-
-/// Folds a sampled emissive texel (linear RGB) into the emission color.
-///
-/// Same linear-multiply shape as [`apply_base_color_map`]; luminance stays
-/// scalar. White is the exact no-op.
-#[ornis_macros::wgsl_fn]
-fn apply_emissive_map(emission_color: glam::Vec3, map_rgb: glam::Vec3) -> glam::Vec3 {
-    return emission_color * map_rgb;
-}
 
 /// Multiplies a scalar base color by a linear map texel (CPU mirror).
 ///
-/// Pure software twin of [`apply_base_color_map`] over the
+/// Pure software twin of the WGSL `apply_base_color_map` the translated
+/// module carries, over the
 /// [`crate::textures::sample_albedo_linear`] output, so tests pin the
 /// combine without an adapter.
 pub fn apply_base_color_map_cpu(base_color: [f32; 3], map_rgb: [f32; 3]) -> [f32; 3] {
@@ -85,7 +48,7 @@ pub fn apply_base_color_map_cpu(base_color: [f32; 3], map_rgb: [f32; 3]) -> [f32
 
 /// Scales roughness/metallic by a linear `(G, B)` texel (CPU mirror).
 ///
-/// Pure software twin of [`apply_metallic_roughness_map`] over the
+/// Pure software twin of the WGSL `apply_metallic_roughness_map`, over the
 /// [`crate::textures::sample_metallic_roughness`] output.
 pub fn apply_metallic_roughness_map_cpu(
     roughness: f32,
@@ -97,7 +60,7 @@ pub fn apply_metallic_roughness_map_cpu(
 
 /// Multiplies an emission color by a linear map texel (CPU mirror).
 ///
-/// Pure software twin of [`apply_emissive_map`].
+/// Pure software twin of the WGSL `apply_emissive_map`.
 pub fn apply_emissive_map_cpu(emission_color: [f32; 3], map_rgb: [f32; 3]) -> [f32; 3] {
     [
         emission_color[0] * map_rgb[0],
@@ -106,53 +69,10 @@ pub fn apply_emissive_map_cpu(emission_color: [f32; 3], map_rgb: [f32; 3]) -> [f
     ]
 }
 
-/// The three texture-combine sources concatenated (consts excluded).
-///
-/// Spliced only into [`wgsl_source_textured`]; the legacy assemblies never
-/// see these symbols.
-pub fn wgsl_material_texture_helpers() -> String {
-    [
-        apply_base_color_map::wgsl_source(),
-        apply_metallic_roughness_map::wgsl_source(),
-        apply_emissive_map::wgsl_source(),
-    ]
-    .join("\n")
-}
-
-/// Textured-forward resources as a context bundle (`ctx.base_color_tex`, …).
-///
-/// The first seven fields mirror
-/// [`crate::shaders::pbr_generated::PbrContext`] (same names, same kinds);
-/// the last four are the material textures (one shared filtering sampler —
-/// all roles share the upload defaults today, see
-/// [`crate::textures::sampler_descriptor_for_role`]).
-#[allow(dead_code)]
-#[derive(ornis_macros::ShaderContext)]
-pub(crate) struct PbrTexturedContext {
-    pub materials: Vec<OpenPBRMaterial>,
-    pub camera: CameraUniform,
-    pub lighting: LightingUniform,
-    pub shadow_tex: DepthTextureArray,
-    pub shadow_sampler: ComparisonSampler,
-    pub shadow_cube_tex: DepthTextureCubeArray,
-    pub base_color_tex: Texture2d,
-    pub metallic_roughness_tex: Texture2d,
-    pub emissive_tex: Texture2d,
-    pub material_sampler: Sampler,
-    pub prefilter_cube: TextureCube,
-    pub irradiance_cube: TextureCube,
-    pub brdf_lut: Texture2d,
-    pub ibl_sampler: Sampler,
-    pub csm_tex: DepthTextureArray,
-    pub cluster_params: ClusterParams,
-    pub clustered_lights: Vec<GpuLight>,
-    pub cluster_light_indices: Vec<u32>,
-    pub cluster_grid: Vec<ClusterSpan>,
-}
-
-/// Resource layout of the textured-forward pass: the legacy seven rows
-/// verbatim plus one texture row per role, the shared sampler and the
-/// clustered-lighting set (#130). Type names come from the Rust side.
+/// Resource layout of the textured-forward pass: the forward-PBR rows
+/// (same numbers, same types) plus one texture row per sampled role, the
+/// shared sampler and the clustered-lighting set (#130). Type names come
+/// from the Rust side, so shader and bind-group layout cannot drift.
 pub const TEXTURED_PBR_RESOURCES: [Resource; 20] = [
     Resource {
         group: 0,
@@ -214,45 +134,13 @@ pub const TEXTURED_PBR_RESOURCES: [Resource; 20] = [
         group: 0,
         binding: 7,
         visibility: wgpu::ShaderStages::FRAGMENT,
-        name: "base_color_tex",
-        kind: ResourceKind::TextureFloat,
-        min_size: None,
-    },
-    Resource {
-        group: 0,
-        binding: 8,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        name: "metallic_roughness_tex",
-        kind: ResourceKind::TextureFloat,
-        min_size: None,
-    },
-    Resource {
-        group: 0,
-        binding: 9,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        name: "emissive_tex",
-        kind: ResourceKind::TextureFloat,
-        min_size: None,
-    },
-    Resource {
-        group: 0,
-        binding: 10,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        name: "material_sampler",
-        kind: ResourceKind::Sampler,
-        min_size: None,
-    },
-    Resource {
-        group: 0,
-        binding: 11,
-        visibility: wgpu::ShaderStages::FRAGMENT,
         name: "prefilter_cube",
         kind: ResourceKind::TextureCube,
         min_size: None,
     },
     Resource {
         group: 0,
-        binding: 12,
+        binding: 8,
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "irradiance_cube",
         kind: ResourceKind::TextureCube,
@@ -260,7 +148,7 @@ pub const TEXTURED_PBR_RESOURCES: [Resource; 20] = [
     },
     Resource {
         group: 0,
-        binding: 13,
+        binding: 9,
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "brdf_lut",
         kind: ResourceKind::TextureFloat,
@@ -268,7 +156,7 @@ pub const TEXTURED_PBR_RESOURCES: [Resource; 20] = [
     },
     Resource {
         group: 0,
-        binding: 14,
+        binding: 10,
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "ibl_sampler",
         kind: ResourceKind::Sampler,
@@ -276,7 +164,7 @@ pub const TEXTURED_PBR_RESOURCES: [Resource; 20] = [
     },
     Resource {
         group: 0,
-        binding: 15,
+        binding: 11,
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "csm_tex",
         kind: ResourceKind::TextureDepthArray,
@@ -284,7 +172,7 @@ pub const TEXTURED_PBR_RESOURCES: [Resource; 20] = [
     },
     Resource {
         group: 0,
-        binding: 16,
+        binding: 12,
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "cluster_params",
         kind: ResourceKind::Uniform(ClusterParams::WGSL_NAME),
@@ -292,7 +180,7 @@ pub const TEXTURED_PBR_RESOURCES: [Resource; 20] = [
     },
     Resource {
         group: 0,
-        binding: 17,
+        binding: 13,
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "clustered_lights",
         kind: ResourceKind::StorageReadArray(GpuLight::WGSL_NAME),
@@ -300,7 +188,7 @@ pub const TEXTURED_PBR_RESOURCES: [Resource; 20] = [
     },
     Resource {
         group: 0,
-        binding: 18,
+        binding: 14,
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "cluster_light_indices",
         kind: ResourceKind::StorageReadArray("u32"),
@@ -308,421 +196,59 @@ pub const TEXTURED_PBR_RESOURCES: [Resource; 20] = [
     },
     Resource {
         group: 0,
-        binding: 19,
+        binding: 15,
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "cluster_grid",
         kind: ResourceKind::StorageReadArray(ClusterSpan::WGSL_NAME),
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 16,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "base_color_tex",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 17,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "metallic_roughness_tex",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 18,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "emissive_tex",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 19,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "material_sampler",
+        kind: ResourceKind::Sampler,
+        min_size: None,
+    },
 ];
 
-/// Textured forward-PBR fragment entry, translated by
-/// [`stage`](ornis_macros::stage): the legacy evaluation with the three
-/// role samples folded in up front (material UV, factor-times-texel).
-/// DSL-only — globals declared via the [`PbrTexturedContext`] bundle.
-#[stage(fragment)]
-fn fs_main_textured(
-    input: FragmentInput,
-    ctx: Context<PbrTexturedContext>,
-) -> super::Location<0, glam::Vec4> {
-    let mat = ctx.materials[input.material_index];
-    let n = normalize(input.world_normal);
-    let v = normalize(ctx.camera.camera_pos.xyz - input.world_position);
-    let nov = max(dot(n, v), EPS);
-    let t = normalize(input.world_tangent);
-    let b = cross(n, t);
-    let base_weight = mat.base_params.x;
-    let base_map = textureSample(ctx.base_color_tex, ctx.material_sampler, input.uv);
-    let base_color = apply_base_color_map(mat.base_color.rgb, base_map.rgb);
-    let mr_sample = textureSample(ctx.metallic_roughness_tex, ctx.material_sampler, input.uv);
-    let mr_factors =
-        apply_metallic_roughness_map(mat.specular_params.y, mat.base_params.z, mr_sample.gb);
-    let metalness = mr_factors.y;
-    let diffuse_roughness = mat.base_params.y;
-    let specular_weight = mat.specular_params.x;
-    let specular_roughness = specular_aa_roughness(mr_factors.x, n);
-    let specular_ior = mat.specular_params.z;
-    let specular_anisotropy = mat.specular_params.w;
-    let specular_edge_tint = mat.specular_color.rgb;
-    let transmission_weight = mat.transmission_params.x;
-    let transmission_depth = mat.transmission_params.y;
-    let transmission_dispersion_scale = mat.transmission_params.z;
-    let transmission_dispersion_abbe = mat.transmission_params.w;
-    let transmission_color = mat.transmission_color.rgb;
-    let transmission_scatter = mat.transmission_scatter.rgb;
-    let transmission_scatter_anisotropy = mat.transmission_scatter.a;
-    let subsurface_weight = mat.subsurface_params.x;
-    let subsurface_radius = mat.subsurface_params.y;
-    let subsurface_radius_scale_r = mat.subsurface_params.z;
-    let subsurface_scatter_anisotropy = mat.subsurface_params.w;
-    let subsurface_color = mat.subsurface_color.rgb;
-    let subsurface_radius_scale_g = mat.subsurface_radius_scale_gb.x;
-    let subsurface_radius_scale_b = mat.subsurface_radius_scale_gb.y;
-    let fuzz_weight = mat.fuzz_params.x;
-    let fuzz_roughness = mat.fuzz_params.y;
-    let fuzz_color = mat.fuzz_color.rgb;
-    let coat_weight = mat.coat_params.x;
-    let coat_roughness = mat.coat_params.y;
-    let coat_anisotropy = mat.coat_params.z;
-    let coat_darkening = mat.coat_params.w;
-    let coat_color = mat.coat_color.rgb;
-    let coat_ior = mat.coat_ior.x;
-    let thin_film_weight = mat.thin_film_params.x;
-    let thin_film_thickness_um = mat.thin_film_params.y;
-    let thin_film_ior = mat.thin_film_params.z;
-    let emission_luminance = mat.emission_params.x;
-    let emissive_map = textureSample(ctx.emissive_tex, ctx.material_sampler, input.uv);
-    let emission_color = apply_emissive_map(mat.emission_color.rgb, emissive_map.rgb);
-    let opacity = mat.geometry_params.x;
-    let thin_walled = mat.geometry_params.y;
-    let mut lo = Vec3::new(0.0, 0.0, 0.0);
-    let thin_film_mod = thin_film_weight_mix(
-        thin_film_weight,
-        thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0),
-    );
-    let coat_darken = evaluate_coat_darkening(
-        coat_weight,
-        coat_darkening,
-        coat_ior,
-        metalness,
-        base_color,
-        base_weight,
-        specular_weight,
-        subsurface_weight,
-        subsurface_color,
-    );
-    // Clustered window (#130): head slots read the uniform-window records
-    // from the cluster light storage (byte-identical to
-    // `lighting.lights`), cluster slots index this pixel's cluster
-    // list. `span.y` is zero while clustering is off, so the window is
-    // exactly the legacy `light_count` loop.
-    let span = cluster_light_span(input.world_position);
-    let total = ctx.lighting.light_count + span.y;
-    for k in 0u..total {
-        let mut light = ctx.clustered_lights[k];
-        if k >= ctx.lighting.light_count {
-            light = ctx.clustered_lights
-                [ctx.cluster_light_indices[span.x + (k - ctx.lighting.light_count)]];
-        }
-        let kind = light.kind.x;
-        // Point/spot: vector from the surface to the light + range cutoff.
-        // Directionals keep the legacy infinite-light path (pixel-identical).
-        let to_light = light.position.xyz - input.world_position;
-        let dist = length(to_light);
-        let l_point = to_light / max(dist, EPS);
-        let use_point = step(POINT_OR_SPOT_KIND_EDGE, kind);
-        let l_dir = normalize(mix(normalize(light.direction.xyz), l_point, use_point));
-        // smoothstep(edge0 == edge1) is undefined in WGSL — widen the
-        // cutoff edge by 1%: coshaped but defined on every driver.
-        let edge0 = light.params.x * RANGE_CUTOFF_INNER_FRACTION;
-        let range_cut = mix(
-            1.0,
-            1.0 - smoothstep(edge0, light.params.x, dist),
-            use_point,
-        );
-        let l = l_dir;
-        let h = normalize(v + l + Vec3::new(0.0, 0.0, EPS));
-        let light_color = light.color.rgb;
-        let intensity = light.color.w;
-        // Spot cone (kind == 2): full inside inner, soft edge to outer.
-        let cos_theta = dot(
-            normalize(light.direction.xyz),
-            normalize(input.world_position - light.position.xyz),
-        );
-        let cone = mix(
-            1.0,
-            smoothstep(light.params.z, light.params.y, cos_theta),
-            step(SPOT_KIND_EDGE, kind),
-        );
-        let attenuation = mix(1.0, 1.0 / max(dist * dist, EPS), use_point);
-        let mut radiance = light_color * intensity * attenuation * range_cut * cone;
-        // Point lights (kind == 1) sample the cube pool; dir/spot use
-        // the 2D layers. `params.w` indexes the active pool.
-        let is_point = step(POINT_OR_SPOT_KIND_EDGE, kind) * (1.0 - step(SPOT_KIND_EDGE, kind));
-        // CSM directional path (#121): `params.x` carries the cascade
-        // count and the cascades ride in `lighting.csm` (pool `csm_tex`).
-        let is_csm =
-            (1.0 - step(POINT_OR_SPOT_KIND_EDGE, kind)) * step(CSM_ACTIVE_EDGE, light.params.x);
-        if is_csm > LIGHT_SELECTOR_SPLIT {
-            let vis = csm_visibility(
-                input.world_position,
-                ctx.camera.camera_pos.xyz,
-                ctx.lighting.csm,
-                ctx.csm_tex,
-                ctx.shadow_sampler,
-            );
-            radiance = radiance * vis;
-        }
-        // Shadow: project into the light's clip space and compare
-        // against its map layer (hardware 2x2 PCF via the comparison
-        // sampler). Unshadowed lights keep `params.w = -1.0` and skip
-        // the lookup; single-mip depth needs no LOD, so the branch is
-        // safe in non-uniform control flow.
-        if light.params.w >= 0.0 {
-            if is_point <= LIGHT_SELECTOR_SPLIT {
-                let shadow_clip = light.shadow_vp
-                    * Vec4::new(
-                        input.world_position.x,
-                        input.world_position.y,
-                        input.world_position.z,
-                        1.0,
-                    );
-                let shadow_ndc = shadow_clip.xyz / shadow_clip.w;
-                // V is mirrored: rasterization puts NDC y+1 at texture
-                // row 0 while `shadow_uv` v=0 reads from the top, so an
-                // unmirrored lookup samples the mirrored texel (shadows
-                // land overturned — darkness tests are blind to it).
-                let shadow_uv = Vec2::new(
-                    shadow_ndc.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
-                    NDC_TO_UV_HALF - shadow_ndc.y * NDC_TO_UV_HALF,
-                );
-                radiance = radiance
-                    * textureSampleCompare(
-                        ctx.shadow_tex,
-                        ctx.shadow_sampler,
-                        shadow_uv,
-                        i32(light.params.w),
-                        shadow_ndc.z - SHADOW_REF_BIAS,
-                    );
-            }
-            if is_point > LIGHT_SELECTOR_SPLIT {
-                // Cube sample: the hardware picks the face from the
-                // fragment→light vector's major axis; the reference is
-                // the 90°-perspective depth for that axis
-                // (`SHADOW_CUBE_NEAR`, far = light range — the same
-                // formula the face renders use, so no VP uniform).
-                let to_frag = input.world_position - light.position.xyz;
-                let major = max(max(abs(to_frag.x), abs(to_frag.y)), abs(to_frag.z));
-                let far = max(light.params.x, 1.0);
-                let denom = far - SHADOW_CUBE_NEAR;
-                let cube_ref =
-                    (far / denom) - (SHADOW_CUBE_NEAR * far) / (denom * major) - SHADOW_REF_BIAS;
-                radiance = radiance
-                    * textureSampleCompare(
-                        ctx.shadow_cube_tex,
-                        ctx.shadow_sampler,
-                        to_frag,
-                        i32(light.params.w),
-                        cube_ref,
-                    );
-            }
-        }
-        let nol = max(dot(n, l), EPS);
-        let noh = max(dot(n, h), EPS);
-        let voh = max(dot(v, h), EPS);
-        if nol <= EPS {
-            continue;
-        }
-        let base_bsdf = evaluate_base_layer(
-            n,
-            v,
-            l,
-            h,
-            nov,
-            nol,
-            noh,
-            voh,
-            mat,
-            base_weight,
-            base_color,
-            metalness,
-            diffuse_roughness,
-            specular_weight,
-            specular_roughness,
-            specular_ior,
-            specular_anisotropy,
-            specular_edge_tint,
-            t,
-            b,
-            thin_film_mod,
-        ) * coat_darken;
-        let coat_bsdf = evaluate_coat_layer(
-            n,
-            v,
-            l,
-            h,
-            nov,
-            nol,
-            noh,
-            voh,
-            mat,
-            coat_weight,
-            coat_roughness,
-            coat_anisotropy,
-            coat_darkening,
-            coat_ior,
-            coat_color,
-            metalness,
-            base_color,
-            base_weight,
-            specular_weight,
-            subsurface_weight,
-            subsurface_color,
-            t,
-            b,
-        );
-        let fuzz_bsdf = evaluate_fuzz_layer(
-            n,
-            v,
-            l,
-            h,
-            nov,
-            nol,
-            noh,
-            voh,
-            fuzz_weight,
-            fuzz_roughness,
-            fuzz_color,
-        );
-        let trans_bsdf = evaluate_transmission_layer(
-            n,
-            v,
-            l,
-            h,
-            nov,
-            nol,
-            noh,
-            voh,
-            mat,
-            transmission_weight,
-            transmission_depth,
-            transmission_dispersion_scale,
-            transmission_dispersion_abbe,
-            transmission_color,
-            transmission_scatter,
-            transmission_scatter_anisotropy,
-            specular_ior,
-            specular_roughness,
-            specular_anisotropy,
-            thin_walled,
-        );
-        let ss_bsdf = evaluate_subsurface_layer(
-            n,
-            v,
-            l,
-            nov,
-            nol,
-            subsurface_weight,
-            subsurface_radius,
-            subsurface_radius_scale_r,
-            subsurface_radius_scale_g,
-            subsurface_radius_scale_b,
-            subsurface_scatter_anisotropy,
-            subsurface_color,
-        );
-        let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;
-        lo = lo + layer_bsdf * radiance * nol;
-    }
-    let ambient =
-        ctx.lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
-    let emission = evaluate_emission(
-        emission_luminance,
-        emission_color,
-        coat_weight,
-        coat_color,
-        nov,
-    );
-    let f0_dielectric = fresnel0_from_ior(specular_ior);
-    let f0 = mix(
-        Vec3::new(f0_dielectric, f0_dielectric, f0_dielectric),
-        base_color * base_weight,
-        metalness,
-    );
-    let reflect_dir = n * (2.0 * dot(n, v)) - v;
-    let prefiltered = textureSampleLevel(
-        ctx.prefilter_cube,
-        ctx.ibl_sampler,
-        reflect_dir,
-        specular_roughness * ctx.lighting.ibl_max_mip,
-    );
-    let irradiance = textureSample(ctx.irradiance_cube, ctx.ibl_sampler, n);
-    let lut = textureSample(
-        ctx.brdf_lut,
-        ctx.ibl_sampler,
-        Vec2::new(nov, specular_roughness),
-    );
-    let ibl = evaluate_ibl(
-        prefiltered.rgb,
-        irradiance.rgb,
-        lut.r,
-        lut.g,
-        f0,
-        base_color * (1.0 - metalness),
-        ctx.lighting.ibl_weight,
-    );
-    // Unlit path (same flag as the untextured forward/deferred
-    // evaluators): textured draws of an unlit-tagged material output the
-    // (map-modulated) emission alone. Unlit sprites carry no textures in
-    // practice, but the select keeps the textured entry consistent by
-    // construction and bit-identical when the flag is off.
-    let full = ambient + lo + emission + ibl;
-    let color = sanitize_hdr(select(
-        full,
-        emission,
-        mat.geometry_params.z >= UNLIT_THRESHOLD,
-    ));
-    return glam::Vec4::new(color, opacity);
-}
-
-/// Group-0 `@binding` indices the textured forward-PBR fragment stage declares.
+/// Textured forward-PBR fragment shader, translated from `ornis-gpu-pbr`.
 ///
-/// Bindings 11–14 are the split-sum IBL set on top of the untextured
-/// forward-PBR indices.
-/// Bindings 16–19 are the clustered-lighting set (#130): params, storage,
-/// index list, grid.
-const TEXTURED_PBR_FRAGMENT_BINDINGS: &[u32] = &[
-    0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-];
-
-/// Textured forward-PBR fragment shader: the legacy evaluation plus the
-/// three role samples, assembled exactly like
-/// [`crate::shaders::pbr_generated::wgsl_source`] (same kernel set).
-/// Entry point `fs_main_textured` is kept distinct from the legacy
-/// `fs_main` so both pipelines can coexist.
+/// `xtask build-shaders --package ornis-gpu-pbr --entry fs_main_textured`
+/// writes `pbr_textured_generated.wgsl`; the entry is the same light walk as
+/// the untextured one with three role samples folded into the material
+/// factors first. The vertex stage is the g-buffer's (same instance
+/// transform).
 pub fn wgsl_source_textured() -> String {
-    let kernels = [
-        math::luminance::wgsl_source(),
-        math::fresnel0_from_ior::wgsl_source(),
-        math::fresnel_schlick::wgsl_source(),
-        math::fresnel_schlick_vec::wgsl_source(),
-        math::fresnel_f82_tint::wgsl_source(),
-        math::ggx_ndf::wgsl_source(),
-        math::ggx_ndf_aniso::wgsl_source(),
-        math::openpbr_anisotropy::wgsl_source(),
-        math::smith_ggx_correlated::wgsl_source(),
-        math::smith_ggx_aniso::wgsl_source(),
-        math::oren_nayar_brdf::wgsl_source(),
-        math::base_diffuse_energy::wgsl_source(),
-        math::thin_film_weight_mix::wgsl_source(),
-        math::coated_emission::wgsl_source(),
-        math::coat_base_darkening::wgsl_source(),
-        math::coat_blend_darkened::wgsl_source(),
-        math::thin_film_modulation::wgsl_source(),
-        math::sheen_brdf::wgsl_source(),
-        math::transmission_color_to_extinction::wgsl_source(),
-        math::subsurface_brdf::wgsl_source(),
-        math::srgb_to_linear::wgsl_source(),
-        math::evaluate_ibl::wgsl_source(),
-    ];
-    let module = ShaderModule::new()
-        .decl(CameraUniform::WGSL_SOURCE)
-        .decl(wgsl_decl(GpuLight::WGSL_SOURCE))
-        .decl(wgsl_decl(CsmVp::WGSL_SOURCE))
-        .decl(wgsl_decl(CsmBlock::WGSL_SOURCE))
-        .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
-        .decl(wgsl_decl(ClusterParams::WGSL_SOURCE))
-        .decl(wgsl_decl(ClusterSpan::WGSL_SOURCE))
-        .decl(openpbr_material_decl())
-        .resources(&TEXTURED_PBR_RESOURCES, TEXTURED_PBR_FRAGMENT_BINDINGS)
-        .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
-        .consts(helpers::wgsl_consts())
-        .consts(math::wgsl_consts())
-        .helper(helpers::wgsl_shared_helpers())
-        .helper(wgsl_material_texture_helpers())
-        .entry(fs_main_textured::wgsl_source())
-        .helpers(kernels);
-    module.emit()
+    include_str!("pbr_textured_generated.wgsl").to_string()
 }
+
+/// Fragment entry point of the translated textured module.
+pub const TEXTURED_FS_ENTRY: &str = "fs_main_textured";
 
 #[cfg(test)]
 mod tests {
@@ -744,29 +270,37 @@ mod tests {
             .unwrap_or_else(|e| panic!("{name} must validate: {e}"));
     }
 
+    /// The three combines are pure multiplies (white is the exact no-op),
+    /// and the translated module inlines them per role binding.
     #[test]
-    fn combinator_sources_keep_signatures() {
-        assert!(
-            apply_base_color_map::wgsl_source()
-                .starts_with("fn apply_base_color_map(base_color: vec3<f32>, map_rgb: vec3<f32>)")
-        );
-        assert!(apply_metallic_roughness_map::wgsl_source().starts_with(
-            "fn apply_metallic_roughness_map(roughness: f32, metallic: f32, map_gb: vec2<f32>)"
-        ));
-        assert!(
-            apply_emissive_map::wgsl_source().starts_with(
-                "fn apply_emissive_map(emission_color: vec3<f32>, map_rgb: vec3<f32>)"
-            )
-        );
-        // DSL spellings must not leak into WGSL.
-        for src in [
-            apply_base_color_map::wgsl_source(),
-            apply_metallic_roughness_map::wgsl_source(),
-            apply_emissive_map::wgsl_source(),
-        ] {
-            assert!(!src.contains("Vec3"), "glam spelling leaked: {src}");
-            assert!(!src.contains("glam"), "glam spelling leaked: {src}");
+    fn sampled_factors_compose_as_plain_multiplies() {
+        let module = wgsl_source_textured();
+        // One sampler for every role: binding 19, the table's only sampler
+        // the material textures may use.
+        for role in ["tex_0_16_", "tex_0_17_", "tex_0_18_"] {
+            assert!(
+                module.contains(&format!(
+                    "textureSample({role}, sampler_0_19_, vec2<f32>(in2_.x, in2_.y))"
+                )),
+                "`{role}` is not sampled with the material sampler at the material UV"
+            );
         }
+        // DSL spellings must not leak into the committed artifact.
+        for leaked in ["Vec3", "glam", "f32_lit"] {
+            assert!(!module.contains(leaked), "`{leaked}` leaked into the WGSL");
+        }
+        assert_eq!(
+            super::apply_base_color_map_cpu([1.0, 1.0, 1.0], [0.5, 0.25, 2.0]),
+            [0.5, 0.25, 2.0]
+        );
+        assert_eq!(
+            super::apply_metallic_roughness_map_cpu(0.5, 0.5, [0.5, 0.25]),
+            [0.25, 0.125]
+        );
+        assert_eq!(
+            super::apply_emissive_map_cpu([1.0, 2.0, 4.0], [0.5, 0.5, 0.5]),
+            [0.5, 1.0, 2.0]
+        );
     }
 
     #[test]
@@ -778,30 +312,35 @@ mod tests {
         assert_valid_wgsl("textured_forward_fragment", &wgsl_source_textured());
     }
 
+    /// The translated entry samples every role, then runs the one shared
+    /// light walk. SSA locals are not readable, so the shape is pinned
+    /// structurally; the pixel gate lives in `pbr_parity`.
     #[test]
     fn textured_entry_samples_all_roles_before_lighting() {
-        let entry = fs_main_textured::wgsl_source();
-        assert!(entry.starts_with("@fragment\nfn fs_main_textured(input: FragmentInput)"));
-        assert!(entry.contains("-> @location(0) vec4<f32>"));
-        assert!(entry.contains("let mat = materials[input.material_index];"));
-        // One sample per role, folded before the light loop.
-        assert!(entry.contains("textureSample(base_color_tex, material_sampler, input.uv)"));
+        let module = wgsl_source_textured();
+        let start = module
+            .find(&format!("fn {TEXTURED_FS_ENTRY}("))
+            .expect("entry");
         assert!(
-            entry.contains("textureSample(metallic_roughness_tex, material_sampler, input.uv)")
+            module[..start].trim_end().ends_with("@fragment"),
+            "entry lost its @fragment attribute"
         );
-        assert!(entry.contains("textureSample(emissive_tex, material_sampler, input.uv)"));
-        assert!(entry.contains("apply_base_color_map(mat.base_color.rgb, base_map.rgb)"));
-        assert!(entry.contains("apply_emissive_map(mat.emission_color.rgb, emissive_map.rgb)"));
-        // Shared evaluation shape is unchanged past the prelude: the
-        // unified window loop with the cluster tail (#130).
-        assert!(entry.contains("for (var k: u32 = 0; k < total; k = k + 1)"));
-        assert!(entry.contains("cluster_light_indices[span.x + (k - lighting.light_count)]"));
-        assert!(entry.contains("continue;"));
-        assert!(entry.contains("let base_bsdf = evaluate_base_layer("));
-        assert!(entry.contains(
-            "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
-        ));
-        assert!(entry.contains("return vec4<f32>(color, opacity);"));
+        let entry = &module[start..];
+        assert!(entry.contains("-> @location(0) vec4<f32>"));
+        // One sample per role, all through the shared material sampler, and
+        // all before the light loop starts.
+        let loop_at = entry.find("loop {").expect("light walk");
+        for role in ["tex_0_16_", "tex_0_17_", "tex_0_18_"] {
+            let at = entry
+                .find(role)
+                .unwrap_or_else(|| panic!("role `{role}` is never sampled"));
+            assert!(at < loop_at, "`{role}` is sampled after the light walk");
+        }
+        assert_eq!(
+            entry.matches("loop {").count(),
+            1,
+            "one light walk expected"
+        );
     }
 
     /// Every table row's declaration appears in the assembled fragment, and
@@ -809,14 +348,25 @@ mod tests {
     /// first seven rows mirror the legacy table one-to-one.
     #[test]
     fn textured_resources_cover_stages_and_layout() {
-        use super::super::{bgl_entry, resource_decl};
+        use super::super::{bgl_entry, declared_bindings};
         use crate::shaders::pbr_generated::{PBR_RESOURCES, wgsl_vertex_source};
         // Vertex-only rows (per_objects) live in the shared vertex stage,
-        // like the legacy table — cover both assemblies together.
-        let src = wgsl_vertex_source() + &wgsl_source_textured();
+        // like the legacy table — cover both assemblies together. The vertex
+        // stage is the translated g-buffer kernel, so its bindings come from
+        // the parsed module rather than from a `resource_decl` line.
+        let vertex = naga::front::wgsl::parse_str(&wgsl_vertex_source()).expect("vertex");
+        let fragment = naga::front::wgsl::parse_str(&wgsl_source_textured()).expect("fragment");
+        let mut bindings = declared_bindings(&vertex);
+        bindings.extend(declared_bindings(&fragment));
         assert_eq!(TEXTURED_PBR_RESOURCES.len(), 20);
         for (i, r) in TEXTURED_PBR_RESOURCES.iter().enumerate() {
-            assert!(src.contains(&resource_decl(r)), "missing {}", r.name);
+            assert!(
+                bindings.contains(&(r.group, r.binding)),
+                "missing {} at {}:{}",
+                r.name,
+                r.group,
+                r.binding
+            );
             let e = bgl_entry(r, false);
             assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
             // The original seven rows stay aligned with the untextured

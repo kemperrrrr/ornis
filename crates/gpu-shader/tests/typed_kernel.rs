@@ -104,6 +104,9 @@ fn record_publishes_the_type_tags_not_a_hand_written_list() {
 }
 
 /// The metadata record the entry attribute emitted for [`typed_kernel`].
+///
+/// The static's name carries the entry, which is what lets one crate publish a
+/// vertex and a fragment record side by side.
 fn typed_record() -> &'static str {
-    std::str::from_utf8(&ORNIS_GPU_SHADER_META[..]).expect("the record is ASCII")
+    std::str::from_utf8(&ORNIS_GPU_SHADER_META_TYPED_KERNEL[..]).expect("the record is ASCII")
 }

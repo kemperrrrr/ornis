@@ -45,8 +45,34 @@ pub const TYPE_TAG_VEC4: u8 = 6;
 /// Wire tag for a field that is another uniform struct. The next tag byte is
 /// that struct's id (one decimal digit).
 pub const TYPE_TAG_STRUCT: u8 = 7;
+/// Wire tag for a field that is a fixed-size array of a uniform element.
+///
+/// The tag is followed by the element's tag (itself one byte, or `7` and the
+/// struct id for an array of structs) and then by the length, one decimal
+/// digit — so `array<Light, 8>` of uniform struct 3 is `8`, `7`, `3`, `8`.
+///
+/// The parsed form is the same three bytes, with the element's nested-struct
+/// tag folded into [`TYPE_TAG_NESTED`] + id, so a field occupies
+/// `[TYPE_TAG_ARRAY]` plus its payload rather than one byte; every walk over a
+/// tag list goes through a cursor for that reason.
+pub const TYPE_TAG_ARRAY: u8 = 8;
 /// Parsed form of a nested-struct field: [`TYPE_TAG_NESTED`] + the struct id.
 pub const TYPE_TAG_NESTED: u8 = 16;
+
+/// Layout of `array<element, len>` in the uniform address space.
+///
+/// WGSL gives the array the element's alignment and the element stride rounded
+/// up to the uniform alignment, so the last element contributes its own size
+/// and not a full stride.
+#[must_use]
+pub const fn array_layout(element: FieldLayout, len: u32) -> FieldLayout {
+    assert!(len > 0, "a uniform array has at least one element");
+    let stride = uniform_stride(element.size, element.align);
+    FieldLayout {
+        size: (len - 1) * stride + element.size,
+        align: element.align,
+    }
+}
 
 /// One struct field's size and alignment, in bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,3 +429,53 @@ const _: () = {
     assert!(core::mem::align_of::<GpuVec4>() == F32_ALIGN as usize);
     assert!(VEC4_ALIGN.is_multiple_of(F32_ALIGN));
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One element of a uniform array of four-`vec4` structs (a matrix record).
+    const MATRIX: FieldLayout = FieldLayout {
+        size: 64,
+        align: 16,
+    };
+
+    #[test]
+    fn a_uniform_array_leaves_the_last_element_unpadded() {
+        // Stride is the element size rounded up to the uniform alignment, so
+        // four 64-byte elements span `3 * 64 + 64`, not `4 * 64`.
+        let array = array_layout(MATRIX, 4);
+        assert_eq!(array.size, 4 * 64);
+        assert_eq!(array.align, 16);
+    }
+
+    #[test]
+    fn a_uniform_array_rounds_its_stride_up_to_16() {
+        // A `vec2` element is 8 bytes: the stride is 16, so four of them span
+        // `3 * 16 + 8`.
+        let pair = FieldLayout { size: 8, align: 8 };
+        let array = array_layout(pair, 4);
+        assert_eq!(array.size, 3 * 16 + 8);
+        assert_eq!(array.align, 8);
+    }
+
+    #[test]
+    fn a_uniform_array_placed_after_a_scalar_starts_on_its_alignment() {
+        let fields = [
+            FieldLayout { size: 4, align: 4 },
+            array_layout(pair_layout(), 2),
+            FieldLayout { size: 4, align: 4 },
+        ];
+        let mut offsets = [0u32; 3];
+        let span = place_fields(&fields, true, &mut offsets);
+        // The `f32` sits at 0, the array aligns to 8, the trailing `f32`
+        // follows the array's own size: `8 + (16 + 8) = 32`.
+        assert_eq!(offsets, [0, 8, 32]);
+        assert_eq!(span, 48);
+    }
+
+    /// `vec2<f32>`: eight bytes, aligned to eight.
+    const fn pair_layout() -> FieldLayout {
+        FieldLayout { size: 8, align: 8 }
+    }
+}

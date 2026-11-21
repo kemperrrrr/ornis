@@ -485,8 +485,39 @@ naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gp
 зовёт `ornis_gpu` по имени: единственный `unsafe extern` живёт в
 приватном `abi` SDK, а методы с `#[inline(always)]` инлайнятся в него.
 `ornis-gpu-histogram`, `ornis-gpu-adapt` и `ornis-gpu-gtao` собраны так.
+
+**Хост-сборка SDK считает, а не паникует.** Скалярная математика
+`ornis-gpu-shader` вне `wasm32` считает через `libm` (раньше — `panic!`),
+поэтому шейдерный крейт — исполняемая эталонная реализация: математику
+OpenPBR считает и CPU, и GPU из одного кода. Приёмка порта — численное
+сравнение с эталоном (`openpbr_math_parity` в `crates/render/src/shaders/math.rs`):
+совпадение по каждому лейну в пределах `2e-5`, то есть расхождение только в
+последнем ulp между `std` и `libm`. Побочный эффект, который стоит помнить:
+раз дубликаты (`DRY`) между эталоном и портом — суть приёмки, такие места
+помечены `// qual:allow(dry, fragment)` с причиной, а не слиты в один код.
+
+**Математика OpenPBR — отдельный крейт.** `crates/gpu-openpbr` держит
+`math::brdf` (Френель, GGX/видимость, Орен–Найяр, sheen), `math::color`
+(яркость, ACES, sRGB, октаэдры, split-sum IBL) и `math::layers` (coat, тонкая
+плёнка, трансмиссия, subsurface, эмиссия). Функции говорят лейнами `Vec3`, а
+покомпонентные операции (`mul3`, `lerp3`, `max3`) расписаны скалярно: транслятор
+читает LLVM IR, где перегрузка оператора над структурой — агрегат, а не три
+`f32`-операции. Порядок-чувствительные операции (`dot3`, `length3`,
+`cross_lane`, `normalize_lane`) идут через SDK.
 Тест `shader_kernels_do_not_declare_extern_imports` не даёт вернуть
 ручной импорт в эти три крейта.
+
+Слои поверх математики — `crates/gpu-openpbr/src/layers`: `base.rs`
+(диелектрик/металл, палитура, фаззи, экранные члены — specular AA, санитайзер
+HDR, отладочные виды) и `transmission.rs` (BTDF, подповерхность, эмиссия). Это
+те же тела, что в `render::shaders::helpers`, но собранные как Rust: и
+forward-PBR, и отложенное освещение вызывают их как обычные функции, и
+компилятор инлайнит их в один IR. Параметр `mat: OpenPBRMaterial` не перенесён —
+эталон передаёт всю запись материала и никогда её не читает. Численных врат у
+слоёв нет по построению (эталонные тела DSL-only и на CPU не компилируются),
+поэтому приёмка — пиксельный паритет прохода, а инварианты
+(`нулевой вес — нулевой вклад`, `без палитуры база не темнеет`) держат восемь
+тестов в `layers/tests.rs`.
 
 **Маппинг идей rust-gpu на stable:**
 
@@ -494,14 +525,17 @@ naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gp
 |---|---|
 | `#[spirv(compute(threads(N)))]` | `#[gpu_entry(compute(threads(N)))]`, `threads(X, Y)` и `threads(X, Y, Z)`; кернел — обычная безопасная `pub fn`, без `extern "C"` и `no_mangle` |
 | `#[spirv(fragment)]` | `#[gpu_entry(fragment)]`; entry — имя функции (`fs_main`) |
+| `#[spirv(vertex)]` | `#[gpu_entry(vertex)]`; entry — имя функции (`vs_main`); всегда возвращает struct с `@builtin(position)` |
 | `#[spirv(global_invocation_id)]` | первый `u32` параметр entry (`global_invocation_id.x`) |
 | `#[spirv(global_invocation_id)]` newtype | ещё нет; нужен для entry, читающих несколько builtins |
 | `#[spirv(storage_buffer, descriptor_set, binding)]` | `#[gpu(storage_buffer, group = G, binding = B, read_only)] Storage<T>`; `group`/`binding` живут в атрибуте, а макрос вписывает их в тип |
 | `#[spirv(uniform, descriptor_set, binding)]` | `#[gpu(uniform, group = G, binding = B)] Uniform<S: GpuStruct>` |
 | `spirv-std` resource methods | `Storage::load/store/len/is_empty`, `Uniform::field_f32/field_u32/vec4_lane/plane_distance`, `Vec3::dot/length` |
 | теги uniform-структур (руками) | `impl GpuStruct for S { const ID; const FIELD_TAGS }` — макрос читает их из типа и пишет в метаданные |
-| `spirv-std` math | `log2`, `exp2`, `abs`, `sign`, `clamp`, `mix`, `fract`, `sin`/`cos`/`acos`, `dot3`, `length3`, `cross_lane`, `normalize_lane` |
-| текстура / depth | `#[gpu(texture_2d)] Texture2d`, `#[gpu(depth_texture_2d)] DepthTexture2d`: `load` на mip 0, `width`/`height` |
+| `spirv-std` math | `log2`, `exp2`, `sqrt`, `abs`, `sign`, `clamp`, `mix`, `fract`, `sin`/`cos`/`acos`, `pow`, `smoothstep`, `atan2`, `dot3`, `length3`, `cross_lane`, `normalize_lane` |
+| `#[spirv(vertex_index)]`, `#[spirv(instance_index)]` | `vertex_index()`, `instance_index()` — импорты, а не параметры entry: скомпилированная сигнатура остаётся `vs_main()` |
+| `#[spirv(location = N)]` входы/выходы | `vertex_input_lane::<LOC, LANES, LANE>()`, `vertex_store_2::<LOC>`/`vertex_store_4::<LOC>`, `fragment_input_lane::<LOC, LANES, LANE>()`, `fragment_store_at::<LOC>`; тело читает и пишет интерфейс через них, а объявляет его транслятор |
+| текстура / depth / упакованная | `#[gpu(texture_2d)] Texture2d`, `#[gpu(depth_texture_2d)] DepthTexture2d`, `#[gpu(texture_2d_u32)] Texture2dU32`: `load` на mip 0, `width`/`height`; `u32`-текстура отдаёт слово лейна 0 |
 | workgroup и барьер | `WorkgroupU32`, `WorkgroupAtomicU32`, `workgroup_barrier` |
 | builtins | `global_invocation_lane::<AXIS>`, `local_invocation_index`, `fragment_uv::<LANE>`, `fragment_store` |
 | `spirv-builder` / `cargo-gpu` | `xtask build-shaders` (cargo rustc `--emit=llvm-ir` → llvm2gpu → WGSL/SPIR-V; `--check` в CI) |
@@ -530,11 +564,13 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
   (`tests/ui/binding_kind_must_match_type.rs`).
 
 **Формат метаданных.** `#[gpu_entry]` пишет в `#[used]`-глобал
-`ornis_gpu_shader_meta` запись
+`ornis_gpu_shader_meta_<entry>` запись
 `entry=<name>;workgroup=x,y,z[;uniform=<id>:<tags>[,<id>:<tags>]]`;
-`ornis-llvm2gpu::meta` читает её и больше не требует `--workgroup`/`--types`.
-Формат прежней формы (`types=6,6,2`, один список для struct 0) тоже
-читается, чтобы старые артефакты не ломались.
+имя глобала несёт entry, поэтому в одном крейте помещается vertex и
+fragment (пасс собирает их в один модуль), а `ornis-llvm2gpu::meta` читает
+все записи и больше не требует `--workgroup`/`--types`. Прежняя форма без
+суффикса в имени (`ornis_gpu_shader_meta`) и прежний `types=6,6,2` тоже
+читаются, чтобы старые артефакты не ломались.
 
 **Этапы:**
 
@@ -575,8 +611,9 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    Односэмпловый проход берёт этот модуль из
    `gtao_generated.wgsl`; сам кернел — `#[gpu_entry(fragment)]` на SDK.
    Четырёхсэмпловый путь остаётся рукописным.
-7. `texture_load_2d_f32` читает `texture_depth_2d` скаляром, а
-   `texture_load_2d_f32x4` — одну компоненту `texture_2d<f32>` (mip 0).
+7. `texture_load_2d_f32` читает `texture_depth_2d` скаляром,
+   `texture_load_2d_f32x4` — одну компоненту `texture_2d<f32>`, а
+   `texture_load_2d_u32` — слово лейна 0 `texture_2d<u32>` (mip 0).
    Размеры той и другой — `textureDimensions`. `fs_main` пишет
    `fragment_store_f32x4` в `@location(0) vec4<f32>` и читает
    `@builtin(position)`. Compute держит `array<u32, 256>` и
@@ -594,20 +631,137 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    `adapt_generated.wgsl`. Оба кернела и марш GTAO идут через SDK, без
    собственного `extern "C"`.
 
-**Ограничения control flow (на 2026-11-11, после #259).** Всё, что вне
+**Перевод пассов (этап 3).** Composite, HDR composite, fog, bloom, aa_edge, TAA,
+gbuffer, outline и forward-PBR переехали целиком:
+`crates/gpu-composite` — обычный `no_std`-крейт на SDK (`#[gpu_entry(vertex)]`
+рисует квад из двух констант модуля по `vertex_index`,
+`#[gpu_entry(fragment)]` семплирует два слоя, декодирует UI из sRGB и
+смешивает по альфе); `xtask build-shaders --package ornis-gpu-composite
+--entry all` пишет checked-in `crates/render/src/shaders/composite_generated.wgsl`,
+а `crates/render/src/shaders/composite_generated.rs` держит его через
+`include_str!` и таблицу ресурсов. Паритет — `crates/render/tests/
+composite_parity.rs`: переведённый шейдер и DSL-версия (заморожена в
+`tests/data/composite_dsl.wgsl`) рисуются в один таргет с одними текстурами,
+пиксели совпадают (допуск ±1 на округление). Дрейф артефакта ловит
+`quality --ci` (`build-shaders --check`). HDR composite (`crates/gpu-hdr-composite`) добавляет к тому же шаблону
+uniform-поля (`BloomParams`: threshold/intensity/mode/pad, `ExposureParams`),
+`switch` из `if/else if` по mode и ACES в ядре; паритет гоняется по всем трём
+mode (`crates/render/tests/hdr_composite_parity.rs`). Fog (`crates/gpu-fog`) — первый пасс с depth-текстурой и матрицей из
+uniform-полей: `inv_view_proj` читается по колонкам (`vec4_lane` по слоту 4..8),
+восстановление мира — `m · clip` с делением на `w`, дальше `length`/`exp` и та же
+ACES-кривая. 4x-вариант отличается **одной** декларацией (глубина —
+`texture_depth_multisampled_2d`), поэтому у транспорта появился
+`TextureSampling::Listed` и флаг `--multisampled-textures 0:2`; два артефакта
+(`fog_generated.wgsl`, `fog_msaa_generated.wgsl`) проверяются оба.
+Bloom (`crates/gpu-bloom`) — яркостный порог с `smoothstep`-коленом: добавился
+импорт `gpu_smoothstep` (одна инструкция, не разложение в `clamp`-куб).
+aa_edge (`crates/gpu-aa-edge`) — первый пасс, который был написан не на DSL, а
+сырым WGSL: градиент яркости, выбор оси, два тапа и mode-слово (FXAA/SMAA).
+TAA (`crates/gpu-aa-taa`) — самый широкий по входам пасс: цвет, глубина,
+motion, упакованная прошлая глубина (`texture_2d<u32>`, новый
+`Texture2dU32`/`texture_load_2d_u32`, лейн 0 — слово `R16Uint`) и история, плюс
+два выхода (`@location(0)` — показанное, `@location(1)` — история для
+следующего кадра). Окрестностный clamp — индексированные циклы по радиусу с
+`sqrt` (импорт `gpu_sqrt`), YCoCg-кодирование/декодирование, отбраковка истории
+по разрыву глубины и `mix` по feedback. 4x-вариант снова отличается одной
+декларацией (`texture_depth_multisampled_2d`), поэтому у пасса два артефакта и
+паритет гоняется по трём наборам параметров (`crates/render/tests/
+aa_taa_parity.rs`), сравнивая оба цветовых аттачмента.
+Gbuffer (`crates/gpu-gbuffer`) — первый пасс с полноценным вершинным
+интерфейсом: три `vec3`-варшингa (мир-позиция, нормаль, тангент), `vec2` uv,
+flat `u32` индекса материала и `vec4` прошлой позиции, пять float-таргетов плюс
+два целочисленных (id материала и упакованная прошлая глубина). Два вершинных
+entry в одном крейте (`vs_main` по `instance_index` и `vs_main_indirect` по
+списку видимости) — отсюда `is_entry`/`Stage::of` по префиксу имени и имя entry
+в naga вместо канонического `vs_main`. Записи `per_objects`/`materials` читаются
+пословно (`Storage<u32>` + `from_bits`): матрицы — по колонкам, нормаль через
+inverse transpose. Паритет — `crates/render/tests/gbuffer_parity.rs`: оба
+шейдера рисуются с одним инстансом, одним материалом и одной камерой, и
+сравниваются все семь аттачментов. Вершинный модуль отдельным артефактом
+(`--entry vs_main`) отдаётся forward-PBR-пассу: layout пайплайна обязан
+покрывать только биндинги своего entry, поэтому узкий модуль ему достаточно.
+Outline (`crates/gpu-outline`) — второй вершинный пасс и первый, у которого
+стадии собираются **раздельно**: вершинный модуль читает четыре буфера
+(`camera`, `per_objects`, `outline_indices`, `outline_flags`), фрагментному не
+нужен ни один, а `--entry all` сложил бы их в модуль с биндингами, которых у
+фрагментной трубы нет. Поэтому два артефакта (`--entry vs_main` и
+`--entry fs_main`) и оба проверяются `build-shaders --check`. Разворот оболочки
+идёт в объектном пространстве: реплика запекает радиус сущности в масштаб
+модели, так что мировой отступ был бы тонким на крупных объектах. Паритет —
+`crates/render/tests/outline_parity.rs`: обе версии рисуют один треугольник в
+один таргет при всех трёх значениях флага, и гейт отдельно проверяет, что кадр
+не пустой, а цвета `0`/`1` и `2` действительно различаются.
+Forward-PBR (`crates/gpu-pbr`) — самый широкий фрагментный пасс: пятнадцать
+биндингов, включая `texture_depth_2d_array` (spot/CSM атласы),
+`texture_depth_cube_array` (кубы точечных теней), два `texture_cube` IBL и
+`texture_2d` split-sum LUT. Математика слоёв не переписана: пасс вызывает
+`ornis-gpu-openpbr` — тот же порт, что гейтится против эталона численно
+(`openpbr_math_parity`), поэтому здесь остались только то, что делает сам
+проход: таблица биндингов, обход источников (восемь uniform-светильников, затем
+список кластера), три селектора теней и сборка членов. Материал читается
+пословно (`Storage<u32>` + `from_bits`, запись из двадцати `vec4`), uniform-блок
+`Lighting` — по тегам: `array<Light, 8>` между скалярами сдвигает `light_count`
+на байт 1168, а `csm` идёт за ним на 1184. Для этого у поля uniform-структуры
+появился тег массива (`TYPE_TAG_ARRAY`: элемент и длина) и запись вложенных
+структур в метаданных (`GpuStruct::NESTED`) — транслятору нужны поля вложенной
+структуры, а поле называет её только по id. Динамический индекс в такой массив —
+отдельный импорт (`nested_array_vec4_lane`), он опускается в `Access` по
+рантайм-индексу внутри фиксированного uniform-массива: это
+`lighting.csm.vps[cascade].cols[lane]`. Куб-массивы требуют возможности
+`CUBE_ARRAY_TEXTURES` — валидатор просит её только когда модуль объявляет такую
+текстуру. Паритет — `crates/render/tests/pbr_parity.rs`: сцена с направленным
+светом (каскадный путь), точечным (кубический путь), материалом с coat и fuzz,
+твёрдыми IBL-картами и LUT `(1, 0)`; смещение uniform-блоков отдельно
+закреплено против хостовых записей в тесте `pbr_generated`. Второй entry того
+же крейта — `fs_main_textured` (артефакт
+`crates/render/src/shaders/pbr_textured_generated.wgsl`): те же слои, но три
+роли материалов (base color, metallic-roughness, emissive) сэмплируются в
+начале и складываются в факторы до цикла света, а `TEXTURED_PBR_RESOURCES`
+переиспользует номера forward-пасса и добавляет свои (16–18 текстуры, 19 общий
+сэмплер). Второй entry меняет инлайнинг rustc, поэтому помощники с `ptr` в
+подписи помечены `#[inline(always)]`; гейт `translated_textured_pbr_matches_the_dsl_pixels`
+сравнивает кадр с замороженной DSL-версией и отдельно требует, чтобы карты
+меняли картинку.
+Skinned-вершина (`crates/gpu-skinning`) — тот же интерфейс, что у gbuffer, но
+четыре joint-индекса приходят `vec4<u32>` и четыре веса `vec4<f32>`; обе
+палитры (текущая и предыдущая) читаются пословно, блендинг идёт по матрице
+джойнта, нормаль — по её inverse transpose. Для этого у вершинной стадии
+появился целочисленный четырёхлейновый вход: `vertex_input_u32x4::<LOC, LANE>`
+(`@location(4) @interpolate(flat) in4_: vec4<u32>`), потому что `vec4<u32>` —
+один location, а не четыре. Паритет — `crates/render/tests/skinning_parity.rs`:
+оба модуля рисуют один треугольник с ненулевой палитрой (четыре джойнта с
+разными поворотами, ни один вес не единица), неравномерным масштабом объекта и
+флагом `motion_valid` в двух положениях; фрагментная стадия упаковывает
+позицию, нормаль, индекс материала и прошлую позицию в одну цель, чтобы один
+кадр закрывал все варьинги.
+
+Общая обвязка паритетных
+гейтов (генератор изображений, загрузка текстуры, рендер depth-рампы, подсчёт
+расхождений, half-float кодирование) — `crates/render/tests/common/parity.rs`.
+Так же переводятся остальные пассы: крейт-кернел → артефакт → `include_str!` +
+таблица ресурсов → пиксельный гейт против DSL-версии.
+
+**Ограничения control flow (на 2026-11-12, после #267).** Всё, что вне
 подмножества, отвергается при трансляции (`TranslateError::Unsupported` /
 `Parse`), а не транслируется молча неверно.
 
+- Стадия определяется префиксом имени entry (`vs_main_indirect`, `fs_main_msaa`
+  — та же стадия), а имя entry уходит в naga как есть: два entry одной стадии
+  в одном модуле не конфликтуют.
+- `@location` несёт тип, а не только ширину: `vecN<f32>` (N = 2..4), `vec3`
+  занимает 12 байт при выравнивании 16, а скалярный `u32` — flat-варшинг
+  (`@interpolate(flat)`) и целочисленный таргет.
 - Поддерживается: diamond `if`/`else` с `phi`, ранний `return`
-  (`if cond { return; }`), natural `loop` с одним заголовком и одним
-  выходом (`while`, `for` по индексу, `break`/`continue`), вложенные такие
-  циклы, LLVM `select`.
-- `switch` отвергается. rustc строит его из `match` по целому/enum и из
-  цепочки `if / else if`; обход — независимые `if` (как mode гистограммы).
-- Цикл с несколькими выходами и `break 'outer` (выход сразу из двух
-  циклов) отвергаются.
-- Ветка `if` внутри цикла, выходящая через общий merge, пока не
-  поддерживается.
+  (`if cond { return; }`), `switch` (в том числе из `match` по целому:
+  несколько значений на один `case` — одна ветка, `phi` на общем merge
+  получает присваивание на каждое ребро), natural `loop` с одним
+  заголовком и одним выходом (`while`, `for` по индексу,
+  `break`/`continue`), вложенные такие циклы, LLVM `select`.
+  Список `case` может занимать несколько строк — так его печатает rustc.
+- Цикл, у которого выходы ведут в **разные** блоки, и `break 'outer`
+  (выход сразу из двух циклов) отвергаются: один `break` в Naga
+  заканчивает только ближайший `Loop`, а выход из двух сразу требует
+  флага и повторов `break` на каждом уровне.
 - Irreducible CFG отвергается; бесконечный цикл без выхода — тоже
   (`infinite_loop_is_rejected_not_mistranslated`).
 - Барьеры: uniformity условия и числа итераций не доказывается, поэтому
@@ -616,20 +770,59 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
   уровне после сошедшегося diamond разрешён. Алгоритмы с барьером в цикле
   (Hi-Z mip-chain в одном dispatch, prefix-scan, bitonic sort в shared
   memory) пока разносятся на отдельные dispatch по фазам.
-- Не control flow, но рядом: линейная память (`for x in slice`,
-  `getelementptr` по указателю, `phi ptr`) и `unreachable` (паника)
-  отвергаются; `opt-level=3` может развернуть циклы вне подмножества.
+- Память: `alloca`, `getelementptr`, `load`, `store` по 4-байтным словам,
+  `llvm.memset`/`llvm.memcpy` с константным размером. Локальный массив
+  (`let mut a = [..]`, LLVM печатает его как `alloca [N x i8]`) становится
+  локальной `array<u32, N>`, константа модуля (`static QUAD`, LLVM отдаёт её
+  как `[N x i8] c"…"`) — приватным глобалом с теми же байтами; доступ —
+  access chain по номеру слова, `f32` читается и пишется через `bitcast`, так
+  что биты сохраняются точно (и таблицы целых, и таблицы float). Шаг
+  `getelementptr` берётся из типа (4 байта — слово, агрегат — его размер), а
+  `i8`-GEP с константным смещением обязан быть кратен 4. `[0.0; N]`
+  разворачивается в `llvm.memset` и опускается в пословные записи.
+  `unreachable` (путь паники) завершает invocation `return`.
+- Функции крейта: вызов не-entry функции опускается в `naga::Function`
+  (скалярные параметры и результат), поэтому помощнику не нужен
+  `#[inline(always)]`. Порядок — по зависимостям; рекурсия отвергается
+  (шейдер не умеет рекурсию), а тело вне подмножества (например,
+  `rust_begin_unwind` с `ptr`-параметром) пропускается, пока его никто не
+  зовёт; вызов такого помощника — ошибка с причиной и подсказкой
+  (`#[inline(always)]`).
+- Помощник с указателем в подписи (`&T`, `&mut T`, `&[T]`) **встраивается** в
+  место вызова (`src/inline.rs`): WGSL не умеет параметры-указатели. Тело
+  инлайнится с переименованием локальных имён, подстановкой аргументов и
+  общим продолжением на все `ret`, поэтому указатель не пересекает границу
+  функции, а база (локальный массив, константа модуля) известна в вызывающем.
+  `&[T]` с длиной, известной на этапе компиляции, приходит как один указатель
+  (`for x in slice` разворачивается), и такой кернел транслируется.
+- `phi ptr` и `select i1, ptr, ptr` принимаются, пока все входящие указатели
+  идут от одного выделения: база остаётся той же, а значение несёт смещение в
+  словах (обход буфера указателем). Указатель, выбирающий между двумя разными
+  выделениями, отвергается — в Naga нет значения-указателя.
+- `poison`/`undef` в `phi`/`select` становятся нулём ожидаемого типа: LLVM
+  помечает так значения, которые нельзя наблюдать, и шейдеру всё равно, какое
+  из них выбрать.
+- Отвергается: слайс с длиной, известной только в рантайме (fat pointer
+  `{ptr, len}` — нет ни `arrayLength` для локальной памяти, ни указателя на
+  storage в ABI), `ptrtoint`/`inttoptr` и `ptr`-арифметика вне GEP
+  (адрес GPU-буфера не число; сообщение об ошибке это называет),
+  `or disjoint` и прочие флаговые варианты опкодов; `opt-level=3` может
+  развернуть циклы вне подмножества.
 
 **Прочие ограничения:** stable rustc; read-only storage остаётся `var<storage>`,
 а запись в тот же биндинг повышает его до `read_write` (два типа на одном
 биндинге отвергаются; запись в `Storage<_, ReadOnly>` по-прежнему
-запрещена типом);
-`break` сразу из двух циклов отвергается явно, вложенный natural loop
-с одним выходом и вложенное uniform-поле принимаются;
-`switch` отвергается (смешение mode гистограммы записано двумя
-сравнениями); entry — `#[gpu_entry(compute(..))]` и
-`#[gpu_entry(fragment)]`; runtime-материалы
-остаются на staged Shader IR; `wasm2gpu` не возвращается в производство.
+запрещена типом); вложенный natural loop с одним выходом и вложенное
+uniform-поле принимаются; entry — `#[gpu_entry(compute(..))]`,
+`#[gpu_entry(vertex)]` и `#[gpu_entry(fragment)]`; в одном шейдерном крейте
+может быть несколько entry — у каждой свой глобал метаданных
+(`ornis_gpu_shader_meta_<entry>`), и `llvm2gpu` опускает все найденные
+entry в один модуль, поэтому пасс с vs+fs — это один крейт и один WGSL
+(общие биндинги дедуплицируются по `(group, binding)`, а одинаковый id
+uniform-структуры обязан совпадать по тегам); `xtask build-shaders --entry
+all` собирает такой модуль, `--entry <name>` оставляет один entry;
+runtime-материалы остаются на staged Shader IR; `wasm2gpu` не возвращается
+в производство.
 
 ## 3.2 Что взять у Slang (идеи, не зависимость)
 

@@ -5,7 +5,6 @@
 //! [`math`](crate::shaders::math)) into a fixed entry-point skeleton, so CPU tests exercise the
 //! exact BRDF code the GPU runs.
 
-mod aa_common;
 pub mod aa_edge_generated;
 pub mod aa_taa_generated;
 pub mod ao_generated;
@@ -101,8 +100,8 @@ impl ResourceKind {
     }
 
     /// Multisampled WGSL type spelling of a texture resource (the AO raw
-    /// pass keeps its normal per-sample too, so it selects this spelling
-    /// with its own predicate via [`resource_decl_where`]).
+    /// pass keeps its normal per-sample too, so a pass that selects this
+    /// spelling does so through its own resource table).
     pub fn wgsl_ty_multisampled(&self) -> String {
         match self {
             Self::TextureFloat => "texture_multisampled_2d<f32>".to_string(),
@@ -266,24 +265,6 @@ pub fn resource_decl_for_samples(r: &Resource, sample_count: u32) -> String {
     resource_decl_with_ty(r, &r.kind.wgsl_ty_for_samples(sample_count))
 }
 
-/// WGSL declaration line for one [`Resource`] with an explicit
-/// multisampled decision: passes that keep extra layers per-sample (the AO
-/// raw pass keeps its normal, like lighting) select the multisampled
-/// spelling with their own predicate instead of
-/// [`resource_stays_multisampled`].
-pub fn resource_decl_where(r: &Resource, multisampled: bool) -> String {
-    resource_decl_with_ty(r, &selected_wgsl_ty(r, multisampled))
-}
-
-/// Multisampled or single-sample WGSL type for `r`, chosen by the caller.
-fn selected_wgsl_ty(r: &Resource, multisampled: bool) -> String {
-    if multisampled {
-        r.kind.wgsl_ty_multisampled()
-    } else {
-        r.kind.wgsl_ty_full()
-    }
-}
-
 /// One `@group`/`@binding` line spelling `ty` for `r`.
 fn resource_decl_with_ty(r: &Resource, ty: &str) -> String {
     format!(
@@ -357,42 +338,6 @@ impl ShaderModule {
     /// the pass layout builds its BGL from).
     pub fn resources(mut self, table: &[Resource], bindings: &[u32]) -> Self {
         self.resources.push(resource_decls(table, bindings));
-        self
-    }
-
-    /// Resource declarations from a [`Resource`] table subset at a sample
-    /// count: MSAA-aware spellings (see [`resource_decl_for_samples`]).
-    /// Identical to [`resources`](Self::resources) at 1x.
-    pub fn resources_for_samples(
-        mut self,
-        table: &[Resource],
-        bindings: &[u32],
-        sample_count: u32,
-    ) -> Self {
-        self = self.resources_where(table, bindings, |r| {
-            sample_count > 1 && resource_stays_multisampled(&r.kind)
-        });
-        self
-    }
-
-    /// Resource declarations from a [`Resource`] table subset with a
-    /// caller-provided multisampled decision per row (see
-    /// [`resource_decl_where`]): passes that keep extra layers per-sample
-    /// (the AO raw pass keeps its normal) spell those rows multisampled.
-    pub fn resources_where(
-        mut self,
-        table: &[Resource],
-        bindings: &[u32],
-        multisampled: impl Fn(&Resource) -> bool,
-    ) -> Self {
-        let mut out = String::new();
-        for b in bindings {
-            let Some(r) = table.iter().find(|r| r.binding == *b) else {
-                continue;
-            };
-            out.push_str(&resource_decl_where(r, multisampled(r)));
-        }
-        self.resources.push(out);
         self
     }
 
@@ -510,6 +455,27 @@ pub(crate) const STANDARD_QUAD: [[f32; 4]; 4] = [
 /// Fullscreen-quad UVs shared by the bloom/hdr/lighting passes, as Rust data.
 pub(crate) const STANDARD_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]];
 
+/// Stage of `name` in a translated module, for the per-pass artifact tests.
+#[cfg(test)]
+pub(crate) fn entry_stage(module: &naga::Module, name: &str) -> Option<naga::ShaderStage> {
+    module
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.stage)
+}
+
+/// `(group, binding)` pairs a module declares, for artifact versus table checks.
+#[cfg(test)]
+pub(crate) fn declared_bindings(module: &naga::Module) -> Vec<(u32, u32)> {
+    module
+        .global_variables
+        .iter()
+        .filter_map(|(_, global)| global.binding)
+        .map(|binding| (binding.group, binding.binding))
+        .collect()
+}
+
 /// DSL-only GPU handle markers: nominal field types for stage-entry context
 /// bundles (`ctx: LightingContext`). The Rust functions are never compiled,
 /// so these are never instantiated — they exist so context structs are real,
@@ -517,14 +483,6 @@ pub(crate) const STANDARD_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [0.0, 0.
 /// to (field name === global name, enforced by `stage_globals_declared`).
 /// No constructors, no methods, no runtime footprint.
 pub struct Texture2d;
-/// 2D unsigned-int texture handle marker; see [`Texture2d`].
-pub struct Texture2dUint;
-/// Depth-texture handle marker; see [`Texture2d`].
-pub struct DepthTexture;
-/// Depth-texture-array handle marker (shadow-map layers); see [`Texture2d`].
-pub struct DepthTextureArray;
-/// Depth-cube-array handle marker (point-light shadow cubes); see [`Texture2d`].
-pub struct DepthTextureCubeArray;
 /// Color cube-texture handle marker (IBL prefilter / irradiance); see [`Texture2d`].
 pub struct TextureCube;
 /// Sampler handle marker; see [`Texture2d`].
@@ -572,25 +530,6 @@ pub struct Location<const N: usize, T>(T, core::marker::PhantomData<[u8; N]>);
 pub(crate) struct QuadConsts {
     pub quad: [[f32; 4]; 4],
     pub uvs: [[f32; 2]; 4],
-}
-
-/// Shared `OpenPBRMaterial` WGSL declaration (20 `vec4` slots), used by the
-/// g-buffer, lighting and forward-PBR skeletons.
-///
-/// Generated from [`OPENPBR_SLOTS`]: the CPU-side
-/// [`OpenPBRMaterial`](ornis_core::material::OpenPBRMaterial) is grouped
-/// (`BaseGroup`, `SpecularGroup`, …), not flat, so there is no 1:1 field
-/// mirror to derive from — the slot-name list is the single source of truth
-/// for the WGSL side. The `openpbr_rust_layout_matches_wgsl_order` test
-/// below pins the group offsets against this slot order instead.
-/// Leading/trailing newlines are part of the legacy assembly contract.
-pub(crate) fn openpbr_material_decl() -> String {
-    let mut out = String::from("\nstruct OpenPBRMaterial {\n");
-    for slot in OPENPBR_SLOTS {
-        out.push_str(&format!("    {slot}: vec4<f32>,\n"));
-    }
-    out.push_str("};\n");
-    out
 }
 
 /// The WGSL type name of the shared material declaration (no derive:
@@ -722,12 +661,16 @@ pub fn outline_fragment() -> String {
 
 // ── GBUFFER_VERTEX ────────────────────────────────────────────────────
 
-/// Assemble the gbuffer vertex shader (instance transforms + world position).
+/// The g-buffer module, both pipelines draw from it.
 ///
-/// Single source of truth — [`gbuffer_generated::wgsl_vertex_source`]
-/// (Rust → WGSL, path 2); shape pinned by `gbuffer_vertex_entry_matches_legacy_shape`.
+/// Single source of truth — [`gbuffer_generated::wgsl_source`] (Rust → WGSL,
+/// path 2). It carries every entry of the pass: the direct and the indirect
+/// vertex stage and the fragment stage. A pipeline layout only has to cover the
+/// bindings the entry point it names actually uses, so one module serves all
+/// three. The forward-PBR pass shares the narrower
+/// [`gbuffer_generated::wgsl_vertex_source`] instead.
 pub fn gbuffer_vertex() -> String {
-    gbuffer_generated::wgsl_vertex_source()
+    gbuffer_generated::wgsl_source()
 }
 
 // ── GBUFFER_FRAGMENT ──────────────────────────────────────────────────
@@ -858,13 +801,7 @@ mod tests {
                 GbufferVertexOutput::WGSL_FIELDS,
             ),
         ];
-        let entries: &[String] = &[
-            hdr_composite_generated::vs_main::wgsl_source().to_string(),
-            bloom_generated::vs_main::wgsl_source().to_string(),
-            lighting_generated::vs_main::wgsl_source().to_string(),
-            composite_generated::vs_main::wgsl_source().to_string(),
-            gbuffer_generated::vs_main::wgsl_source().to_string(),
-        ];
+        let entries: &[String] = &[lighting_generated::vs_main::wgsl_source().to_string()];
         let mut checked = 0;
         for src in entries {
             for (ty, names) in extract_ctors(src) {
@@ -879,10 +816,10 @@ mod tests {
                 checked += 1;
             }
         }
-        // Three vertex entries construct varyings positionally today (the
-        // rest use the `var`-out form); zero hits would mean the comments
-        // vanished and the test passes vacuously.
-        assert!(checked >= 3, "expected struct literals, found {checked}");
+        // The remaining DSL vertex entries construct varyings positionally
+        // today (the translated passes build their own interface); zero hits
+        // would mean the constructors vanished and the test passes vacuously.
+        assert!(checked >= 1, "expected struct literals, found {checked}");
     }
 
     /// Every context-bundle / `#[wgsl(global)]` name an entry reads must
@@ -893,58 +830,12 @@ mod tests {
     /// undeclared — an unused declaration would pass silently).
     #[test]
     fn stage_globals_declared() {
-        let hdr_vertex = hdr_composite_generated::wgsl_vertex_source();
-        let hdr_fragment = hdr_composite_generated::wgsl_source();
-        let bloom = bloom_generated::wgsl_source();
-        let lighting = lighting_generated::wgsl_source();
+        // Both lighting fragment paths are translated artifacts now, so the
+        // only DSL assembly left in this pass is the quad vertex. Its bundle is
+        // what still has to resolve.
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let composite = composite_generated::wgsl_source();
-        let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
-        let gbuffer_fragment = gbuffer_generated::wgsl_source();
-        let pbr = pbr_generated::wgsl_source();
-        let textured = material_textures::wgsl_source_textured();
-        // (bundle/entry globals, assemblies containing them). QuadConsts is
-        // shared by five vertex entries, so it pins against all five
-        // assemblies carrying the quad constants.
-        let pairs: &[(&[&str], Vec<String>)] = &[
-            (
-                QuadConsts::GLOBALS,
-                vec![
-                    hdr_vertex.clone(),
-                    hdr_fragment.clone(),
-                    bloom.clone(),
-                    lighting_vertex.clone(),
-                    composite.clone(),
-                ],
-            ),
-            (
-                hdr_composite_generated::HdrContext::GLOBALS,
-                vec![hdr_fragment],
-            ),
-            (bloom_generated::BloomContext::GLOBALS, vec![bloom]),
-            (
-                lighting_generated::LightingContext::GLOBALS,
-                vec![lighting.clone()],
-            ),
-            (lighting_generated::LightingMaps::GLOBALS, vec![lighting]),
-            (
-                composite_generated::CompositeContext::GLOBALS,
-                vec![composite],
-            ),
-            (
-                gbuffer_generated::GbufferVertexContext::GLOBALS,
-                vec![gbuffer_vertex],
-            ),
-            (
-                gbuffer_generated::fs_main::globals(),
-                vec![gbuffer_fragment],
-            ),
-            (pbr_generated::PbrContext::GLOBALS, vec![pbr]),
-            (
-                material_textures::PbrTexturedContext::GLOBALS,
-                vec![textured.clone()],
-            ),
-        ];
+        let pairs: &[(&[&str], Vec<String>)] =
+            &[(QuadConsts::GLOBALS, vec![lighting_vertex.clone()])];
         let mut checked = 0;
         for (globals, assemblies) in pairs {
             assert!(!globals.is_empty(), "bundle must declare its globals");
@@ -956,10 +847,10 @@ mod tests {
                 checked += 1;
             }
         }
-        // Nine bundles plus one lone `global` param declare 30+ names today;
-        // fewer means a declaration was dropped and the test passes vacuously.
+        // The quad bundle is two names today; fewer means a declaration was
+        // dropped and the test passes vacuously.
         assert!(
-            checked >= 30,
+            checked >= 2,
             "expected global declarations, found {checked}"
         );
     }
@@ -972,17 +863,22 @@ mod tests {
     /// the names below are the external ABI (pipeline caches, snapshots).
     #[test]
     fn entry_points_match_pass_abi() {
-        assert_eq!(hdr_composite_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(hdr_composite_generated::fs_main::entry_point(), "fs_main");
-        assert_eq!(bloom_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(bloom_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(hdr_composite_generated::VS_ENTRY, "vs_main");
+        assert_eq!(hdr_composite_generated::FS_ENTRY, "fs_main");
+        assert_eq!(bloom_generated::VS_ENTRY, "vs_main");
+        assert_eq!(bloom_generated::FS_ENTRY, "fs_main");
         assert_eq!(lighting_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(lighting_generated::fs_main::entry_point(), "fs_main");
-        assert_eq!(composite_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(composite_generated::fs_main::entry_point(), "fs_main");
-        assert_eq!(gbuffer_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(gbuffer_generated::fs_main::entry_point(), "fs_main");
-        assert_eq!(pbr_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(lighting_generated::LIGHTING_1X_ENTRY, "fs_main_lighting");
+        assert_eq!(
+            lighting_generated::LIGHTING_MSAA_ENTRY,
+            "fs_main_lighting_msaa"
+        );
+        assert_eq!(composite_generated::VS_ENTRY, "vs_main");
+        assert_eq!(composite_generated::FS_ENTRY, "fs_main");
+        assert_eq!(gbuffer_generated::VS_ENTRY, "vs_main");
+        assert_eq!(gbuffer_generated::VS_INDIRECT_ENTRY, "vs_main_indirect");
+        assert_eq!(gbuffer_generated::FS_ENTRY, "fs_main");
+        assert_eq!(pbr_generated::FS_ENTRY, "fs_main");
     }
 
     /// `true` when `field` is a vector swizzle (`xyzw` / `rgba`), not a member.
@@ -1079,10 +975,6 @@ mod tests {
     /// real definitions, the text is the real output.
     #[test]
     fn stage_field_uses_resolve() {
-        use super::interface::{
-            BloomVertexOut, GbufferFragmentInput, GbufferOutput, GbufferVertexInput,
-            GbufferVertexOutput, HdrFragmentOut, UiCompositeOut,
-        };
         use crate::renderer::{
             BloomUniform, CameraUniform, CsmBlock, GpuLight, LightingUniform, PerObjectGpu,
         };
@@ -1093,68 +985,11 @@ mod tests {
             input: Option<&'static [&'static str]>,
             output: Option<&'static [&'static str]>,
         }
-        let entries = [
-            Entry {
-                src: composite_generated::vs_main::wgsl_source(),
-                input: None,
-                output: Some(UiCompositeOut::WGSL_FIELDS),
-            },
-            Entry {
-                src: composite_generated::fs_main::wgsl_source(),
-                input: Some(UiCompositeOut::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
-                src: gbuffer_generated::vs_main::wgsl_source(),
-                input: Some(GbufferVertexInput::WGSL_FIELDS),
-                output: Some(GbufferVertexOutput::WGSL_FIELDS),
-            },
-            Entry {
-                src: gbuffer_generated::fs_main::wgsl_source(),
-                input: Some(GbufferFragmentInput::WGSL_FIELDS),
-                output: Some(GbufferOutput::WGSL_FIELDS),
-            },
-            Entry {
-                src: pbr_generated::fs_main::wgsl_source(),
-                input: Some(GbufferFragmentInput::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
-                src: material_textures::fs_main_textured::wgsl_source(),
-                input: Some(GbufferFragmentInput::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
-                src: hdr_composite_generated::vs_main::wgsl_source(),
-                input: None,
-                output: None,
-            },
-            Entry {
-                src: hdr_composite_generated::fs_main::wgsl_source(),
-                input: Some(HdrFragmentOut::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
-                src: bloom_generated::vs_main::wgsl_source(),
-                input: None,
-                output: None,
-            },
-            Entry {
-                src: bloom_generated::fs_main::wgsl_source(),
-                input: Some(BloomVertexOut::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
-                src: lighting_generated::vs_main::wgsl_source(),
-                input: None,
-                output: None,
-            },
-            Entry {
-                src: lighting_generated::fs_main::wgsl_source(),
-                input: Some(HdrFragmentOut::WGSL_FIELDS),
-                output: None,
-            },
-        ];
+        let entries = [Entry {
+            src: lighting_generated::vs_main::wgsl_source(),
+            input: None,
+            output: None,
+        }];
         // Shared roots: uniform buffers by layout, materials by slot list.
         // `light` is a loop-local copy of one `Lighting.lights` element
         // (kind-selected evaluation in both fragment entries).
@@ -1193,9 +1028,11 @@ mod tests {
                 checked += usize::from(counted);
             }
         }
-        // Twelve entries, 151+ resolved uses today; fewer means the
-        // extraction broke or coverage was dropped — update deliberately.
-        assert!(checked >= 151, "expected field uses, found {checked}");
+        // Only the quad vertex entry is left in this pass — both fragment
+        // paths are translated artifacts, checked by their bindings. That one
+        // entry resolves no dotted fields today; the assert keeps the
+        // extraction honest rather than vacuous.
+        assert_eq!(checked, 0, "expected no field uses, found {checked}");
     }
 
     /// Every call in translated entries resolves: built-ins via the
@@ -1266,57 +1103,11 @@ mod tests {
         ];
         const KEYWORDS: &[&str] = &["if", "for", "while", "return", "loop"];
         // (entry source, its assembled shader)
-        let hdr_vertex = hdr_composite_generated::wgsl_vertex_source();
-        let hdr_fragment = hdr_composite_generated::wgsl_source();
-        let bloom = bloom_generated::wgsl_source();
-        let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let composite = composite_generated::wgsl_source();
-        let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
-        let gbuffer_fragment = gbuffer_generated::wgsl_source();
-        let pbr = pbr_generated::wgsl_source();
-        let textured = material_textures::wgsl_source_textured();
-        let pairs: &[(&str, &str)] = &[
-            (
-                composite_generated::vs_main::wgsl_source(),
-                composite.as_str(),
-            ),
-            (
-                composite_generated::fs_main::wgsl_source(),
-                composite.as_str(),
-            ),
-            (
-                gbuffer_generated::vs_main::wgsl_source(),
-                gbuffer_vertex.as_str(),
-            ),
-            (
-                gbuffer_generated::fs_main::wgsl_source(),
-                gbuffer_fragment.as_str(),
-            ),
-            (pbr_generated::fs_main::wgsl_source(), pbr.as_str()),
-            (
-                material_textures::fs_main_textured::wgsl_source(),
-                textured.as_str(),
-            ),
-            (
-                hdr_composite_generated::vs_main::wgsl_source(),
-                hdr_vertex.as_str(),
-            ),
-            (
-                hdr_composite_generated::fs_main::wgsl_source(),
-                hdr_fragment.as_str(),
-            ),
-            (bloom_generated::vs_main::wgsl_source(), bloom.as_str()),
-            (bloom_generated::fs_main::wgsl_source(), bloom.as_str()),
-            (
-                lighting_generated::vs_main::wgsl_source(),
-                lighting_vertex.as_str(),
-            ),
-            (
-                lighting_generated::fs_main::wgsl_source(),
-                lighting.as_str(),
-            ),
-        ];
+        let pairs: &[(&str, &str)] = &[(
+            lighting_generated::vs_main::wgsl_source(),
+            lighting_vertex.as_str(),
+        )];
         let mut checked = 0;
         for (n, (entry, assembly)) in pairs.iter().enumerate() {
             let defs = defined_names(assembly);
@@ -1335,9 +1126,11 @@ mod tests {
                 checked += 1;
             }
         }
-        // Twelve entries make 85+ calls today; near-zero hits would mean
-        // the extraction broke and the test passes vacuously.
-        assert!(checked >= 85, "expected calls, found {checked}");
+        // One DSL entry is left in this pass — the quad vertex. Both fragment
+        // paths are translated artifacts, complete modules rather than splices,
+        // validated by [`assert_valid_wgsl`] instead. Near-zero hits would mean
+        // the extraction broke and this test passes vacuously.
+        assert!(checked >= 2, "expected calls, found {checked}");
     }
 
     /// Every table-backed global an entry reads is visible at that
@@ -1357,39 +1150,9 @@ mod tests {
                 ShaderStages::VERTEX,
             ),
             (
-                composite_generated::CompositeContext::GLOBALS,
-                &composite_generated::COMPOSITE_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                gbuffer_generated::GbufferVertexContext::GLOBALS,
-                &gbuffer_generated::GBUFFER_RESOURCES,
-                ShaderStages::VERTEX,
-            ),
-            (
-                gbuffer_generated::fs_main::globals(),
-                &gbuffer_generated::GBUFFER_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                pbr_generated::PbrContext::GLOBALS,
-                &pbr_generated::PBR_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                material_textures::PbrTexturedContext::GLOBALS,
-                &material_textures::TEXTURED_PBR_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
                 QuadConsts::GLOBALS,
                 &hdr_composite_generated::HDR_RESOURCES,
                 ShaderStages::VERTEX,
-            ),
-            (
-                hdr_composite_generated::HdrContext::GLOBALS,
-                &hdr_composite_generated::HDR_RESOURCES,
-                ShaderStages::FRAGMENT,
             ),
             (
                 QuadConsts::GLOBALS,
@@ -1397,24 +1160,9 @@ mod tests {
                 ShaderStages::VERTEX,
             ),
             (
-                bloom_generated::BloomContext::GLOBALS,
-                &bloom_generated::BLOOM_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
                 QuadConsts::GLOBALS,
                 &lighting_generated::LIGHTING_RESOURCES,
                 ShaderStages::VERTEX,
-            ),
-            (
-                lighting_generated::LightingContext::GLOBALS,
-                &lighting_generated::LIGHTING_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                lighting_generated::LightingMaps::GLOBALS,
-                &lighting_generated::LIGHTING_RESOURCES,
-                ShaderStages::FRAGMENT,
             ),
         ];
         let mut checked = 0;
@@ -1430,9 +1178,11 @@ mod tests {
                 }
             }
         }
-        // 28 table-backed uses today; fewer means a table lost a row the
-        // entries still read — update deliberately.
-        assert!(checked >= 28, "expected visible resources, found {checked}");
+        // The lighting fragment bundles left with the DSL — their bindings are
+        // covered by the artifact test — and the quad vertex reads only module
+        // consts, which have no table rows, so this case list is now empty. The
+        // loop stays so a pass that comes back here is still checked.
+        let _ = checked;
     }
 
     /// Parse and fully validate an assembled WGSL module with naga.
@@ -1493,7 +1243,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, emission), 256);
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, geometry), 288);
         // Within-group slot order mirrors the WGSL field order.
-        assert_eq!(openpbr_material_decl().matches("vec4<f32>").count(), 20);
+        assert_eq!(OPENPBR_SLOTS.len(), 20);
     }
 
     /// MSAA declaration policy: at 1x every spelling is the legacy

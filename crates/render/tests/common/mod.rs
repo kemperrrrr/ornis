@@ -12,6 +12,8 @@
 
 /// CPU GTAO march used to check the ledge gate against `gtao_sample`.
 pub mod gtao_cpu;
+/// Setup shared by the translated-shader pixel-parity gates.
+pub mod parity;
 /// Sized (non-square) render/readback helpers for the 320×180 gates.
 pub mod sized;
 /// Shared world-space reconstruction for AO CPU and parity tests.
@@ -250,19 +252,5 @@ pub fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Tex
         },
     );
     queue.submit(std::iter::once(encoder.finish()));
-    let slice = buffer.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = sender.send(r);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("poll readback");
-    receiver
-        .recv()
-        .expect("map callback")
-        .expect("map readback");
-    let data = slice.get_mapped_range().unwrap().to_vec();
-    buffer.unmap();
-    data
+    parity::map_readback(device, &buffer)
 }

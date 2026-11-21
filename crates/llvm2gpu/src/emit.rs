@@ -2,13 +2,37 @@
 
 use crate::error::TranslateError;
 
-/// WGSL text and SPIR-V words for the compute entry.
+/// WGSL text and SPIR-V words for the module's compute entry.
 #[derive(Debug)]
 pub struct Translated {
     /// Whole module in WGSL.
     pub wgsl: String,
-    /// SPIR-V words for `cs_main`. Empty when there is no compute entry.
+    /// SPIR-V words for the module's compute entry. Empty when the module has
+    /// none, or has several.
     pub compute_spirv: Vec<u32>,
+    /// Entry point names in the module, in the order the IR declared them.
+    pub entries: Vec<String>,
+}
+
+/// Capabilities the module's types need beyond the core language.
+///
+/// Naga gates a cube-array texture (`texture_depth_cube_array`, the point-light
+/// shadow pool) behind `CUBE_ARRAY_TEXTURES`; everything else this translator
+/// emits is core. Asking for the capability only when the module declares such
+/// a type keeps the gate meaningful for every other pass.
+fn capabilities(module: &naga::Module) -> naga::valid::Capabilities {
+    let mut capabilities = naga::valid::Capabilities::empty();
+    for (_, ty) in module.types.iter() {
+        if let naga::TypeInner::Image {
+            dim: naga::ImageDimension::Cube,
+            arrayed: true,
+            ..
+        } = ty.inner
+        {
+            capabilities |= naga::valid::Capabilities::CUBE_ARRAY_TEXTURES;
+        }
+    }
+    capabilities
 }
 
 /// Validate `module`, print WGSL, and emit compute SPIR-V.
@@ -17,29 +41,35 @@ pub struct Translated {
 /// produces compute-only modules because the LLVM IR subset it supports
 /// describes a single scalar compute function.
 pub(super) fn emit(module: &naga::Module) -> Result<Translated, TranslateError> {
-    let info = naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::empty(),
-    )
-    .validate(module)
-    .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
+    let info =
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities(module))
+            .validate(module)
+            .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
     let wgsl =
         naga::back::wgsl::write_string(module, &info, naga::back::wgsl::WriterFlags::empty())
             .map_err(|err| TranslateError::Naga(err.to_string()))?;
     let parsed = naga::front::wgsl::parse_str(&wgsl)
         .map_err(|err| TranslateError::Naga(err.emit_to_string(&wgsl)))?;
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::empty(),
-    )
-    .validate(&parsed)
-    .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
-    let compute_spirv = match module
+    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities(&parsed))
+        .validate(&parsed)
+        .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
+    let entries: Vec<String> = module
         .entry_points
         .iter()
-        .find(|entry| entry.stage == naga::ShaderStage::Compute)
-    {
-        Some(entry) => {
+        .map(|entry| entry.name.clone())
+        .collect();
+    // SPIR-V names one entry point, and `xtask` builds one artifact per
+    // compute entry; a module with several compute entries therefore reports
+    // no single word list instead of an arbitrary one.
+    let compute_entries = module
+        .entry_points
+        .iter()
+        .filter(|entry| entry.stage == naga::ShaderStage::Compute);
+    let compute_spirv = match (
+        compute_entries.clone().count(),
+        compute_entries.clone().next(),
+    ) {
+        (1, Some(entry)) => {
             let words = spirv(module, &info, &entry.name)?;
             // Naga's SPIR-V parser rejects the atomic workgroup initializer
             // that Native mode emits, so this round-trip stops at WGSL.
@@ -48,11 +78,12 @@ pub(super) fn emit(module: &naga::Module) -> Result<Translated, TranslateError> 
             }
             words
         }
-        None => Vec::new(),
+        _ => Vec::new(),
     };
     Ok(Translated {
         wgsl,
         compute_spirv,
+        entries,
     })
 }
 
@@ -137,11 +168,8 @@ fn reparse_spirv(words: &[u32]) -> Result<(), TranslateError> {
         },
     )
     .map_err(|err| TranslateError::Naga(err.to_string()))?;
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::empty(),
-    )
-    .validate(&parsed)
-    .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
+    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities(&parsed))
+        .validate(&parsed)
+        .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
     Ok(())
 }

@@ -33,9 +33,9 @@ var<uniform> uniform_struct_0_3_: UniformStruct1_;
 @fragment 
 fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     var fragment_out: vec4<f32>;
-    var _0_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var occluded_u002e_sroa_u002e_0_u002e_0146_: f32;
-    var index_u002e_sroa_u002e_0_u002e_0145_: u32;
+    var _0_u002e_sroa_u002e_0_u002e_0_: f32;
+    var occluded_u002e_sroa_u002e_0_: f32;
+    var index_u002e_sroa_u002e_0_: u32;
     var out_u002e_4_: f32;
 
     let _e5 = textureDimensions(tex_0_0_);
@@ -86,11 +86,11 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
         let _e273 = uniform_struct_0_3_.f0_;
         let _e276 = uniform_struct_0_3_.f1_;
         let _e279 = uniform_struct_0_3_.f2_;
-        occluded_u002e_sroa_u002e_0_u002e_0146_ = 0f;
-        index_u002e_sroa_u002e_0_u002e_0145_ = 0u;
+        occluded_u002e_sroa_u002e_0_ = 0f;
+        index_u002e_sroa_u002e_0_ = 0u;
         loop {
-            let _e291 = occluded_u002e_sroa_u002e_0_u002e_0146_;
-            let _e293 = index_u002e_sroa_u002e_0_u002e_0145_;
+            let _e291 = occluded_u002e_sroa_u002e_0_;
+            let _e293 = index_u002e_sroa_u002e_0_;
             let _e296 = (f32(_e293) + 0.5f);
             let _e298 = (_e296 * 0.125f);
             let _e300 = (_e296 * 2.399963f);
@@ -114,7 +114,7 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
             let _e376 = uniform_struct_0_2_.f2_.z;
             let _e382 = uniform_struct_0_2_.f3_.z;
             if (((_e382 + (((_e333 * _e365) + (_e335 * _e370)) + (_e337 * _e376))) / _e361) > 1f) {
-                _0_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+                _0_u002e_sroa_u002e_0_u002e_0_ = 0f;
             } else {
                 let _e392 = uniform_struct_0_2_.f0_.x;
                 let _e397 = uniform_struct_0_2_.f1_.x;
@@ -127,7 +127,7 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                 let _e436 = uniform_struct_0_2_.f3_.y;
                 let _e442 = (0.5f - (((_e436 + (((_e333 * _e419) + (_e335 * _e424)) + (_e337 * _e430))) / _e361) * 0.5f));
                 if ((_e442 > 1f) | (((_e415 < 0f) | (_e415 > 1f)) | (_e442 < 0f))) {
-                    _0_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+                    _0_u002e_sroa_u002e_0_u002e_0_ = 0f;
                 } else {
                     let _e465 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(u32((_e415 * _e8))), bitcast<i32>(u32((_e442 * _e13)))), 0i);
                     if !((_e465 >= 1f)) {
@@ -162,31 +162,31 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                         let _e611 = ((_e587 + (((_e472 * _e570) + (_e476 * _e575)) + (_e465 * _e581))) / (_e609 + (((_e472 * _e592) + (_e476 * _e597)) + (_e465 * _e603))));
                         let _e616 = length(vec3<f32>((_e333 - _e521), (_e335 - _e566), (_e337 - _e611)));
                         if (_e616 < 0.000001f) {
-                            _0_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+                            _0_u002e_sroa_u002e_0_u002e_0_ = 0f;
                         } else {
                             let _e624 = uniform_struct_0_2_.f8_.x;
                             let _e628 = uniform_struct_0_2_.f8_.y;
                             let _e632 = uniform_struct_0_2_.f8_.z;
                             if !((length(vec3<f32>((_e624 - _e521), (_e628 - _e566), (_e632 - _e611))) >= (length(vec3<f32>((_e624 - _e333), (_e628 - _e335), (_e632 - _e337))) - _e279))) {
-                                _0_u002e_sroa_u002e_0_u002e_0_u002e_i = max((1f - (_e616 / _e273)), 0f);
+                                _0_u002e_sroa_u002e_0_u002e_0_ = max((1f - (_e616 / _e273)), 0f);
                             } else {
-                                _0_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+                                _0_u002e_sroa_u002e_0_u002e_0_ = 0f;
                             }
                         }
                     } else {
-                        _0_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+                        _0_u002e_sroa_u002e_0_u002e_0_ = 0f;
                     }
                 }
             }
-            let _e657 = _0_u002e_sroa_u002e_0_u002e_0_u002e_i;
+            let _e657 = _0_u002e_sroa_u002e_0_u002e_0_;
             let _e658 = (_e291 + _e657);
             out_u002e_4_ = _e658;
             let _e661 = (_e293 + 1u);
             if (_e661 == 8u) {
                 break;
             } else {
-                occluded_u002e_sroa_u002e_0_u002e_0146_ = _e658;
-                index_u002e_sroa_u002e_0_u002e_0145_ = _e661;
+                occluded_u002e_sroa_u002e_0_ = _e658;
+                index_u002e_sroa_u002e_0_ = _e661;
                 continue;
             }
         }

@@ -56,10 +56,8 @@ impl Vec3 {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let squared = self.dot(*self);
-            // The host build is a reference for tests only; `sqrt` on `f32`
-            // exists there because `std` is linked into the test harness.
-            crate::host_sqrt(squared)
+            // The host arm of [`crate::sqrt`] is `libm::sqrtf`.
+            crate::sqrt(self.dot(*self))
         }
     }
 }

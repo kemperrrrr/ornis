@@ -75,8 +75,10 @@ pub use forward::{
     forward_blend_state, sort_by_depth,
 };
 pub use gbuffer::{GBufferTextures, GbufferTargets};
+#[cfg(test)]
+pub(crate) use lights::CsmBlock;
 pub use lights::CsmCamera;
-pub(crate) use lights::{CsmBlock, CsmVp, GpuLight, LIGHT_KIND_DIRECTIONAL, LightingUniform};
+pub(crate) use lights::{GpuLight, LIGHT_KIND_DIRECTIONAL, LightingUniform};
 pub use lights::{LightUploadStats, MAX_LIGHTS, ShadingDebug, count_light_drops};
 // Path-stability re-exports: `crate::renderer::X` before the split; no
 // in-crate users outside their module right now.

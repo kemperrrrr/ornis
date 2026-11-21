@@ -17,18 +17,18 @@ var<storage, read_write> atomic_storage_0_2_: array<atomic<u32>>;
 
 @compute @workgroup_size(8, 8, 1) 
 fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @builtin(local_invocation_index) local_invocation_index: u32) {
-    var _0_u002e_sroa_u002e_0_u002e_0_u002e_i: u32;
-    var safe_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_: u32;
-    var lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_: u32;
+    var _0_u002e_sroa_u002e_0_u002e_0_: u32;
+    var safe_u002e_sroa_u002e_0_u002e_0_: f32;
+    var lid_u002e_sroa_u002e_0_u002e_0_: u32;
+    var lid_u002e_sroa_u002e_0_u002e_0_1: u32;
 
     if (local_invocation_index < 256u) {
-        lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_ = local_invocation_index;
+        lid_u002e_sroa_u002e_0_u002e_0_ = local_invocation_index;
         loop {
-            let _e7 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_;
+            let _e7 = lid_u002e_sroa_u002e_0_u002e_0_;
             atomicStore((&workgroup_atomics[_e7]), 0u);
             if (_e7 < 192u) {
-                lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_ = (_e7 + 64u);
+                lid_u002e_sroa_u002e_0_u002e_0_ = (_e7 + 64u);
                 continue;
             } else {
                 break;
@@ -54,42 +54,42 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @buil
         let _e91 = (_e67.z * _e74.w);
         let _e100 = dot(vec3<f32>(select(select(_e32.x, _e79, _e81), (_e32.x + _e79), _e84), select(select(_e39.y, _e87, _e81), (_e39.y + _e87), _e84), select(select(_e46.z, _e91, _e81), (_e46.z + _e91), _e84)), vec3<f32>(0.2126f, 0.7152f, 0.0722f));
         if !(((_e100 <= _e100) && (0f <= 0f))) {
-            safe_u002e_sroa_u002e_0_u002e_0_u002e_i = 0.000001f;
+            safe_u002e_sroa_u002e_0_u002e_0_ = 0.000001f;
         } else {
             if (abs(_e100) > 340000000000000000000000000000000000000f) {
-                safe_u002e_sroa_u002e_0_u002e_0_u002e_i = 0.000001f;
+                safe_u002e_sroa_u002e_0_u002e_0_ = 0.000001f;
             } else {
-                safe_u002e_sroa_u002e_0_u002e_0_u002e_i = max(_e100, 0.000001f);
+                safe_u002e_sroa_u002e_0_u002e_0_ = max(_e100, 0.000001f);
             }
         }
-        let _e117 = safe_u002e_sroa_u002e_0_u002e_0_u002e_i;
+        let _e117 = safe_u002e_sroa_u002e_0_u002e_0_;
         let _e118 = log2(_e117);
         let _e121 = uniform_struct_0_3_.f0_;
         let _e124 = uniform_struct_0_3_.f1_;
         let _e127 = uniform_struct_0_3_.f2_;
         if (_e118 < _e121) {
-            _0_u002e_sroa_u002e_0_u002e_0_u002e_i = 0u;
+            _0_u002e_sroa_u002e_0_u002e_0_ = 0u;
         } else {
-            _0_u002e_sroa_u002e_0_u002e_0_u002e_i = u32((((_e127 + -2f) * clamp(((_e118 - _e121) * _e124), 0f, 1f)) + 1f));
+            _0_u002e_sroa_u002e_0_u002e_0_ = u32((((_e127 + -2f) * clamp(((_e118 - _e121) * _e124), 0f, 1f)) + 1f));
         }
-        let _e144 = _0_u002e_sroa_u002e_0_u002e_0_u002e_i;
+        let _e144 = _0_u002e_sroa_u002e_0_u002e_0_;
         let _e148 = atomicAdd((&workgroup_atomics[_e144]), 1u);
     }
     workgroupBarrier();
     if (local_invocation_index < 256u) {
-        lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_ = local_invocation_index;
+        lid_u002e_sroa_u002e_0_u002e_0_1 = local_invocation_index;
     } else {
         return;
     }
     loop {
-        let _e153 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_;
+        let _e153 = lid_u002e_sroa_u002e_0_u002e_0_1;
         let _e156 = atomicLoad((&workgroup_atomics[_e153]));
         if (_e156 == 0u) {
         } else {
             let _e161 = atomicAdd((&atomic_storage_0_2_[_e153]), _e156);
         }
         if (_e153 < 192u) {
-            lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_ = (_e153 + 64u);
+            lid_u002e_sroa_u002e_0_u002e_0_1 = (_e153 + 64u);
             continue;
         } else {
             break;
