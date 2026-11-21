@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(bloom_generated::VS_ENTRY, "vs_main");
         assert_eq!(bloom_generated::FS_ENTRY, "fs_main");
         assert_eq!(lighting_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(lighting_generated::LIGHTING_1X_ENTRY, "fs_main");
+        assert_eq!(lighting_generated::LIGHTING_1X_ENTRY, "fs_main_lighting");
         assert_eq!(lighting_generated::fs_main_msaa::entry_point(), "fs_main");
         assert_eq!(composite_generated::VS_ENTRY, "vs_main");
         assert_eq!(composite_generated::FS_ENTRY, "fs_main");

@@ -76,7 +76,7 @@ const ALPHA_LANE: u32 = 3;
 #[gpu_entry(fragment)]
 // qual:allow(srp, max_parameters=23) reason: "one parameter per binding the deferred pass declares; the attributes above are the table"
 #[allow(clippy::too_many_arguments)]
-pub fn fs_main(
+pub fn fs_main_lighting(
     #[gpu(uniform, group = 0, binding = 0)] camera: Uniform<Camera>,
     #[gpu(uniform, group = 0, binding = 1)] lighting: Uniform<Lighting>,
     #[gpu(storage_buffer, group = 0, binding = 2, read_only)] materials: Storage<u32>,

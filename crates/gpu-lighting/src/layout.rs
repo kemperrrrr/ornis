@@ -114,6 +114,7 @@ pub(crate) fn clustered(
 ///
 /// The camera block is read at [`CAMERA_BINDING`], which the forward pass also
 /// uses, so the lane indices are `gpu-pbr`'s.
+// qual:allow(test_quality, untested) reason: "no host path: every uniform read panics off wasm32, so a unit test cannot build the camera block; the translated body is covered by the artifact and naga-validation tests in render"
 #[inline(always)]
 pub(crate) fn reconstruct_world_pos(
     camera: &Uniform<ornis_gpu_pbr::Camera, GROUP, CAMERA_BINDING>,
@@ -140,6 +141,7 @@ pub(crate) fn reconstruct_world_pos(
 /// The matrix arrives column-major, so each column is scaled by its own
 /// coordinate — reading the columns as rows would transpose the inverse and
 /// fold the whole g-buffer into the near plane.
+// qual:allow(test_quality, untested) reason: "reads four camera lanes, which off wasm32 is the diverging SDK stub"
 #[inline(always)]
 fn mat_lane<
     const C0: usize,

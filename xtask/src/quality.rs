@@ -2187,7 +2187,7 @@ fn ci_stages(stages: &mut StageList<'_>) {
     check_shader_artifact(
         stages,
         Some("ornis-gpu-lighting"),
-        Some("fs_main"),
+        Some("fs_main_lighting"),
         "crates/render/src/shaders/lighting_generated.wgsl",
         "cargo xtask build-shaders --check (deferred lighting WGSL drift)",
     );
