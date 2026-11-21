@@ -18,6 +18,7 @@
 #![warn(missing_docs)]
 
 mod layout;
+mod msaa;
 mod walk;
 
 use layout::GROUP;

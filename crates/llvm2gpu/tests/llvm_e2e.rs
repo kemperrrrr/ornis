@@ -831,6 +831,58 @@ start:
     );
 }
 
+/// A resolve reads one sample per texel, so the sample index is an operand and
+/// the image has to be declared multisampled — a plain image has mip levels
+/// where a multisampled one has samples.
+#[test]
+fn a_per_sample_texture_load_takes_the_sample_operand() {
+    let ir = r#"
+declare float @texture_load_2d_f32_sample(i32, i32, i32, i32, i32)
+declare i32 @texture_load_2d_u32_sample(i32, i32, i32, i32, i32)
+declare float @llvm.fabs.f32(float)
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %sample = and i32 %id, 3
+  %d = call float @texture_load_2d_f32_sample(i32 0, i32 1, i32 %id, i32 0, i32 %sample)
+  %w = call i32 @texture_load_2d_u32_sample(i32 0, i32 2, i32 %id, i32 0, i32 %sample)
+  %wf = uitofp nneg i32 %w to float
+  %sum = fadd float %d, %wf
+  %abs = call float @llvm.fabs.f32(float %sum)
+  call void @storage_write_f32(i32 0, i32 3, i32 %id, float %abs)
+  ret void
+}
+"#;
+    let translated = ornis_llvm2gpu::translate_entry_with_sampling(
+        ir,
+        "cs_main",
+        ornis_llvm2gpu::TextureSampling::Listed(vec![(0, 1), (0, 2)]),
+    )
+    .expect("per-sample loads");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("texture_depth_multisampled_2d"), "{wgsl}");
+    assert!(wgsl.contains("texture_multisampled_2d<u32>"), "{wgsl}");
+    // The loaded sample is the operand, not a literal zero.
+    assert!(wgsl.contains("textureLoad(tex_0_1_"), "{wgsl}");
+    assert!(
+        !wgsl.contains(", 0u)"),
+        "sample 0 is not hard-coded: {wgsl}"
+    );
+    // `abs` arrives as the intrinsic, which the translator maps to `abs`.
+    assert!(wgsl.contains("abs("), "{wgsl}");
+    // Without the flag the same call cannot be lowered: the image has no
+    // samples to index.
+    assert!(
+        ornis_llvm2gpu::translate_entry_with_sampling(
+            ir,
+            "cs_main",
+            ornis_llvm2gpu::TextureSampling::SingleSample,
+        )
+        .is_err(),
+        "a per-sample load needs a multisampled binding"
+    );
+}
+
 #[test]
 fn one_texture_binding_cannot_be_depth_and_sampled() {
     let ir = r#"

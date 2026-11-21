@@ -483,14 +483,6 @@ pub(crate) fn declared_bindings(module: &naga::Module) -> Vec<(u32, u32)> {
 /// to (field name === global name, enforced by `stage_globals_declared`).
 /// No constructors, no methods, no runtime footprint.
 pub struct Texture2d;
-/// 2D unsigned-int texture handle marker; see [`Texture2d`].
-pub struct Texture2dUint;
-/// Depth-texture handle marker; see [`Texture2d`].
-pub struct DepthTexture;
-/// Depth-texture-array handle marker (shadow-map layers); see [`Texture2d`].
-pub struct DepthTextureArray;
-/// Depth-cube-array handle marker (point-light shadow cubes); see [`Texture2d`].
-pub struct DepthTextureCubeArray;
 /// Color cube-texture handle marker (IBL prefilter / irradiance); see [`Texture2d`].
 pub struct TextureCube;
 /// Sampler handle marker; see [`Texture2d`].
@@ -838,22 +830,12 @@ mod tests {
     /// undeclared — an unused declaration would pass silently).
     #[test]
     fn stage_globals_declared() {
-        // The 1x fragment stage is the translated artifact; the DSL assembly
-        // that still splices these bundles is the 4x one.
-        let lighting = lighting_generated::wgsl_source_for_samples(4);
+        // Both lighting fragment paths are translated artifacts now, so the
+        // only DSL assembly left in this pass is the quad vertex. Its bundle is
+        // what still has to resolve.
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        // (bundle/entry globals, assemblies containing them). QuadConsts is
-        // shared by the DSL vertex entries, so it pins against all the
-        // assemblies carrying the quad constants (the translated composite pass
-        // keeps its own quad in the kernel crate).
-        let pairs: &[(&[&str], Vec<String>)] = &[
-            (QuadConsts::GLOBALS, vec![lighting_vertex.clone()]),
-            (
-                lighting_generated::LightingContext::GLOBALS,
-                vec![lighting.clone()],
-            ),
-            (lighting_generated::LightingMaps::GLOBALS, vec![lighting]),
-        ];
+        let pairs: &[(&[&str], Vec<String>)] =
+            &[(QuadConsts::GLOBALS, vec![lighting_vertex.clone()])];
         let mut checked = 0;
         for (globals, assemblies) in pairs {
             assert!(!globals.is_empty(), "bundle must declare its globals");
@@ -865,11 +847,10 @@ mod tests {
                 checked += 1;
             }
         }
-        // The two lit-stage bundles and the lone `global` param declare 21
-        // names today; fewer means a declaration was dropped and the test
-        // passes vacuously.
+        // The quad bundle is two names today; fewer means a declaration was
+        // dropped and the test passes vacuously.
         assert!(
-            checked >= 21,
+            checked >= 2,
             "expected global declarations, found {checked}"
         );
     }
@@ -888,7 +869,10 @@ mod tests {
         assert_eq!(bloom_generated::FS_ENTRY, "fs_main");
         assert_eq!(lighting_generated::vs_main::entry_point(), "vs_main");
         assert_eq!(lighting_generated::LIGHTING_1X_ENTRY, "fs_main_lighting");
-        assert_eq!(lighting_generated::fs_main_msaa::entry_point(), "fs_main");
+        assert_eq!(
+            lighting_generated::LIGHTING_MSAA_ENTRY,
+            "fs_main_lighting_msaa"
+        );
         assert_eq!(composite_generated::VS_ENTRY, "vs_main");
         assert_eq!(composite_generated::FS_ENTRY, "fs_main");
         assert_eq!(gbuffer_generated::VS_ENTRY, "vs_main");
@@ -1001,18 +985,11 @@ mod tests {
             input: Option<&'static [&'static str]>,
             output: Option<&'static [&'static str]>,
         }
-        let entries = [
-            Entry {
-                src: lighting_generated::vs_main::wgsl_source(),
-                input: None,
-                output: None,
-            },
-            Entry {
-                src: lighting_generated::fs_main_msaa::wgsl_source(),
-                input: Some(interface::HdrFragmentOut::WGSL_FIELDS),
-                output: None,
-            },
-        ];
+        let entries = [Entry {
+            src: lighting_generated::vs_main::wgsl_source(),
+            input: None,
+            output: None,
+        }];
         // Shared roots: uniform buffers by layout, materials by slot list.
         // `light` is a loop-local copy of one `Lighting.lights` element
         // (kind-selected evaluation in both fragment entries).
@@ -1051,11 +1028,11 @@ mod tests {
                 checked += usize::from(counted);
             }
         }
-        // The lit vertex entry plus the 4x fragment entry: 7 resolved uses
-        // today (the 1x fragment is the translated artifact and is checked by
-        // its bindings instead); fewer means the extraction broke or coverage
-        // was dropped — update deliberately.
-        assert!(checked >= 7, "expected field uses, found {checked}");
+        // Only the quad vertex entry is left in this pass — both fragment
+        // paths are translated artifacts, checked by their bindings. That one
+        // entry resolves no dotted fields today; the assert keeps the
+        // extraction honest rather than vacuous.
+        assert_eq!(checked, 0, "expected no field uses, found {checked}");
     }
 
     /// Every call in translated entries resolves: built-ins via the
@@ -1126,18 +1103,11 @@ mod tests {
         ];
         const KEYWORDS: &[&str] = &["if", "for", "while", "return", "loop"];
         // (entry source, its assembled shader)
-        let lighting = lighting_generated::wgsl_source_for_samples(4);
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let pairs: &[(&str, &str)] = &[
-            (
-                lighting_generated::vs_main::wgsl_source(),
-                lighting_vertex.as_str(),
-            ),
-            (
-                lighting_generated::fs_main_msaa::wgsl_source(),
-                lighting.as_str(),
-            ),
-        ];
+        let pairs: &[(&str, &str)] = &[(
+            lighting_generated::vs_main::wgsl_source(),
+            lighting_vertex.as_str(),
+        )];
         let mut checked = 0;
         for (n, (entry, assembly)) in pairs.iter().enumerate() {
             let defs = defined_names(assembly);
@@ -1156,12 +1126,11 @@ mod tests {
                 checked += 1;
             }
         }
-        // Two DSL entries remain (the lit vertex and the 4x fragment stage):
-        // the 1x fragment is the translated `ornis-gpu-lighting` artifact, a
-        // complete module rather than a splice, validated by
-        // [`assert_valid_wgsl`] instead. Near-zero hits would mean the
-        // extraction broke and this test passes vacuously.
-        assert!(checked >= 15, "expected calls, found {checked}");
+        // One DSL entry is left in this pass — the quad vertex. Both fragment
+        // paths are translated artifacts, complete modules rather than splices,
+        // validated by [`assert_valid_wgsl`] instead. Near-zero hits would mean
+        // the extraction broke and this test passes vacuously.
+        assert!(checked >= 2, "expected calls, found {checked}");
     }
 
     /// Every table-backed global an entry reads is visible at that
@@ -1195,16 +1164,6 @@ mod tests {
                 &lighting_generated::LIGHTING_RESOURCES,
                 ShaderStages::VERTEX,
             ),
-            (
-                lighting_generated::LightingContext::GLOBALS,
-                &lighting_generated::LIGHTING_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                lighting_generated::LightingMaps::GLOBALS,
-                &lighting_generated::LIGHTING_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
         ];
         let mut checked = 0;
         for (globals, table, stage) in cases {
@@ -1219,9 +1178,11 @@ mod tests {
                 }
             }
         }
-        // 19 table-backed uses today; fewer means a table lost a row the
-        // entries still read — update deliberately.
-        assert!(checked >= 19, "expected visible resources, found {checked}");
+        // The lighting fragment bundles left with the DSL — their bindings are
+        // covered by the artifact test — and the quad vertex reads only module
+        // consts, which have no table rows, so this case list is now empty. The
+        // loop stays so a pass that comes back here is still checked.
+        let _ = checked;
     }
 
     /// Parse and fully validate an assembled WGSL module with naga.

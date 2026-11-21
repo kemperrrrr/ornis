@@ -149,6 +149,19 @@ unsafe extern "C" {
     fn texture_load_2d_u32(group: u32, binding: u32, x: u32, y: u32) -> u32;
     #[link_name = "texture_load_2d_f32x4"]
     fn texture_load_2d_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32;
+    #[link_name = "texture_load_2d_f32_sample"]
+    fn texture_load_2d_f32_sample(group: u32, binding: u32, x: u32, y: u32, sample: u32) -> f32;
+    #[link_name = "texture_load_2d_u32_sample"]
+    fn texture_load_2d_u32_sample(group: u32, binding: u32, x: u32, y: u32, sample: u32) -> u32;
+    #[link_name = "texture_load_2d_f32x4_sample"]
+    fn texture_load_2d_f32x4_sample(
+        group: u32,
+        binding: u32,
+        x: u32,
+        y: u32,
+        lane: u32,
+        sample: u32,
+    ) -> f32;
     #[link_name = "texture_sample_level_2d_f32x4"]
     fn texture_sample_level_2d_f32x4(
         group: u32,
@@ -630,6 +643,46 @@ pub(crate) fn texture_load_depth(group: u32, binding: u32, x: u32, y: u32) -> f3
 #[inline(always)]
 pub(crate) fn texture_load_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32 {
     call!(texture_load_2d_f32x4(group, binding, x, y, lane))
+}
+
+/// Sample `sample` of a multisampled depth texture at mip 0.
+#[inline(always)]
+pub(crate) fn texture_load_depth_sample(
+    group: u32,
+    binding: u32,
+    x: u32,
+    y: u32,
+    sample: u32,
+) -> f32 {
+    call!(texture_load_2d_f32_sample(group, binding, x, y, sample))
+}
+
+/// First lane of sample `sample` of a multisampled `texture_2d<u32>`.
+#[inline(always)]
+pub(crate) fn texture_load_u32_sample(
+    group: u32,
+    binding: u32,
+    x: u32,
+    y: u32,
+    sample: u32,
+) -> u32 {
+    call!(texture_load_2d_u32_sample(group, binding, x, y, sample))
+}
+
+/// One lane of sample `sample` of a multisampled `texture_2d<f32>`.
+// qual:allow(srp, max_parameters=6) reason: "one operand per import argument: the binding pair, the texel coordinate, the lane and the sample"
+#[inline(always)]
+pub(crate) fn texture_load_f32x4_sample(
+    group: u32,
+    binding: u32,
+    x: u32,
+    y: u32,
+    lane: u32,
+    sample: u32,
+) -> f32 {
+    call!(texture_load_2d_f32x4_sample(
+        group, binding, x, y, lane, sample
+    ))
 }
 
 /// One lane of `textureSampleLevel(tex, sampler, vec2(x, y), 0.0)`.

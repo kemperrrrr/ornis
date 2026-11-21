@@ -79,7 +79,7 @@ impl Renderer3D {
                 entry_point: Some(if sample_count <= 1 {
                     shaders::lighting_generated::LIGHTING_1X_ENTRY
                 } else {
-                    shaders::lighting_generated::fs_main_msaa::entry_point()
+                    shaders::lighting_generated::LIGHTING_MSAA_ENTRY
                 }),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: output_view.texture().format(),

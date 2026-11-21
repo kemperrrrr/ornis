@@ -107,6 +107,22 @@ pub const WORKGROUP_WORDS: u32 = 256;
 /// as one word, so the load returns `u32` rather than `f32`.
 pub const TEXTURE_LOAD_2D_U32: &str = "texture_load_2d_u32";
 
+/// `(param i32 × 5) (result f32)` — depth of sample `s` of a multisampled
+/// `texture_depth_multisampled_2d`, at mip 0.
+///
+/// A multisampled target has samples where a plain one has mip levels, and the
+/// g-buffer resolve reads every covered sample, so the sample index is an
+/// argument rather than the fixed zero the single-sample load implies.
+pub const TEXTURE_LOAD_2D_F32_SAMPLE: &str = "texture_load_2d_f32_sample";
+
+/// `(param i32 × 5) (result i32)` — first lane of sample `s` of a
+/// multisampled `texture_2d<u32>`.
+pub const TEXTURE_LOAD_2D_U32_SAMPLE: &str = "texture_load_2d_u32_sample";
+
+/// `(param i32 × 6) (result f32)` — lane `lane` of sample `s` of a
+/// multisampled `texture_2d<f32>`.
+pub const TEXTURE_LOAD_2D_F32X4_SAMPLE: &str = "texture_load_2d_f32x4_sample";
+
 /// `(param i32 i32) (result i32)` — width of a 2D texture.
 pub const TEXTURE_WIDTH_2D: &str = "texture_width_2d";
 
