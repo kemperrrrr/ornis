@@ -1,17 +1,15 @@
 //! GPU single-point contact batches: layout, packing and the SI compute kernel.
 //!
 //! Owns [`GpuBatch`]/[`LaneInput`] (SoA lanes over disjoint bodies, packed by
-//! [`pack_single_point_batches`]), the Rust-authored `contact_solver` compute
-//! kernel (translated to WGSL by `#[gpu_pipeline]`, helpers stitched from
-//! `contact_math`) and the [`contact_solver_wgsl`] source used by the host
-//! [`crate::gpu::GpuSequentialImpulse`]. Moved verbatim from `gpu.rs` (phase 3).
+//! [`pack_single_point_batches`]), the artifacts the host pipeline loads
+//! ([`contact_solver_wgsl`], translated from `ornis_gpu_si` through LLVM IR) and
+//! the batch layout the kernel walks word by word. Moved verbatim from `gpu.rs`
+//! (phase 3).
 
 use glam::Vec3;
-use ornis_macros::{WgslStruct, gpu_pipeline};
+use ornis_macros::WgslStruct;
 
-use super::GpuBodyState;
 use crate::body::RigidBody;
-use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 use crate::engine::{Manifold, ManifoldState};
 use bytemuck::Zeroable;
 
@@ -366,159 +364,27 @@ fn matvec(m: &[Vec3; 3], v: Vec3) -> Vec3 {
     Vec3::new(m[0].dot(v), m[1].dot(v), m[2].dot(v))
 }
 // ---------------------------------------------------------------------------
-// Compute shader — written in Rust, translated to WGSL by #[gpu_pipeline]
+// Compute shader — translated from Rust through LLVM IR
 // ---------------------------------------------------------------------------
 
 /// One iteration of the wide contact solver for a single batch.
 ///
-/// The body of this function is the WGSL compute entry point (kernel DSL):
-/// the bindings below are in scope as storage/uniform variables and `gid`/
-/// `lid` are the built-in workgroup parameters. The isotropic contact row
-/// (normal update, friction clamp) is NOT duplicated here: it calls the
-/// shared `contact_math` kernels stitched via `helpers(...)` — one source
-/// of truth with the CPU wide/scalar paths. Only buffer plumbing (gather,
-/// accumulator read/write, body write-back) stays inline: bindings and
-/// builtins are entry-scoped and cannot live in helpers. All per-lane
-/// writes to `batch_buf` accumulators go through the full buffer path so
-/// that they persist across dispatches (the `let b = ...` copy is
-/// read-only).
-//
-// qual:allow(abc) — kernel-DSL body: every statement is translated
-// verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
-// ONLY this function's body into `fn main`. The isotropic row calls the
-// shared helpers stitched via `helpers(...)` (see `contact_math`); the
-// remaining size is entry-scoped buffer plumbing that cannot move.
-#[gpu_pipeline(
-    workgroup_size = 4,
-    storage(body_buf: [GpuBodyState; 64], read_write),
-    storage(batch_buf: [GpuBatch; 64], read_write),
-    uniform(params: [u32; 4]),
-    builtin(gid: workgroup_id, lid: local_invocation_id),
-    helpers(contact_normal_step, contact_friction_clamp),
-)]
-fn contact_solver() {
-    // qual:allow(abc) — kernel-DSL body (see the item docs above): buffer
-    // plumbing stays inline, the contact row calls the stitched helpers.
-    let b = batch_buf[gid.x];
-    let l = lid.x;
-    if l >= b.count {
-        return;
-    }
-    let iter = params.x;
-    let total = params.y;
-    let allow_rest = params.z;
+/// The kernel is authored in [`ornis_gpu_si`] and translated to WGSL through
+/// LLVM IR; [`contact_solver_wgsl`] returns that artifact. The isotropic
+/// contact row (normal update, friction clamp) is the same Rust as
+/// [`crate::contact_math`] — the shader crate carries a word-addressed copy of
+/// it, and the parity gates compare the two on the device.
+///
+/// The host's binding order is the kernel's: body state (read-write), contact
+/// batches (read-write, the accumulators live there), uniforms (`iter`,
+/// `total`, `allow_rest`).
+pub const SI_CONTACT_ENTRY: &str = "cs_main_contact";
 
-    // Gather body velocities.
-    let mut ba = body_buf[b.body_a[l]];
-    let mut bb = body_buf[b.body_b[l]];
-    let va = ba.velocity;
-    let wa = ba.angular;
-    let vb = bb.velocity;
-    let wb = bb.angular;
-
-    let n = vec3(b.nx[l], b.ny[l], b.nz[l]);
-    let ra = vec3(b.rax[l], b.ray[l], b.raz[l]);
-    let rb = vec3(b.rbx[l], b.rby[l], b.rbz[l]);
-    let inv_ma = b.inv_ma[l];
-    let inv_mb = b.inv_mb[l];
-    let inv_k = b.inv_k_n[l];
-    let spec_target = b.spec_target[l];
-    let mut acc = batch_buf[gid.x].acc[l];
-
-    // Normal impulse: shared isotropic row (contact_math).
-    let rel = (vb + cross(wb, rb)) - (va + cross(wa, ra));
-    let vn = dot(rel, n);
-    let new_acc = contact_normal_step(vn, spec_target, inv_k, acc);
-    let delta = new_acc - acc;
-    acc = new_acc;
-
-    if abs(delta) > 1e-12 {
-        ba.velocity -= delta * vec3(b.apply_n_ax[l], b.apply_n_ay[l], b.apply_n_az[l]);
-        bb.velocity += delta * vec3(b.apply_n_bx[l], b.apply_n_by[l], b.apply_n_bz[l]);
-        ba.angular -= delta * vec3(b.apply_w_ax[l], b.apply_w_ay[l], b.apply_w_az[l]);
-        bb.angular += delta * vec3(b.apply_w_bx[l], b.apply_w_by[l], b.apply_w_bz[l]);
-    }
-
-    // Friction (remeasure rel after the normal impulse): shared circular
-    // clamp per axis (contact_math).
-    let rel2 = (bb.velocity + cross(bb.angular, rb)) - (ba.velocity + cross(ba.angular, ra));
-    let max_f = b.mu[l] * acc;
-    let t1 = vec3(b.t1x[l], b.t1y[l], b.t1z[l]);
-    let t2 = vec3(b.t2x[l], b.t2y[l], b.t2z[l]);
-    let mut f_imp = vec3(0.0);
-
-    // Axis 1.
-    if b.inv_k_t1[l] > 0.0 {
-        let vt1 = dot(rel2, t1);
-        let raw_t1 = batch_buf[gid.x].acc_f1[l] - vt1 * b.inv_k_t1[l];
-        let new_t1 = contact_friction_clamp(raw_t1, batch_buf[gid.x].acc_f2[l], max_f);
-        f_imp += t1 * (new_t1 - batch_buf[gid.x].acc_f1[l]);
-        batch_buf[gid.x].acc_f1[l] = new_t1;
-    }
-    // Axis 2.
-    if b.inv_k_t2[l] > 0.0 {
-        let vt2 = dot(rel2, t2);
-        let raw_t2 = batch_buf[gid.x].acc_f2[l] - vt2 * b.inv_k_t2[l];
-        let new_t2 = contact_friction_clamp(raw_t2, batch_buf[gid.x].acc_f1[l], max_f);
-        f_imp += t2 * (new_t2 - batch_buf[gid.x].acc_f2[l]);
-        batch_buf[gid.x].acc_f2[l] = new_t2;
-    }
-    if dot(f_imp, f_imp) > 1e-24 {
-        // Angular impulse uses r × f (same convention as the scalar solver:
-        // `wa -= W·(ra×f)`, `wb += W·(rb×f)`).
-        let ca = cross(ra, f_imp);
-        let w_a = vec3(
-            dot(vec3(b.w_a00[l], b.w_a01[l], b.w_a02[l]), ca),
-            dot(vec3(b.w_a10[l], b.w_a11[l], b.w_a12[l]), ca),
-            dot(vec3(b.w_a20[l], b.w_a21[l], b.w_a22[l]), ca),
-        );
-        let cb = cross(rb, f_imp);
-        let w_b = vec3(
-            dot(vec3(b.w_b00[l], b.w_b01[l], b.w_b02[l]), cb),
-            dot(vec3(b.w_b10[l], b.w_b11[l], b.w_b12[l]), cb),
-            dot(vec3(b.w_b20[l], b.w_b21[l], b.w_b22[l]), cb),
-        );
-        ba.velocity -= f_imp * inv_ma;
-        bb.velocity += f_imp * inv_mb;
-        ba.angular -= w_a;
-        bb.angular += w_b;
-    }
-
-    // Restitution (one-shot on the last iteration).
-    if allow_rest > 0 && iter == total - 1 {
-        let bias = b.bias[l];
-        if bias > 0.0 {
-            let rel3 =
-                (bb.velocity + cross(bb.angular, rb)) - (ba.velocity + cross(ba.angular, ra));
-            let vn3 = dot(rel3, n);
-            let lr = (bias - vn3) * inv_k;
-            if lr > 0.0 {
-                ba.velocity -= lr * vec3(b.apply_n_ax[l], b.apply_n_ay[l], b.apply_n_az[l]);
-                bb.velocity += lr * vec3(b.apply_n_bx[l], b.apply_n_by[l], b.apply_n_bz[l]);
-                ba.angular -= lr * vec3(b.apply_w_ax[l], b.apply_w_ay[l], b.apply_w_az[l]);
-                bb.angular += lr * vec3(b.apply_w_bx[l], b.apply_w_by[l], b.apply_w_bz[l]);
-            }
-        }
-    }
-
-    // Write back.
-    body_buf[b.body_a[l]].velocity = ba.velocity;
-    body_buf[b.body_a[l]].angular = ba.angular;
-    body_buf[b.body_b[l]].velocity = bb.velocity;
-    body_buf[b.body_b[l]].angular = bb.angular;
-    batch_buf[gid.x].acc[l] = acc;
-}
-
-/// The complete WGSL source: struct declarations (generated from the Rust
-/// layouts) + the compute shader translated from `contact_solver`.
+/// The complete WGSL source, as generated from `crates/gpu-si`.
 pub fn contact_solver_wgsl() -> String {
-    format!(
-        "{}\n{}\n{}",
-        GpuBodyState::WGSL_SOURCE,
-        GpuBatch::WGSL_SOURCE,
-        contact_solver::wgsl_source()
-    )
+    include_str!("si_contact_generated.wgsl").to_owned()
 }
+
 // ---------------------------------------------------------------------------
 // Public API: pack GPU batches from engine data
 // ---------------------------------------------------------------------------
@@ -622,5 +488,149 @@ pub fn write_back_acc(
         }
         states[si].acc[0] = batches[bi].acc[lane];
         lane += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GpuBatch, LaneInput};
+    use crate::body::RigidBody;
+    use crate::gpu::GPU_BATCH_STRIDE;
+    use glam::Vec3;
+    use ornis_gpu_si::layout;
+
+    /// Every lane group the kernel addresses must sit exactly where the Rust
+    /// record puts it: the artifact reads the batch as words, so a field that
+    /// moves (or is inserted) would make the shader read its neighbour.
+    ///
+    /// The macro spells `offset_of!` per field, so a renamed or removed field
+    /// fails to compile rather than silently leaving the offsets unchecked.
+    macro_rules! lane_offsets_match {
+        ($($word:ident => $field:ident),* $(,)?) => {
+            $(
+                assert_eq!(
+                    layout::$word as usize * 4,
+                    std::mem::offset_of!(GpuBatch, $field),
+                    concat!(stringify!($field), " word offset drifted")
+                );
+            )*
+        };
+    }
+
+    /// Layout contract, read the way the kernel reads it: pack one lane, then
+    /// look up the fields the shader loads by the word offsets in
+    /// `ornis_gpu_si::layout`. The offset table is checked field by field, and
+    /// the packer's own values are found at the words the kernel would use.
+    #[test]
+    fn gpu_batch_words_match_the_si_kernel_layout() {
+        let mut batch = GpuBatch::zero();
+        let body_a = RigidBody::new_sphere(Vec3::ZERO, 0.5, 0.0);
+        let body_b = RigidBody::new_sphere(Vec3::new(0.0, 1.0, 0.0), 0.5, 1.0);
+        batch.fill_lane(LaneInput {
+            lane: 2,
+            n: Vec3::new(0.6, 0.8, 0.0),
+            ra: Vec3::new(0.0, 0.5, 0.0),
+            rb: Vec3::new(0.0, -0.5, 0.0),
+            target: -0.25,
+            mu: 0.3,
+            bias: 0.7,
+            acc_in: 0.125,
+            a: &body_a,
+            ba_idx: 5,
+            b: &body_b,
+            bb_idx: 9,
+        });
+        batch.count = 1;
+
+        let words: &[f32] = bytemuck::cast_slice(std::slice::from_ref(&batch));
+        assert_eq!(words.len(), layout::BATCH_WORDS as usize);
+        assert_eq!(
+            layout::BATCH_WORDS as usize * 4,
+            GPU_BATCH_STRIDE as usize,
+            "record words and stride must agree"
+        );
+
+        lane_offsets_match!(
+            NX => nx,
+            NY => ny,
+            NZ => nz,
+            RAX => rax,
+            RAY => ray,
+            RAZ => raz,
+            RBX => rbx,
+            RBY => rby,
+            RBZ => rbz,
+            T1X => t1x,
+            T1Y => t1y,
+            T1Z => t1z,
+            T2X => t2x,
+            T2Y => t2y,
+            T2Z => t2z,
+            INV_MA => inv_ma,
+            INV_MB => inv_mb,
+            INV_K_N => inv_k_n,
+            INV_K_T1 => inv_k_t1,
+            INV_K_T2 => inv_k_t2,
+            APPLY_N_AX => apply_n_ax,
+            APPLY_N_AY => apply_n_ay,
+            APPLY_N_AZ => apply_n_az,
+            APPLY_N_BX => apply_n_bx,
+            APPLY_N_BY => apply_n_by,
+            APPLY_N_BZ => apply_n_bz,
+            APPLY_W_AX => apply_w_ax,
+            APPLY_W_AY => apply_w_ay,
+            APPLY_W_AZ => apply_w_az,
+            APPLY_W_BX => apply_w_bx,
+            APPLY_W_BY => apply_w_by,
+            APPLY_W_BZ => apply_w_bz,
+            W_A00 => w_a00,
+            W_A01 => w_a01,
+            W_A02 => w_a02,
+            W_A10 => w_a10,
+            W_A11 => w_a11,
+            W_A12 => w_a12,
+            W_A20 => w_a20,
+            W_A21 => w_a21,
+            W_A22 => w_a22,
+            W_B00 => w_b00,
+            W_B01 => w_b01,
+            W_B02 => w_b02,
+            W_B10 => w_b10,
+            W_B11 => w_b11,
+            W_B12 => w_b12,
+            W_B20 => w_b20,
+            W_B21 => w_b21,
+            W_B22 => w_b22,
+            BIAS => bias,
+            SPEC_TARGET => spec_target,
+            MU => mu,
+            BODY_A => body_a,
+            BODY_B => body_b,
+            ACC => acc,
+            ACC_F1 => acc_f1,
+            ACC_F2 => acc_f2,
+        );
+
+        // Spot checks through the kernel's own word arithmetic: lane `l` of a
+        // group is `word + l`.
+        let lane = 2usize;
+        assert_eq!(words[layout::NX as usize + lane], 0.6);
+        assert_eq!(words[layout::NY as usize + lane], 0.8);
+        assert_eq!(words[layout::RAX as usize + lane], 0.0);
+        assert_eq!(words[layout::RAY as usize + lane], 0.5);
+        assert_eq!(words[layout::SPEC_TARGET as usize + lane], -0.25);
+        assert_eq!(words[layout::MU as usize + lane], 0.3);
+        assert_eq!(words[layout::BIAS as usize + lane], 0.7);
+        assert_eq!(words[layout::ACC as usize + lane], 0.125);
+        // The body indices are `u32` words: the shader reads them as `f32` and
+        // bitcasts back, so the payload must survive unchanged.
+        assert_eq!(words[layout::BODY_A as usize + lane].to_bits(), 5);
+        assert_eq!(words[layout::BODY_B as usize + lane].to_bits(), 9);
+        // The count word sits before the record's padding.
+        assert_eq!(
+            words[(layout::BATCH_WORDS - 4) as usize].to_bits(),
+            1,
+            "count must be where the kernel reads it"
+        );
     }
 }

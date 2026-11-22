@@ -19,6 +19,7 @@ members = [
     "crates/gpu-pbr",
     "crates/gpu-lighting",
     "crates/gpu-quad",
+    "crates/gpu-si",
     "crates/gpu-bloom",
     "crates/gpu-aa-edge",
     "crates/gpu-aa-taa",

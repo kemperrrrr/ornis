@@ -2992,6 +2992,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ornis-gpu-si"
+version = "0.1.0"
+dependencies = [
+ "ornis-gpu-shader",
+]
+
+[[package]]
 name = "ornis-gpu-skinning"
 version = "0.1.0"
 dependencies = [
@@ -3070,6 +3077,7 @@ dependencies = [
  "naga",
  "ornis-assets",
  "ornis-core",
+ "ornis-gpu-si",
  "ornis-macros",
  "ornis-schedule",
  "pollster",

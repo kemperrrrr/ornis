@@ -16,12 +16,14 @@
 //!   `repr(C)` layout matches WGSL alignment rules (vec3 fields must be
 //!   padded explicitly — WGSL aligns `vec3<f32>` to 16 bytes). The Rust
 //!   structs are the single source of truth for the buffer layout.
-//! - `contact_solver` is a `#[gpu_pipeline(...)]` function whose body is the
-//!   compute entry point, written in the kernel DSL; the macro generates
-//!   the bindings, built-in parameters and `fn main` around it.
+//! - `contact_solver` is authored in `crates/gpu-si` and translated to WGSL
+//!   through LLVM IR; the artifact is checked in and loaded with
+//!   `include_str!`. The kernel reads those records word by word, so the
+//!   word offsets in `ornis_gpu_si::layout` are pinned against
+//!   `offset_of!` by `lane_offsets_match_the_rust_record`.
 //!
-//! The assembled source is validated by naga in tests (no device required)
-//! and executed against a software adapter (`gpu_solver_*` tests).
+//! The artifact is validated by naga in tests (no device required) and
+//! executed against a software adapter (`gpu_solver_*` tests).
 //!
 //! # Hybrid model
 //!
@@ -52,15 +54,11 @@
 //! solves the dense 6x6 LDL with a breakdown flag on the device through
 //! [`WgpuAvbdSolver`]. Engine-step integration (host discovery staging rows
 //! into the device solve) stays rung-3 work: stepping a
-//! [`crate::avbd::AvbdEngine`] still falls back to the CPU. The DSL
-//! preconditions are closed: `ShaderType::Mat3` (`mat3x3<f32>`,
-//! `Mat3::from_cols` constructor, `Mat3::IDENTITY`/`ZERO`), local
-//! fixed-size scratch arrays (incl. nested Hessian shapes; effectful
-//! repeats rejected loudly), `u32` range `for` loops (increasing only —
-//! back substitution counts down via index arithmetic), and `helpers(...)`
-//! inclusion in `#[gpu_pipeline]` (stitches `#[wgsl_fn]`/`#[kernel]`
-//! sources ahead of the entry). Pinned by `macros/tests/compute_dsl.rs`
-//! and `helpers_stitch_ahead_of_main_and_validate`.
+//! [`crate::avbd::AvbdEngine`] still falls back to the CPU. Both kernels are
+//! translated from Rust (`crates/gpu-avbd`, `crates/gpu-si`) through LLVM IR,
+//! and their fixed-size scratch, nested loops and `u32` index arithmetic are
+//! what the translator's subset has to cover — pinned by
+//! `llvm2gpu/tests/llvm_e2e.rs` and by the device parity gates here.
 
 mod avbd;
 mod si_batches;
@@ -72,7 +70,8 @@ pub use avbd::{
     avbd_stamp_row_cpu, avbd_stub_wgsl,
 };
 pub use si_batches::{
-    GpuBatch, LaneInput, contact_solver_wgsl, pack_single_point_batches, write_back_acc,
+    GpuBatch, LaneInput, SI_CONTACT_ENTRY, contact_solver_wgsl, pack_single_point_batches,
+    write_back_acc,
 };
 
 use glam::Vec3;
@@ -338,7 +337,7 @@ impl GpuSequentialImpulse {
             label: Some("physics_contact_pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: Some("main"),
+            entry_point: Some(SI_CONTACT_ENTRY),
             compilation_options: Default::default(),
             cache: None,
         });

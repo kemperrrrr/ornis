@@ -2,8 +2,9 @@
 //!
 //! These are domain floors, not idiomatic factors: a bare `1e-10` in a
 //! contact row and the same literal in the wide path mean the same gate
-//! and must stay coupled. GPU/`#[kernel]` bodies keep literals — the WGSL
-//! DSL has no spelling for a Rust `const` (see `gpu/avbd.rs`).
+//! and must stay coupled. The GPU kernels spell the same literals in their own
+//! crates (`gpu-avbd`, `gpu-si`): the translator emits a `const` for each. A
+//! change here that the shader needs too must be made on both sides.
 
 /// Effective-mass floor for sequential-impulse constraint rows.
 ///

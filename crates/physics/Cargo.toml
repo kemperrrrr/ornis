@@ -35,6 +35,7 @@ rapier = []
 box3d = []
 
 [dev-dependencies]
+ornis-gpu-si = { path = "../gpu-si", version = "0.1.0" }
 criterion = { version = "0.8", features = ["rayon"] }
 naga = "30"
 pollster = "1.0"
