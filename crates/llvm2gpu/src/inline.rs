@@ -117,7 +117,7 @@ fn inline_into(
         }
         let callee = bodies
             .get(&site.callee)
-            .ok_or(TranslateError::Unsupported)?
+            .ok_or_else(TranslateError::unsupported)?
             .clone();
         inline_call(func, &site, &callee)?;
     }
@@ -154,7 +154,7 @@ fn inline_call(
     let (dst, args) = match &caller.blocks[site.block].instrs[site.instr] {
         Instr::Call { dst, args, .. } => (Some(dst.clone()), args.clone()),
         Instr::CallVoid { args, .. } => (None, args.clone()),
-        _ => return Err(TranslateError::Unsupported),
+        _ => return Err(TranslateError::unsupported()),
     };
     if args.len() != callee.params.len() {
         return Err(TranslateError::UnsupportedType(format!(
@@ -284,7 +284,7 @@ fn splice_call(
         tail.first(),
         Some(Instr::Call { .. } | Instr::CallVoid { .. })
     ) {
-        return Err(TranslateError::Unsupported);
+        return Err(TranslateError::unsupported());
     }
     tail.remove(0);
     start.extend(tail);
@@ -339,7 +339,7 @@ fn rewrite_term(
     } = *rewrites;
     Ok(match term {
         Terminator::Ret(Some(value)) => {
-            let name = slot.clone().ok_or(TranslateError::Unsupported)?;
+            let name = slot.clone().ok_or_else(TranslateError::unsupported)?;
             let value = rename_operand(value, prefix, subst)?;
             instrs.push(Instr::Store {
                 ptr: name,
@@ -392,7 +392,7 @@ fn rename_operand(
     };
     Ok(match subst.get(&name) {
         Some(Operand::Local(replacement)) => Operand::Local(replacement.clone()),
-        Some(_) => return Err(TranslateError::Unsupported),
+        Some(_) => return Err(TranslateError::unsupported()),
         None => Operand::Local(format!("{prefix}{name}")),
     })
 }

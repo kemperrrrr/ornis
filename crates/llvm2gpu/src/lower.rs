@@ -143,7 +143,7 @@ impl Lowering {
                 }
             }
             if deferred.len() == before {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             pending = deferred;
         }
@@ -320,7 +320,7 @@ impl IoValue {
     /// Naga type of this value in `module`.
     fn ty(self, module: &mut naga::Module) -> Result<naga::Handle<naga::Type>, TranslateError> {
         match self {
-            Self::Vec(lanes) => vec_f32_type(module, lanes).ok_or(TranslateError::Unsupported),
+            Self::Vec(lanes) => vec_f32_type(module, lanes).ok_or_else(TranslateError::unsupported),
             Self::U32 => Ok(scalar(module, naga::ScalarKind::Uint)),
             Self::U32x4 => Ok(module.types.insert(
                 naga::Type {
@@ -541,7 +541,7 @@ fn scan_io(func: &LlvmFunc, stage: Stage) -> Result<StageIo, TranslateError> {
                 }
                 // A stage reading the other stage's interface would declare an
                 // argument its entry point cannot have.
-                _ => return Err(TranslateError::Unsupported),
+                _ => return Err(TranslateError::unsupported()),
             }
         }
     }
@@ -557,14 +557,14 @@ const INPUT_LANE_ARGS: usize = 3;
 /// in [`Lowerer::input_lane`], which sees the same immediates.
 fn input_lanes(args: &[Operand]) -> Result<(u32, u32), TranslateError> {
     if args.len() != INPUT_LANE_ARGS {
-        return Err(TranslateError::Unsupported);
+        return Err(TranslateError::unsupported());
     }
     Ok((const_u32(&args[0])?, const_u32(&args[1])?))
 }
 
 /// Location immediate of a `*_store_*(location, …)` call.
 fn location_of(args: &[Operand]) -> Result<u32, TranslateError> {
-    const_u32(args.first().ok_or(TranslateError::Unsupported)?)
+    const_u32(args.first().ok_or_else(TranslateError::unsupported)?)
 }
 
 /// Record that `location` carries `value`.
@@ -841,7 +841,7 @@ fn repeated_byte(byte: u32) -> u32 {
 /// Word count of `bytes`, which must be a multiple of four.
 fn word_count(bytes: u32) -> Result<u32, TranslateError> {
     if bytes == 0 || !bytes.is_multiple_of(WORD_BYTES) {
-        return Err(TranslateError::Unsupported);
+        return Err(TranslateError::unsupported());
     }
     Ok(bytes / WORD_BYTES)
 }
@@ -1063,7 +1063,7 @@ impl<'a> Cfg<'a> {
             }
             order.push(block.label.as_str());
         }
-        let entry = *order.first().ok_or(TranslateError::Unsupported)?;
+        let entry = *order.first().ok_or_else(TranslateError::unsupported)?;
         let mut succs: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
         let mut preds: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
         let mut phis: HashMap<&'a str, Vec<Phi>> = HashMap::new();
@@ -2031,6 +2031,7 @@ impl Builders {
         cfg: &Cfg<'_>,
         stage: Stage,
     ) -> Result<naga::Function, TranslateError> {
+        crate::site::enter_function(&func.name);
         let mut function = naga::Function {
             name: Some(func.name.clone()),
             ..Default::default()
@@ -2105,7 +2106,7 @@ impl Builders {
             let ty = match ty {
                 Ty::Float => scalar(&mut self.module, naga::ScalarKind::Float),
                 Ty::I32 => scalar(&mut self.module, naga::ScalarKind::Uint),
-                _ => return Err(TranslateError::Unsupported),
+                _ => return Err(TranslateError::unsupported()),
             };
             function.arguments.push(naga::FunctionArgument {
                 name: Some(name.clone()),
@@ -2122,7 +2123,7 @@ impl Builders {
         function.result = match func.ret_ty {
             Ty::Void => None,
             ret => Some(naga::FunctionResult {
-                ty: scalar_of(&mut self.module, ret).ok_or(TranslateError::Unsupported)?,
+                ty: scalar_of(&mut self.module, ret).ok_or_else(TranslateError::unsupported)?,
                 binding: None,
             }),
         };
@@ -2199,7 +2200,7 @@ fn case_flow_returns(flow: Flow) -> Result<bool, TranslateError> {
     match flow {
         Flow::Returned => Ok(true),
         Flow::Next => Ok(false),
-        Flow::Continue | Flow::Break => Err(TranslateError::Unsupported),
+        Flow::Continue | Flow::Break => Err(TranslateError::unsupported()),
     }
 }
 
@@ -2300,7 +2301,7 @@ fn successors(term: &Terminator) -> Vec<&str> {
 /// return `f32`; a raster entry is `void` with no parameters, because its
 /// builtins and interface come from the stage-IO imports.
 fn entry_stage(func: &LlvmFunc) -> Result<Stage, TranslateError> {
-    let stage = Stage::of(&func.name).ok_or(TranslateError::Unsupported)?;
+    let stage = Stage::of(&func.name).ok_or_else(TranslateError::unsupported)?;
     let shape_ok = match stage {
         Stage::Compute => matches!(
             (func.ret_ty, func.params.as_slice()),
@@ -2311,7 +2312,7 @@ fn entry_stage(func: &LlvmFunc) -> Result<Stage, TranslateError> {
     if shape_ok {
         Ok(stage)
     } else {
-        Err(TranslateError::Unsupported)
+        Err(TranslateError::unsupported())
     }
 }
 
@@ -2442,10 +2443,10 @@ fn stage_output(
         return Ok(Some(StageOut::bare(var)));
     }
     if stage == Stage::Vertex && !io.position_out {
-        return Err(TranslateError::Unsupported);
+        return Err(TranslateError::unsupported());
     }
     if io.outputs.is_empty() {
-        return Err(TranslateError::Unsupported);
+        return Err(TranslateError::unsupported());
     }
     let OutputType {
         ty,
@@ -2586,7 +2587,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         self.func.body = body;
         match flow {
             Flow::Next | Flow::Returned => Ok(()),
-            Flow::Continue | Flow::Break => Err(TranslateError::Unsupported),
+            Flow::Continue | Flow::Break => Err(TranslateError::unsupported()),
         }
     }
 
@@ -2618,7 +2619,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             // for every incoming edge.
             Ty::Ptr => naga::ScalarKind::Uint,
             Ty::I1 => naga::ScalarKind::Bool,
-            _ => return Err(TranslateError::Unsupported),
+            _ => return Err(TranslateError::unsupported()),
         };
         Ok(scalar(&mut self.builders.module, kind))
     }
@@ -2652,7 +2653,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             .cfg
             .blocks
             .get(start)
-            .ok_or(TranslateError::Unsupported)?;
+            .ok_or_else(TranslateError::unsupported)?;
         self.emit_block(block, out)?;
         match &block.term {
             Terminator::Ret(value) => self.emit_ret(value.as_ref(), out),
@@ -2761,7 +2762,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<(), TranslateError> {
         let (base, words) = match base {
             PtrBase::Local(name) => {
-                let pointer = self.pointers.get(name).ok_or(TranslateError::Unsupported)?;
+                let pointer = self
+                    .pointers
+                    .get(name)
+                    .ok_or_else(TranslateError::unsupported)?;
                 (pointer.base, pointer.words)
             }
             PtrBase::Global(symbol) => {
@@ -2779,9 +2783,14 @@ impl<'a, 'b> Lowerer<'a, 'b> {
 
     /// Words one `getelementptr` index step covers.
     ///
-    /// A stride that is not a multiple of four is only accepted for a constant
-    /// index that is: LLVM emits `i8` GEPs for field offsets, and those are
-    /// always word-aligned in this subset.
+    /// Move a pointer by `index * stride` bytes.
+    ///
+    /// A stride that is a multiple of four divides cleanly into the word offset
+    /// local memory is addressed by. A smaller stride is how LLVM spells an
+    /// access once it has folded the element size into the index — see
+    /// `byte_offset` — so it is accepted too: a constant index must be
+    /// word-aligned to keep a hand-written IR honest, and a computed one is
+    /// scaled by the same division the constant case proves.
     fn pointer_step(
         &mut self,
         stride: u32,
@@ -2797,13 +2806,18 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let step = self.u32_literal(out, step);
             return Ok(self.binary(out, naga::BinaryOperator::Multiply, index, step));
         }
-        let Operand::U32(offset) = index else {
-            return Err(TranslateError::Unsupported);
-        };
-        if !offset.is_multiple_of(WORD_BYTES) {
-            return Err(TranslateError::Unsupported);
+        if let Operand::U32(offset) = index {
+            if !offset.is_multiple_of(WORD_BYTES) {
+                return Err(TranslateError::unsupported());
+            }
+            return Ok(self.u32_literal(out, offset / WORD_BYTES));
         }
-        Ok(self.u32_literal(out, offset / WORD_BYTES))
+        // `byte_offset`: LLVM folded the element size into the index, so the
+        // byte offset is word-aligned at every access the IR can actually
+        // perform. The division is what turns it back into a word index.
+        let bytes = self.operand(out, index)?;
+        let word = self.u32_literal(out, WORD_BYTES);
+        Ok(self.binary(out, naga::BinaryOperator::Divide, bytes, word))
     }
 
     /// `load`: read one 4-byte word and reinterpret it as `ty`.
@@ -2818,7 +2832,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         match ty {
             Ty::I32 => Ok(word),
             Ty::Float => Ok(self.bitcast_float(out, word)),
-            _ => Err(TranslateError::Unsupported),
+            _ => Err(TranslateError::unsupported()),
         }
     }
 
@@ -2835,7 +2849,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let value = match ty {
             Ty::I32 => value,
             Ty::Float => self.bitcast_uint(out, value),
-            _ => return Err(TranslateError::Unsupported),
+            _ => return Err(TranslateError::unsupported()),
         };
         self.store_word(out, pointer.base, pointer.words, value);
         Ok(())
@@ -2894,7 +2908,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 base: pointer.base,
                 words: pointer.words,
             })
-            .ok_or(TranslateError::Unsupported)
+            .ok_or_else(TranslateError::unsupported)
     }
 
     /// Write `word` at `base + words`.
@@ -2934,13 +2948,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         args: &'o [Operand],
     ) -> Result<(MemoryPointer, &'o Operand, u32), TranslateError> {
         if args.len() < MEMORY_INTRINSIC_ARGS {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let Operand::Local(name) = &args[0] else {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         };
         let Operand::U32(bytes) = args[2] else {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         };
         Ok((self.pointer(name)?, &args[1], bytes))
     }
@@ -2956,7 +2970,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             Operand::U32(value) => *value & BYTE_MASK,
             Operand::Bool(value) => u32::from(*value),
             Operand::F32(_) | Operand::Local(_) | Operand::Symbol(_) => {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
         };
         let word = self.u32_literal(out, repeated_byte(byte));
@@ -2970,16 +2984,16 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     /// `llvm.memcpy(dst, src, size, …)`: copy whole words.
     fn memcpy(&mut self, out: &mut naga::Block, args: &[Operand]) -> Result<(), TranslateError> {
         if args.len() < MEMORY_INTRINSIC_ARGS {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let Operand::Local(dst) = &args[0] else {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         };
         let Operand::Local(src) = &args[1] else {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         };
         let Operand::U32(bytes) = args[2] else {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         };
         let dst = self.pointer(dst)?;
         let src = self.pointer(src)?;
@@ -3050,7 +3064,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             .builders
             .module_constants
             .get(symbol)
-            .ok_or(TranslateError::Unsupported)?
+            .ok_or_else(TranslateError::unsupported)?
             .clone();
         let words = word_count(bytes.len() as u32)?;
         let ty = self.word_array_type(words);
@@ -3196,7 +3210,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             .get(header)
             .is_some_and(|body| body.contains(merge));
         if merge != EXIT && !merges_in_loop {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         Ok(())
     }
@@ -3235,7 +3249,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let merge = self
             .cfg
             .branch_merge(label, true_label, false_label)
-            .ok_or(TranslateError::Unsupported)?;
+            .ok_or_else(TranslateError::unsupported)?;
         self.check_merge_in_loop(merge, ctx)?;
         let condition = self.operand(out, cond)?;
         let outer_env = self.env.clone();
@@ -3250,10 +3264,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             self.diverged = true;
         }
         if accept_flow != Flow::Next && accept_flow != Flow::Returned {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         if reject_flow != Flow::Next && reject_flow != Flow::Returned {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         out.push(
             naga::Statement::If {
@@ -3267,7 +3281,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             if accept_flow == Flow::Returned && reject_flow == Flow::Returned {
                 return Ok(Flow::Returned);
             }
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         if stop == Some(merge) {
             return Ok(Flow::Next);
@@ -3290,7 +3304,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         out: &mut naga::Block,
         ctx: Ctx<'a>,
     ) -> Result<Flow, TranslateError> {
-        let merge = self.cfg.merge(label).ok_or(TranslateError::Unsupported)?;
+        let merge = self
+            .cfg
+            .merge(label)
+            .ok_or_else(TranslateError::unsupported)?;
         self.check_merge_in_loop(merge, ctx)?;
         let selector_expr = self.operand(out, selector)?;
         let outer_env = self.env.clone();
@@ -3335,7 +3352,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             naga::Span::default(),
         );
         if merge == EXIT {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         if stop == Some(merge) {
             return Ok(Flow::Next);
@@ -3380,7 +3397,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             inside_flow,
             Flow::Next | Flow::Continue | Flow::Break | Flow::Returned
         ) {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let mut outside_block = naga::Block::new();
         self.env = outer_env.clone();
@@ -3459,7 +3476,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             .cfg
             .loops
             .get(header)
-            .ok_or(TranslateError::Unsupported)?
+            .ok_or_else(TranslateError::unsupported)?
             .clone();
         let mut exits: Vec<&'a str> = loop_exits(self.cfg, &body).into_iter().collect();
         exits.sort_unstable();
@@ -3484,14 +3501,14 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         // `Loop`; the exit block reloads whatever its phis need.
         self.env = outer_env;
         if flow == Flow::Continue {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         if exits.is_empty() {
             if flow == Flow::Returned {
                 out.push(loop_statement(loop_body), naga::Span::default());
                 return Ok(Flow::Returned);
             }
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         out.push(loop_statement(loop_body), naga::Span::default());
         if flow == Flow::Returned {
@@ -3557,7 +3574,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         outer: Ctx<'a>,
     ) -> Result<Flow, TranslateError> {
         let merge = self.cfg.merge(header).unwrap_or(EXIT);
-        let selector = self.exit_id_var.ok_or(TranslateError::Unsupported)?;
+        let selector = self.exit_id_var.ok_or_else(TranslateError::unsupported)?;
         let mut returned = 0usize;
         for exit in exits {
             let id = self.exit_id(exit);
@@ -3589,7 +3606,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             if returned == exits.len() {
                 return Ok(Flow::Returned);
             }
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         if self.leaves_outer(merge, outer) {
             // The merge is past the enclosing loop: break it and let its own
@@ -3665,7 +3682,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         out: &mut naga::Block,
     ) -> Result<(), TranslateError> {
         for name in names {
-            let var = *self.spill.get(name).ok_or(TranslateError::Unsupported)?;
+            let var = *self
+                .spill
+                .get(name)
+                .ok_or_else(TranslateError::unsupported)?;
             let pointer = self.expr(out, naga::Expression::LocalVariable(var));
             let value = self.expr(out, naga::Expression::Load { pointer });
             self.env.insert(name.clone(), value);
@@ -3690,14 +3710,21 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         block: &BasicBlock,
         out: &mut naga::Block,
     ) -> Result<(), TranslateError> {
+        crate::site::enter_block(&block.label);
         for instr in &block.instrs {
             match instr {
                 Instr::Phi { dst, ty, .. } => {
-                    let var = *self.phi_vars.get(dst).ok_or(TranslateError::Unsupported)?;
+                    let var = *self
+                        .phi_vars
+                        .get(dst)
+                        .ok_or_else(TranslateError::unsupported)?;
                     let ptr = self.expr(out, naga::Expression::LocalVariable(var));
                     let value = self.expr(out, naga::Expression::Load { pointer: ptr });
                     if *ty == Ty::Ptr {
-                        let base = *self.ptr_bases.get(dst).ok_or(TranslateError::Unsupported)?;
+                        let base = *self
+                            .ptr_bases
+                            .get(dst)
+                            .ok_or_else(TranslateError::unsupported)?;
                         self.pointers
                             .insert(dst.clone(), MemoryPointer { base, words: value });
                     } else {
@@ -3744,7 +3771,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let value = self.operand(out, op)?;
             let global = self.builders.storage_global(0, 0, Elem::F32, true)?;
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
-            let index = self.id_x.ok_or(TranslateError::Unsupported)?;
+            let index = self.id_x.ok_or_else(TranslateError::unsupported)?;
             let pointer = self.expr(out, naga::Expression::Access { base, index });
             out.push(
                 naga::Statement::Store { pointer, value },
@@ -3785,15 +3812,18 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 .incoming
                 .iter()
                 .find_map(|(value, pred)| (pred == from).then_some(value))
-                .ok_or(TranslateError::Unsupported)?;
+                .ok_or_else(TranslateError::unsupported)?;
             let value = if phi.ty == Ty::Ptr {
                 let Operand::Local(name) = incoming else {
-                    return Err(TranslateError::Unsupported);
+                    return Err(TranslateError::unsupported());
                 };
-                let pointer = *self.pointers.get(name).ok_or(TranslateError::Unsupported)?;
+                let pointer = *self
+                    .pointers
+                    .get(name)
+                    .ok_or_else(TranslateError::unsupported)?;
                 match self.ptr_bases.get(&phi.dst) {
                     Some(base) if *base != pointer.base => {
-                        return Err(TranslateError::Unsupported);
+                        return Err(TranslateError::unsupported());
                     }
                     Some(_) => {}
                     None => {
@@ -3807,7 +3837,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let var = *self
                 .phi_vars
                 .get(&phi.dst)
-                .ok_or(TranslateError::Unsupported)?;
+                .ok_or_else(TranslateError::unsupported)?;
             let ptr = self.expr(out, naga::Expression::LocalVariable(var));
             out.push(
                 naga::Statement::Store {
@@ -3821,6 +3851,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     }
 
     fn emit_instr(&mut self, instr: &Instr, out: &mut naga::Block) -> Result<(), TranslateError> {
+        crate::site::enter_instruction(&format!("{instr:?}"));
         match instr {
             Instr::FAdd { dst, a, b } => {
                 self.assign_binary(dst, naga::BinaryOperator::Add, a, b, out)?
@@ -3950,7 +3981,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                     let kind = match (from, to) {
                         (Ty::I32, Ty::Float) => naga::ScalarKind::Float,
                         (Ty::Float, Ty::I32) => naga::ScalarKind::Uint,
-                        _ => return Err(TranslateError::Unsupported),
+                        _ => return Err(TranslateError::unsupported()),
                     };
                     let expr = self.operand(out, a)?;
                     let value = self.expr(
@@ -3981,8 +4012,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 self.bind(dst, value, out);
             }
             Instr::Store { ptr, value, ty } => self.store(ptr, value, *ty, out)?,
-            Instr::Phi { .. } => return Err(TranslateError::Unsupported),
-            Instr::Ret { .. } | Instr::RetVoid => return Err(TranslateError::Unsupported),
+            Instr::Phi { .. } => return Err(TranslateError::unsupported()),
+            Instr::Ret { .. } | Instr::RetVoid => return Err(TranslateError::unsupported()),
         }
         Ok(())
     }
@@ -4166,7 +4197,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                     self.negate(out, ordered)
                 }
             }
-            _ => return Err(TranslateError::Unsupported),
+            _ => return Err(TranslateError::unsupported()),
         };
         Ok(value)
     }
@@ -4223,7 +4254,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             "ule" => (left, right, naga::BinaryOperator::LessEqual),
             "ugt" => (left, right, naga::BinaryOperator::Greater),
             "uge" => (left, right, naga::BinaryOperator::GreaterEqual),
-            _ => return Err(TranslateError::Unsupported),
+            _ => return Err(TranslateError::unsupported()),
         };
         Ok(self.binary(out, op, left, right))
     }
@@ -4286,7 +4317,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             naga::Span::default(),
         );
         if helper.ret == Ty::Void {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         Ok(result)
     }
@@ -4340,20 +4371,20 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if callee.contains("llvm.fptosi.sat") {
             if args.len() != 1 {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             let value = self.cast(out, &args[0], naga::ScalarKind::Sint)?;
             return Ok(self.bitcast_uint(out, value));
         }
         if callee.contains("llvm.fptoui.sat") {
             if args.len() != 1 {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             return self.cast(out, &args[0], naga::ScalarKind::Uint);
         }
         if let Some(fun) = min_max(callee) {
             if args.len() != 2 {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             // `llvm.smin`/`smax` compare signed values; WGSL picks the
             // signed overload from the operand type.
@@ -4384,20 +4415,24 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             return self.global_invocation_lane(out, args);
         }
         if callee.contains("vertex_index") {
-            return self.vertex_index.ok_or(TranslateError::Unsupported);
+            return self.vertex_index.ok_or_else(TranslateError::unsupported);
         }
         if callee.contains("instance_index") {
-            return self.instance_index.ok_or(TranslateError::Unsupported);
+            return self.instance_index.ok_or_else(TranslateError::unsupported);
         }
         if callee.contains("local_invocation_index") {
-            return self.local_index.ok_or(TranslateError::Unsupported);
+            return self.local_index.ok_or_else(TranslateError::unsupported);
         }
         if callee.contains("fragment_uv_lane") {
-            return self.input_lane(out, 0, args.first().ok_or(TranslateError::Unsupported)?);
+            return self.input_lane(
+                out,
+                0,
+                args.first().ok_or_else(TranslateError::unsupported)?,
+            );
         }
         if callee.contains(ornis_gpu_abi::symbols::VERTEX_INPUT_U32X4) {
             if args.len() != 2 {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             return self.input_word_lane(
                 out,
@@ -4409,11 +4444,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains(ornis_gpu_abi::symbols::FRAGMENT_INPUT_U32)
             || callee.contains(ornis_gpu_abi::symbols::VERTEX_INPUT_U32)
         {
-            return self.input_word(const_u32(args.first().ok_or(TranslateError::Unsupported)?)?);
+            return self.input_word(const_u32(
+                args.first().ok_or_else(TranslateError::unsupported)?,
+            )?);
         }
         if callee.contains("vertex_input_lane") || callee.contains("fragment_input_lane") {
             if args.len() != INPUT_LANE_ARGS {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             return self.input_lane(out, const_u32(&args[0])?, &args[2]);
         }
@@ -4494,7 +4531,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if callee.contains("uniform_read_f32") {
             if args.len() != 4 {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             let group = const_u32(&args[0])?;
             let binding = const_u32(&args[1])?;
@@ -4514,7 +4551,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if callee.contains("storage_len_f32") {
             if args.len() != 2 {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             let group = const_u32(&args[0])?;
             let binding = const_u32(&args[1])?;
@@ -4526,7 +4563,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if callee.contains("storage_len_u32") && !callee.contains("storage_len_u32x4") {
             if args.len() != 2 {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             let group = const_u32(&args[0])?;
             let binding = const_u32(&args[1])?;
@@ -4538,7 +4575,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if callee.contains("storage_len_u32x4") {
             if args.len() != 2 {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             let group = const_u32(&args[0])?;
             let binding = const_u32(&args[1])?;
@@ -4550,7 +4587,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if callee.contains("storage_read_u32_lane") {
             if args.len() != 4 {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             let group = const_u32(&args[0])?;
             let binding = const_u32(&args[1])?;
@@ -4586,7 +4623,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if callee.contains("storage_atomic_add_u32") {
             if args.len() != 4 {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             let group = const_u32(&args[0])?;
             let binding = const_u32(&args[1])?;
@@ -4705,7 +4742,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if args.len() == 1 {
             let Some(fun) = unary_math(callee) else {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             };
             let arg = self.operand(out, &args[0])?;
             return Ok(self.expr(
@@ -4719,7 +4756,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 },
             ));
         }
-        Err(TranslateError::Unsupported)
+        Err(TranslateError::unsupported())
     }
 
     /// `cross3(ax, ay, az, bx, by, bz, lane)` — one lane of the cross product.
@@ -4730,11 +4767,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let lanes = VEC3_LANES as usize;
         if args.len() != lanes + lanes + 1 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let lane = const_u32(&args[lanes + lanes])?;
         if lane >= VEC3_LANES {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let va = self.vec3_of(out, args, 0)?;
         let vb = self.vec3_of(out, args, VEC3_LANES)?;
@@ -4765,11 +4802,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let lanes = VEC3_LANES as usize;
         if args.len() != lanes + 1 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let lane = const_u32(&args[lanes])?;
         if lane >= VEC3_LANES {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let va = self.vec3_of(out, args, 0)?;
         let unit = self.expr(
@@ -4799,9 +4836,16 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let start = at as usize;
         let ty = vec_f32_type(&mut self.builders.module, VEC2_LANES)
-            .ok_or(TranslateError::Unsupported)?;
-        let x = self.operand(out, args.get(start).ok_or(TranslateError::Unsupported)?)?;
-        let y = self.operand(out, args.get(start + 1).ok_or(TranslateError::Unsupported)?)?;
+            .ok_or_else(TranslateError::unsupported)?;
+        let x = self.operand(
+            out,
+            args.get(start).ok_or_else(TranslateError::unsupported)?,
+        )?;
+        let y = self.operand(
+            out,
+            args.get(start + 1)
+                .ok_or_else(TranslateError::unsupported)?,
+        )?;
         Ok(self.expr(
             out,
             naga::Expression::Compose {
@@ -4819,9 +4863,20 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let start = at as usize;
         let ty = self.vec3_type();
-        let x = self.operand(out, args.get(start).ok_or(TranslateError::Unsupported)?)?;
-        let y = self.operand(out, args.get(start + 1).ok_or(TranslateError::Unsupported)?)?;
-        let z = self.operand(out, args.get(start + 2).ok_or(TranslateError::Unsupported)?)?;
+        let x = self.operand(
+            out,
+            args.get(start).ok_or_else(TranslateError::unsupported)?,
+        )?;
+        let y = self.operand(
+            out,
+            args.get(start + 1)
+                .ok_or_else(TranslateError::unsupported)?,
+        )?;
+        let z = self.operand(
+            out,
+            args.get(start + 2)
+                .ok_or_else(TranslateError::unsupported)?,
+        )?;
         Ok(self.expr(
             out,
             naga::Expression::Compose {
@@ -4837,11 +4892,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         out: &mut naga::Block,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
-        let axis = const_u32(args.first().ok_or(TranslateError::Unsupported)?)?;
+        let axis = const_u32(args.first().ok_or_else(TranslateError::unsupported)?)?;
         if axis >= VEC3_LANES {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
-        let global_id = self.global_id.ok_or(TranslateError::Unsupported)?;
+        let global_id = self.global_id.ok_or_else(TranslateError::unsupported)?;
         Ok(self.expr(
             out,
             naga::Expression::AccessIndex {
@@ -4862,15 +4917,15 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let lane = const_u32(lane)?;
         let Some(IoValue::Vec(lanes)) = self.io.inputs.get(&location).copied() else {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         };
         if lane >= lanes {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let input = *self
             .inputs
             .get(&location)
-            .ok_or(TranslateError::Unsupported)?;
+            .ok_or_else(TranslateError::unsupported)?;
         Ok(self.expr(
             out,
             naga::Expression::AccessIndex {
@@ -4886,11 +4941,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         out: &mut naga::Block,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
-        let lane = const_u32(args.first().ok_or(TranslateError::Unsupported)?)?;
+        let lane = const_u32(args.first().ok_or_else(TranslateError::unsupported)?)?;
         if lane >= POSITION_LANES {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
-        let position = self.position.ok_or(TranslateError::Unsupported)?;
+        let position = self.position.ok_or_else(TranslateError::unsupported)?;
         Ok(self.expr(
             out,
             naga::Expression::AccessIndex {
@@ -4921,7 +4976,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         atomic: bool,
     ) -> Result<(), TranslateError> {
         if args.len() != 2 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let index = self.operand(out, &args[0])?;
         let value = self.operand(out, &args[1])?;
@@ -4955,7 +5010,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         if args.len() != 2 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let index = self.operand(out, &args[0])?;
         let value = self.operand(out, &args[1])?;
@@ -5028,7 +5083,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             components.push(self.operand(out, &args[OWNED_SAMPLE_ARGS + index])?);
         }
         let coord_ty = vec_f32_type(&mut self.builders.module, coordinate_lanes as u32)
-            .ok_or(TranslateError::Unsupported)?;
+            .ok_or_else(TranslateError::unsupported)?;
         let coordinate = self.expr(
             out,
             naga::Expression::Compose {
@@ -5071,11 +5126,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         // Bindings, coordinate lanes, the level when the import takes one, and
         // the lane.
         if args.len() != OWNED_SAMPLE_ARGS + coordinate_lanes + level_args + 1 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let lane = const_u32(&args[args.len() - 1])?;
         if lane >= VEC4_LANES {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let target = self.sample_target(out, args, TextureKind::Sampled, shape, false, false)?;
         let level = match level {
@@ -5127,7 +5182,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let coordinate_lanes = shape.coordinate_lanes();
         if args.len() != OWNED_SAMPLE_ARGS + coordinate_lanes + COMPARE_VALUE_ARGS {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let group = const_u32(&args[0])?;
         let binding = const_u32(&args[1])?;
@@ -5138,7 +5193,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             components.push(self.operand(out, &args[OWNED_SAMPLE_ARGS + index])?);
         }
         let coord_ty = vec_f32_type(&mut self.builders.module, coordinate_lanes as u32)
-            .ok_or(TranslateError::Unsupported)?;
+            .ok_or_else(TranslateError::unsupported)?;
         let coordinate = self.expr(
             out,
             naga::Expression::Compose {
@@ -5184,11 +5239,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         if args.len() != UNIFORM_PREFIX + 2 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let lane = const_u32(&args[UNIFORM_PREFIX])?;
         if lane >= VEC4_LANES {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         self.texture_load_sample_of(
             out,
@@ -5217,7 +5272,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             UNIFORM_PREFIX + 1
         };
         if args.len() != expected {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let group = const_u32(&args[0])?;
         let binding = const_u32(&args[1])?;
@@ -5226,7 +5281,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if !self.builders.sampling.multisampled_at(group, binding) {
             // The sample operand only exists on a multisampled image; a plain
             // one has mip levels instead, so the build is missing the flag.
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let texel = self.image_load(out, image, true, &args[2], &args[3], Some(sample))?;
         // An integer target is read word-wise: the SDK returns the first lane,
@@ -5255,11 +5310,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         if args.len() != UNIFORM_PREFIX + 1 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let lane = const_u32(&args[UNIFORM_PREFIX])?;
         if lane >= VEC4_LANES {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         self.texture_load_lane_of(out, &args[..UNIFORM_PREFIX], TextureKind::Sampled, lane)
     }
@@ -5342,7 +5397,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         kind: TextureKind,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         if args.len() != 2 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let group = const_u32(&args[0])?;
         let binding = const_u32(&args[1])?;
@@ -5446,7 +5501,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let (group, binding, sid, field) = uniform_ids(args)?;
         let inner = const_u32(
             args.get(UNIFORM_PREFIX)
-                .ok_or(TranslateError::Unsupported)?,
+                .ok_or_else(TranslateError::unsupported)?,
         )?;
         let tag = self.field_tag(sid, field)?;
         if tag < ornis_gpu_abi::TYPE_TAG_NESTED {
@@ -5508,7 +5563,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         if args.len() != 7 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let (group, binding, sid, field) = uniform_ids(args)?;
         // Decoding "one value operand between two immediates" is the shape of
@@ -5557,7 +5612,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     /// checking that `field` is a struct and `inner` one of its `vec4` fields.
     fn nested_ids(&self, args: &[Operand]) -> Result<(u32, u32, u32, u32), TranslateError> {
         if args.len() != NESTED_VEC4_ARGS {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let (group, binding, sid, field) = uniform_ids(args)?;
         let _ = (group, binding);
@@ -5600,7 +5655,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         if args.len() != NESTED_ARRAY_VEC4_ARGS {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let (group, binding, sid, outer) = uniform_ids(args)?;
         let field = const_u32(&args[4])?;
@@ -5694,7 +5749,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         expect: u8,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         if args.len() != 4 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let (group, binding, sid, field) = uniform_ids(args)?;
         let tag = self.field_tag(sid, field)?;
@@ -5721,7 +5776,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         if args.len() != 7 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let (group, binding, sid, field) = uniform_ids(args)?;
         let tag = self.field_tag(sid, field)?;
@@ -5768,7 +5823,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let (group, binding, sid, field) = uniform_ids(args)?;
         let component = const_u32(
             args.get(UNIFORM_PREFIX)
-                .ok_or(TranslateError::Unsupported)?,
+                .ok_or_else(TranslateError::unsupported)?,
         )?;
         let tag = self.field_tag(sid, field)?;
         if tag != ornis_gpu_abi::TYPE_TAG_VEC4 {
@@ -5814,7 +5869,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             // merge that a returning arm can skip, is rejected instead of
             // emitting WGSL Tint refuses (or native UB).
             if self.divergent_depth > 0 || self.diverged {
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             out.push(
                 naga::Statement::ControlBarrier(naga::Barrier::WORK_GROUP),
@@ -5846,7 +5901,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         {
             return Ok(());
         }
-        Err(TranslateError::Unsupported)
+        Err(TranslateError::unsupported())
     }
 
     /// `vertex_position(x, y, z, w)` into the clip-space output slot.
@@ -5859,7 +5914,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             .stage_out
             .as_ref()
             .and_then(|stage_out| stage_out.position)
-            .ok_or(TranslateError::Unsupported)?;
+            .ok_or_else(TranslateError::unsupported)?;
         self.store_slot(out, OutSlot::Position, member, args)
     }
 
@@ -5873,7 +5928,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let member = match self
             .stage_out
             .as_ref()
-            .ok_or(TranslateError::Unsupported)?
+            .ok_or_else(TranslateError::unsupported)?
             .locations
             .as_ref()
         {
@@ -5882,7 +5937,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             None if location == 0 => Some(0),
             None => None,
         }
-        .ok_or(TranslateError::Unsupported)?;
+        .ok_or_else(TranslateError::unsupported)?;
         self.store_slot(out, OutSlot::Location(location), member, lanes)
     }
 
@@ -5895,21 +5950,21 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         lanes: &[Operand],
     ) -> Result<(), TranslateError> {
         let Some(stage_out) = &self.stage_out else {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         };
         let var = stage_out.var;
         if let OutSlot::Location(location) = slot
             && self.io.outputs.get(&location) != Some(&IoValue::floats(lanes.len() as u32))
         {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let mut components = Vec::with_capacity(lanes.len());
         for lane in lanes {
             components.push(self.operand(out, lane)?);
         }
         let width = components.len() as u32;
-        let ty =
-            vec_f32_type(&mut self.builders.module, width).ok_or(TranslateError::Unsupported)?;
+        let ty = vec_f32_type(&mut self.builders.module, width)
+            .ok_or_else(TranslateError::unsupported)?;
         let value = self.expr(out, naga::Expression::Compose { ty, components });
         self.write_slot(out, var, member, value)
     }
@@ -5923,7 +5978,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<(), TranslateError> {
         let slot = OutSlot::Location(location);
         if self.io.outputs.get(&location) != Some(&IoValue::U32) {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let member = self
             .stage_out
@@ -5934,12 +5989,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                     .as_ref()
                     .and_then(|members| members.get(&slot).copied())
             })
-            .ok_or(TranslateError::Unsupported)?;
+            .ok_or_else(TranslateError::unsupported)?;
         let value = self.operand(out, value)?;
         let var = self
             .stage_out
             .as_ref()
-            .ok_or(TranslateError::Unsupported)?
+            .ok_or_else(TranslateError::unsupported)?
             .var;
         self.write_slot(out, var, member, value)
     }
@@ -5985,19 +6040,19 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         match import {
             IoImport::VertexPosition => {
                 if args.len() != POSITION_LANES as usize {
-                    return Err(TranslateError::Unsupported);
+                    return Err(TranslateError::unsupported());
                 }
                 self.position_store(out, args)
             }
             IoImport::VertexOutputU32 | IoImport::FragmentOutputU32 => {
                 if args.len() != 2 {
-                    return Err(TranslateError::Unsupported);
+                    return Err(TranslateError::unsupported());
                 }
                 self.store_scalar(out, location_of(args)?, &args[1])
             }
             IoImport::FragmentOutput0 => {
                 if args.len() != VEC4_LANES as usize {
-                    return Err(TranslateError::Unsupported);
+                    return Err(TranslateError::unsupported());
                 }
                 self.store_lanes(out, 0, args)
             }
@@ -6007,11 +6062,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             | IoImport::FragmentOutput
             | IoImport::FragmentOutput2 => {
                 if args.len() < 2 {
-                    return Err(TranslateError::Unsupported);
+                    return Err(TranslateError::unsupported());
                 }
                 self.store_lanes(out, location_of(args)?, &args[1..])
             }
-            _ => Err(TranslateError::Unsupported),
+            _ => Err(TranslateError::unsupported()),
         }
     }
 
@@ -6021,12 +6076,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         location: u32,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         if self.io.inputs.get(&location) != Some(&IoValue::U32) {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         self.inputs
             .get(&location)
             .copied()
-            .ok_or(TranslateError::Unsupported)
+            .ok_or_else(TranslateError::unsupported)
     }
 
     /// Lane `lane` of the integer `@location(location)` input declared `kind`.
@@ -6038,12 +6093,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         kind: IoValue,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         if self.io.inputs.get(&location) != Some(&kind) || lane >= VEC4_LANES {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let input = *self
             .inputs
             .get(&location)
-            .ok_or(TranslateError::Unsupported)?;
+            .ok_or_else(TranslateError::unsupported)?;
         Ok(self.expr(
             out,
             naga::Expression::AccessIndex {
@@ -6060,7 +6115,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         args: &[Operand],
     ) -> Result<(), TranslateError> {
         if args.len() != 7 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let group = const_u32(&args[0])?;
         let binding = const_u32(&args[1])?;
@@ -6096,7 +6151,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         args: &[Operand],
     ) -> Result<(), TranslateError> {
         if args.len() != 6 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let src_group = const_u32(&args[0])?;
         let src_binding = const_u32(&args[1])?;
@@ -6144,7 +6199,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         elem: Elem,
     ) -> Result<(), TranslateError> {
         if args.len() != 4 {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let group = const_u32(&args[0])?;
         let binding = const_u32(&args[1])?;
@@ -6167,7 +6222,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         n: usize,
     ) -> Result<(u32, u32, naga::Handle<naga::Expression>), TranslateError> {
         if args.len() != n {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::unsupported());
         }
         let group = const_u32(&args[0])?;
         let binding = const_u32(&args[1])?;
@@ -6233,7 +6288,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 .env
                 .get(name)
                 .copied()
-                .ok_or(TranslateError::Unsupported)?,
+                .ok_or_else(TranslateError::unsupported)?,
             Operand::F32(value) => {
                 self.expr(out, naga::Expression::Literal(naga::Literal::F32(*value)))
             }
@@ -6421,13 +6476,13 @@ const POSITION_LANES: u32 = 4;
 const UNIFORM_PREFIX: usize = 4;
 
 fn workgroup_index(args: &[Operand]) -> Result<&Operand, TranslateError> {
-    args.first().ok_or(TranslateError::Unsupported)
+    args.first().ok_or_else(TranslateError::unsupported)
 }
 
 /// `texture_load_2d_f32(group, binding, x, y)`.
 fn texture_xy(args: &[Operand]) -> Result<(u32, u32, &Operand, &Operand), TranslateError> {
     if args.len() != UNIFORM_PREFIX {
-        return Err(TranslateError::Unsupported);
+        return Err(TranslateError::unsupported());
     }
     Ok((
         const_u32(&args[0])?,
@@ -6440,7 +6495,7 @@ fn texture_xy(args: &[Operand]) -> Result<(u32, u32, &Operand, &Operand), Transl
 /// `(group, binding, struct id, field)` shared by every uniform import.
 fn uniform_ids(args: &[Operand]) -> Result<(u32, u32, u32, u32), TranslateError> {
     if args.len() < UNIFORM_PREFIX {
-        return Err(TranslateError::Unsupported);
+        return Err(TranslateError::unsupported());
     }
     Ok((
         const_u32(&args[0])?,
@@ -6509,7 +6564,7 @@ fn const_u32(op: &Operand) -> Result<u32, TranslateError> {
         // A local is not materialised; group/binding must be immediates
         // (same rule as `wasm2gpu`).
         Operand::Local(_) | Operand::F32(_) | Operand::Bool(_) | Operand::Symbol(_) => {
-            Err(TranslateError::Unsupported)
+            Err(TranslateError::unsupported())
         }
     }
 }
@@ -6659,7 +6714,10 @@ fn operand(
     env: &Env,
 ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
     match op {
-        Operand::Local(name) => env.get(name).copied().ok_or(TranslateError::Unsupported),
+        Operand::Local(name) => env
+            .get(name)
+            .copied()
+            .ok_or_else(TranslateError::unsupported),
         Operand::F32(value) => {
             let handle = append(func, naga::Expression::Literal(naga::Literal::F32(*value)));
             push_emit(func, out, handle);

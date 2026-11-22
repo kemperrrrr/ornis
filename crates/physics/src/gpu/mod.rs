@@ -66,9 +66,10 @@ mod avbd;
 mod si_batches;
 
 pub use avbd::{
-    GPU_AVBD_SYSTEM_STRIDE, GpuAvbdDispatch, GpuAvbdMass, GpuAvbdRow, GpuAvbdStub, GpuAvbdSystem,
-    WgpuAvbdSolver, avbd_diag_solve_cpu, avbd_inertial_hessian_diag, avbd_ldl_6x6_cpu,
-    avbd_row_wgsl, avbd_stage_contact_solve, avbd_stamp_row_cpu, avbd_stub_wgsl,
+    AVBD_ROW_ENTRY, AVBD_STUB_ENTRY, GPU_AVBD_SYSTEM_STRIDE, GpuAvbdDispatch, GpuAvbdMass,
+    GpuAvbdRow, GpuAvbdStub, GpuAvbdSystem, WgpuAvbdSolver, avbd_diag_solve_cpu,
+    avbd_inertial_hessian_diag, avbd_ldl_6x6_cpu, avbd_row_wgsl, avbd_stage_contact_solve,
+    avbd_stamp_row_cpu, avbd_stub_wgsl,
 };
 pub use si_batches::{
     GpuBatch, LaneInput, contact_solver_wgsl, pack_single_point_batches, write_back_acc,

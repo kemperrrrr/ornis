@@ -51,6 +51,7 @@ mod inline;
 mod lower;
 pub mod meta;
 mod parse;
+mod site;
 
 pub use emit::Translated;
 pub use error::TranslateError;
@@ -155,7 +156,7 @@ fn translate_entries(
             module
                 .iter()
                 .find(|func| func.name == entry)
-                .ok_or(TranslateError::Unsupported)?,
+                .ok_or_else(TranslateError::unsupported)?,
         ],
         None => module
             .iter()
@@ -163,7 +164,7 @@ fn translate_entries(
             .collect(),
     };
     if funcs.is_empty() {
-        return Err(TranslateError::Unsupported);
+        return Err(TranslateError::unsupported());
     }
     let metas = meta::extract(llvm_ir)?;
     let structs = merge_tables(&metas)?;

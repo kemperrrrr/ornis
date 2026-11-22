@@ -398,7 +398,7 @@ merge:
         assert!(
             matches!(
                 translate(&ir),
-                Err(ornis_llvm2gpu::TranslateError::Unsupported)
+                Err(ornis_llvm2gpu::TranslateError::Unsupported(_))
             ),
             "a top-level barrier skipped by a returning arm must be rejected"
         );
@@ -3224,4 +3224,39 @@ start:
     let message = format!("{error}");
     assert!(message.contains("ptrtoint"), "{message}");
     assert!(message.contains("index the buffer"), "{message}");
+}
+
+/// A rejection has to point at the IR line it rejected, not just at the
+/// existence of a subset: the whole module is one bisection away from a
+/// `cargo rustc`, and "outside the supported subset" alone says nothing about
+/// which of a kernel's fifty instructions to look at.
+#[test]
+fn a_rejection_names_the_instruction_it_refused() {
+    let ir = r#"
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  %ok = icmp ult i32 %id, 4
+  br i1 %ok, label %body, label %done
+body:
+  ; unreachable is supported; a floating-point remainder is not
+  %r = frem float 1.000000e+00, 3.000000e+00
+  ret void
+done:
+  ret void
+}
+"#;
+    let error = translate(ir).expect_err("frem is outside the subset");
+    let message = error.to_string();
+    assert!(
+        message.contains("cs_main"),
+        "the message must name the function: {message}"
+    );
+    assert!(
+        message.contains("body"),
+        "the message must name the block: {message}"
+    );
+    assert!(
+        message.contains("frem"),
+        "the message must quote the instruction: {message}"
+    );
 }

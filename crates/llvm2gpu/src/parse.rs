@@ -21,7 +21,7 @@ fn namespaced(
 ) -> Result<String, TranslateError> {
     match subst.get(name) {
         Some(Operand::Local(replacement)) => Ok(replacement.clone()),
-        Some(_) => Err(TranslateError::Unsupported),
+        Some(_) => Err(TranslateError::unsupported()),
         None => Ok(format!("{prefix}{name}")),
     }
 }
@@ -452,14 +452,17 @@ fn parse_body(
     let mut cur_term: Option<Terminator> = None;
     let mut saw_ret = false;
     let mut lines = body.iter();
+    crate::site::enter_function(name);
     while let Some(line) = lines.next() {
         // Strip an inline comment (`; preds = %a, %b`) before parsing.
         let inner = line.split(';').next().unwrap_or("").trim();
         if inner.is_empty() {
             continue;
         }
+        crate::site::enter_instruction(inner);
         // A basic-block label.
         if inner.ends_with(':') && !inner.contains('=') {
+            crate::site::enter_block(inner.trim_end_matches(':'));
             // Close previous block if needed.
             if let Some(term) = cur_term.take() {
                 // previous block already terminated; start new
@@ -467,7 +470,7 @@ fn parse_body(
                 blocks.push(closed_block(cur_label.clone(), instrs, term));
             } else if !cur_instrs.is_empty() {
                 // Fallthrough without explicit terminator: synthesize ret.
-                return Err(TranslateError::Unsupported);
+                return Err(TranslateError::unsupported());
             }
             cur_label = inner.trim_end_matches(':').to_string();
             continue;
@@ -640,7 +643,7 @@ fn parse_term(line: &str) -> Result<Option<Terminator>, TranslateError> {
         let value = match instr {
             Instr::Ret { a } => Some(a),
             Instr::RetVoid => None,
-            _ => return Err(TranslateError::Unsupported),
+            _ => return Err(TranslateError::unsupported()),
         };
         return Ok(Some(Terminator::Ret(value)));
     }
@@ -834,7 +837,7 @@ fn parse_void_line(line: &str) -> Result<Option<Instr>, TranslateError> {
         return Ok(Some(Instr::CallVoid { callee, args }));
     }
     if line.starts_with("load ") || line.contains("getelementptr") || line.contains("call") {
-        return Err(TranslateError::Unsupported);
+        return Err(TranslateError::unsupported());
     }
     Ok(None)
 }
@@ -924,7 +927,7 @@ fn type_bytes(ty: &str) -> Result<u32, TranslateError> {
                         "float" | "i32" | "u32" => WORD_BYTES,
                         "i16" | "u16" => HALF_WORD_BYTES,
                         "i8" | "u8" => BYTE_BYTES,
-                        _ => return Err(TranslateError::Unsupported),
+                        _ => return Err(TranslateError::unsupported()),
                     };
                     return total
                         .checked_mul(size)
@@ -1150,14 +1153,14 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
             let to = parse_ty(&tokens[4])?;
             Ok(Some(Instr::Bitcast { dst, from, to, a }))
         }
-        "br" | "switch" => Err(TranslateError::Unsupported),
+        "br" | "switch" => Err(TranslateError::unsupported()),
         "ptrtoint" | "inttoptr" => Err(TranslateError::UnsupportedType(
             "a GPU buffer address is not a number: `ptrtoint`/`inttoptr` are outside the \
              subset; index the buffer by element instead of casting a pointer"
                 .to_string(),
         )),
         // Any other opcode is outside the translated subset.
-        _ => Err(TranslateError::Unsupported),
+        _ => Err(TranslateError::unsupported()),
     }
 }
 
@@ -1350,7 +1353,7 @@ fn parse_zext(dst: &str, tokens: &[String]) -> Result<Option<Instr>, TranslateEr
     let value = parse_operand(value_tok.trim_end_matches(','))?;
     let to = parse_ty(to_tok)?;
     if from != Ty::I1 || to != Ty::I32 {
-        return Err(TranslateError::Unsupported);
+        return Err(TranslateError::unsupported());
     }
     Ok(Some(Instr::Select {
         dst: dst.to_string(),

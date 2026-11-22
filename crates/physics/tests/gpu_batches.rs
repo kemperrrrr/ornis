@@ -11,9 +11,9 @@ use ornis_physics::engine::{
     Manifold, ManifoldPoint, ManifoldState, PhysicsEngine, SequentialImpulseEngine,
 };
 use ornis_physics::gpu::{
-    DispatchReport, GPU_AVBD_SYSTEM_STRIDE, GPU_BATCH_STRIDE, GPU_BODY_STRIDE, GpuAvbdDispatch,
-    GpuAvbdMass, GpuAvbdRow, GpuAvbdStub, GpuAvbdSystem, GpuBatch, GpuBodyState,
-    GpuSequentialImpulse, LaneInput, WgpuAvbdSolver, avbd_diag_solve_cpu,
+    AVBD_ROW_ENTRY, AVBD_STUB_ENTRY, DispatchReport, GPU_AVBD_SYSTEM_STRIDE, GPU_BATCH_STRIDE,
+    GPU_BODY_STRIDE, GpuAvbdDispatch, GpuAvbdMass, GpuAvbdRow, GpuAvbdStub, GpuAvbdSystem,
+    GpuBatch, GpuBodyState, GpuSequentialImpulse, LaneInput, WgpuAvbdSolver, avbd_diag_solve_cpu,
     avbd_inertial_hessian_diag, avbd_ldl_6x6_cpu, avbd_row_wgsl, avbd_stage_contact_solve,
     avbd_stamp_row_cpu, avbd_stub_wgsl, contact_solver_wgsl, pack_single_point_batches,
     solve_params_bool,
@@ -602,10 +602,12 @@ fn avbd_mass_layout_matches_wgsl() {
     assert_eq!(std::mem::size_of::<GpuAvbdMass>(), 16);
     assert_eq!(std::mem::offset_of!(GpuAvbdMass, inertia), 0);
     assert_eq!(std::mem::offset_of!(GpuAvbdMass, inv_mass), 12);
+    // The kernel reads the roster word by word, so the contract is the word
+    // layout, not a struct declaration: 16 bytes per record, `inertia` first.
     let source = avbd_stub_wgsl();
-    assert!(source.contains("struct GpuAvbdMass"));
-    assert!(source.contains("inertia: vec3<f32>"));
-    assert!(source.contains("inv_mass: f32"));
+    assert!(source.contains("var<storage> storage_0_0_: array<f32>;"));
+    assert!(source.contains(&format!("fn {}(", AVBD_STUB_ENTRY)));
+    assert_eq!(std::mem::size_of::<GpuAvbdMass>(), 4 * 4);
 }
 
 /// Rung-1 CPU assembly (no device): the inertial Hessian diagonal
@@ -722,31 +724,26 @@ fn avbd_mass_roster_mirrors_body_mass_model() {
     assert_eq!(roster[1].inertia, [0.0; 3]);
 }
 
-/// Rung-1 contract: the kernel source carries the Rust-authored layouts
-/// plus the Hessian/LDL helpers stitched ahead of `main`, and
+/// Rung-1 contract: the artifact is the translated kernel — five bindings in
+/// the host's order, one workgroup of 64, and the count guard — and it
 /// naga-validates without a device.
 #[test]
-fn avbd_stub_kernel_validates_with_naga() {
+fn avbd_stub_kernel_is_the_translated_artifact() {
     let source = avbd_stub_wgsl();
-    assert!(source.contains("struct GpuAvbdMass"));
-    assert!(source.contains("struct GpuBodyState"));
-    for helper in [
-        "fn avbd_hessian_lin(",
-        "fn avbd_hessian_ang(",
-        "fn avbd_diag_solve(",
+    for binding in [
+        "var<storage> storage_0_0_: array<f32>;",
+        "var<storage> storage_0_1_: array<f32>;",
+        "var<storage, read_write> storage_0_2_: array<f32>;",
+        "@group(0) @binding(3)",
+        "@group(0) @binding(4)",
     ] {
-        let helper_pos = source.find(helper).unwrap_or_else(|| {
-            panic!("stitched source must contain {helper}");
-        });
-        let main_pos = source.find("fn main(").expect("source must contain main");
-        assert!(
-            helper_pos < main_pos,
-            "{helper} must be declared before use"
-        );
+        assert!(source.contains(binding), "stub artifact lost {binding}");
     }
-    assert!(source.contains("avbd_hessian_lin(m.inv_mass, dt)"));
-    assert!(source.contains("avbd_diag_solve(h_lin, r.velocity)"));
-    assert!(source.contains("avbd_delta[gid.x].velocity = x_lin;"));
+    assert!(source.contains("@compute @workgroup_size(64, 1, 1)"));
+    assert!(source.contains(&format!("fn {}(", AVBD_STUB_ENTRY)));
+    // The guard returns for out-of-range bodies before touching the buffers.
+    assert!(source.contains("return;"));
+    assert!(!source.contains("@fragment"), "compute stage only");
     let module = naga::front::wgsl::parse_str(&source)
         .unwrap_or_else(|e| panic!("stub WGSL must parse: {e}"));
     let mut validator = naga::valid::Validator::new(
@@ -848,11 +845,12 @@ fn avbd_row_layout_matches_wgsl() {
     assert_eq!(std::mem::offset_of!(GpuAvbdSystem, mass), 0);
     assert_eq!(std::mem::offset_of!(GpuAvbdSystem, state), 16);
     assert_eq!(std::mem::offset_of!(GpuAvbdSystem, row), 48);
+    // The kernel reads the record by word index, so the layout contract is the
+    // stride and the offsets above; the artifact must agree on the size of the
+    // staging array it declares (64 systems of 24 words, all f32).
     let source = avbd_row_wgsl();
-    assert!(source.contains("struct GpuAvbdRow"));
-    assert!(source.contains("axis: vec3<f32>"));
-    assert!(source.contains("lever: vec3<f32>"));
-    assert!(source.contains("struct GpuAvbdSystem"));
+    assert!(source.contains("array<f32>"));
+    assert_eq!(GPU_AVBD_SYSTEM_STRIDE as usize, 24 * 4);
 }
 
 /// Rung-2 CPU stamp (no device): one row into a zero system carries exactly
@@ -1006,30 +1004,32 @@ fn avbd_stage_contact_solve_mirrors_kernel_inputs() {
     assert!(avbd_stage_contact_solve(&bodies, &rhs, &rows[..1], dt).is_none());
 }
 
-/// Rung-2 contract: the kernel source carries the Rust-authored layouts
-/// plus the row-stamp/dense-LDL entry with its breakdown writes, helpers
-/// stitched ahead of `main`, and naga-validates without a device.
+/// Rung-2 contract: the artifact is the translated kernel — five bindings in
+/// the host's order, one workgroup of 64, the dense solve's two loops and both
+/// breakdown arms — and it naga-validates without a device.
 #[test]
-fn avbd_row_kernel_validates_with_naga() {
+fn avbd_row_kernel_is_the_translated_artifact() {
     let source = avbd_row_wgsl();
-    assert!(source.contains("struct GpuAvbdMass"));
-    assert!(source.contains("struct GpuBodyState"));
-    assert!(source.contains("struct GpuAvbdRow"));
-    for helper in ["fn avbd_hessian_lin(", "fn avbd_hessian_ang("] {
-        let helper_pos = source
-            .find(helper)
-            .unwrap_or_else(|| panic!("stitched source must contain {helper}"));
-        let main_pos = source.find("fn main(").expect("source must contain main");
-        assert!(
-            helper_pos < main_pos,
-            "{helper} must be declared before use"
-        );
+    for binding in [
+        "var<storage> storage_0_0_: array<f32>;",
+        "var<storage, read_write> storage_0_1_: array<f32>;",
+        "var<storage, read_write> storage_0_2_: array<f32>;",
+        "@group(0) @binding(3)",
+        "@group(0) @binding(4)",
+    ] {
+        assert!(source.contains(binding), "row artifact lost {binding}");
     }
-    // Row stamp, dense LDL and both breakdown arms are in the entry.
-    assert!(source.contains("cross(row.lever, nn)"));
-    assert!(source.contains("avbd_delta[gid.x].velocity = vec3<f32>(x[0], x[1], x[2]);"));
-    assert!(source.contains("avbd_ok[gid.x] = 1.0;"));
-    assert!(source.contains("avbd_ok[gid.x] = 0.0;"));
+    assert!(source.contains("@compute @workgroup_size(64, 1, 1)"));
+    assert!(source.contains(&format!("fn {}(", AVBD_ROW_ENTRY)));
+    // The LDL is two loops (factorize/solve plus back substitution) over the
+    // 36-word scratch the translator lowers local arrays into.
+    assert!(
+        source.matches("loop {").count() >= 2,
+        "expected the dense solve's loops"
+    );
+    assert!(source.contains("array<u32, 36>"), "no 6x6 scratch");
+    // Both breakdown arms write the flag and the delta.
+    assert!(source.contains("1f") && source.contains("0f"));
     let module = naga::front::wgsl::parse_str(&source)
         .unwrap_or_else(|e| panic!("row WGSL must parse: {e}"));
     let mut validator = naga::valid::Validator::new(

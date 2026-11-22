@@ -31,6 +31,7 @@ members = [
     "crates/gpu-blur",
     "crates/gpu-histogram",
     "crates/gpu-adapt",
+    "crates/gpu-avbd",
     "crates/wasm2gpu-shader",
     "crates/wasm2gpu-testkit",
     "crates/physics",

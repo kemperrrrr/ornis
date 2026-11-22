@@ -1,17 +1,20 @@
 //! GPU AVBD solver: rung-1 inertial diagonal kernel plus the rung-2
 //! contact-row + dense 6x6 LDL kernel with device execution.
 //!
-//! Owns [`GpuAvbdMass`], the [`avbd_inertial_hessian_diag`]/[`avbd_diag_solve_cpu`]
-//! CPU references, the [`GpuAvbdStub`]/[`GpuAvbdDispatch`] seam with its
-//! `avbd_stub_kernel` entry (inertial Hessian diagonal + diagonal LDL, helpers
-//! stitched via `helpers(...)`), and the rung-2 [`WgpuAvbdSolver`] with its
-//! `avbd_row_kernel` entry (one contact row stamped per body + dense 6x6 LDL
-//! with a breakdown flag, executed on the device). Stepping an [`AvbdEngine`]
+//! Both device entries are translated from Rust through LLVM IR
+//! (`crates/gpu-avbd`): `cs_main` is the rung-1 inertial Hessian diagonal plus
+//! its diagonal LDL, `cs_main_row` is the rung-2 one contact row stamped per
+//! body plus the dense 6x6 LDL with a breakdown flag. This module owns what the
+//! kernels read and what the host stages: [`GpuAvbdMass`] and the CPU references
+//! ([`avbd_inertial_hessian_diag`], [`avbd_diag_solve_cpu`],
+//! [`avbd_stamp_row_cpu`], [`avbd_ldl_6x6_cpu`]), the
+//! [`GpuAvbdStub`]/[`GpuAvbdDispatch`] seam and the rung-2 [`WgpuAvbdSolver`]
+//! that dispatches `cs_main_row` over the staged systems. Stepping an [`AvbdEngine`]
 //! still falls back to the CPU [`crate::avbd::AvbdEngine`] until rung 3
 //! (host discovery staging rows into the device solve). Moved verbatim from
 //! `gpu.rs` (phase 3); rung 2 added in place.
 
-use ornis_macros::{WgslStruct, gpu_pipeline, wgsl_fn};
+use ornis_macros::WgslStruct;
 
 use super::{GpuBodyState, GpuDispatchError};
 use crate::avbd::{ANGULAR_OFFSET, AvbdEngine, SPATIAL_DOF, solve_6x6};
@@ -21,12 +24,10 @@ use bytemuck::Zeroable as _;
 
 /// Numerical zero for host-side guards: time steps, diagonal entries and
 /// Hessian components at or below this magnitude are treated as exactly
-/// zero (degenerate axis, unsteppable dt). Shader bodies keep literals —
-/// the DSL embeds `#[wgsl_fn]`/`#[gpu_pipeline]` bodies verbatim and has
-/// no spelling for a Rust `const` (likewise `[T; N]` lowers literal N
-/// only, see `avbd_row_kernel`): a named const inside a shader body
-/// emits an unknown WGSL identifier (regression: `DEGENERATE_EPS`
-/// broke the rung-1/rung-2 naga gates, fixed by restoring literals).
+/// zero (degenerate axis, unsteppable dt).
+///
+/// The kernels carry the same threshold as their own literal: `crates/gpu-avbd`
+/// spells it in Rust, and the translator emits the constant where it is used.
 const DEGENERATE_EPS: f32 = 1e-12;
 /// Minimum power-of-two body capacity for AVBD GPU buffers.
 const MIN_BUFFER_CAP: usize = 64;
@@ -192,7 +193,7 @@ impl GpuAvbdStub {
 
     /// CPU reference for the rung-1 device dispatch: assemble the inertial
     /// Hessian diagonal per body and solve the diagonal LDL system —
-    /// exactly what `avbd_stub_kernel` computes per invocation. The future
+    /// exactly what `cs_main` computes per invocation. The future
     /// device path validates against this (tolerance, never bit-identical).
     /// Returns `None` only on a body/rhs length mismatch.
     #[allow(dead_code)]
@@ -227,126 +228,22 @@ impl GpuAvbdDispatch for GpuAvbdStub {
     }
 }
 
-/// Rung-1 AVBD helper: linear Hessian entry `m/dt²` from inverse mass,
-/// or `0.0` for statics / degenerate `dt`. Mirrors the linear half of
-/// [`avbd_inertial_hessian_diag`]; the shader-side spelling is pinned by
-/// naga validation, the values by the CPU test.
-#[wgsl_fn]
-fn avbd_hessian_lin(inv_mass: f32, dt: f32) -> f32 {
-    let mut h = 0.0;
-    if inv_mass > 0.0 {
-        let dt2 = dt * dt;
-        // Literal: shader bodies cannot name `DEGENERATE_EPS` (see above).
-        if dt2 > 1e-12 {
-            h = 1.0 / (inv_mass * dt2);
-        }
-    }
-    return h;
-}
-
-/// Rung-1 AVBD helper: angular Hessian diagonal `I/dt²` (body-frame lumped
-/// approximation — the world off-diagonal coupling stays CPU-side, exact
-/// for isotropic bodies). Zeroes on degenerate `dt`. Mirrors the angular
-/// half of [`avbd_inertial_hessian_diag`].
-#[wgsl_fn]
-fn avbd_hessian_ang(inertia: Vec3, dt: f32) -> Vec3 {
-    let dt2 = dt * dt;
-    let mut h0 = 0.0;
-    let mut h1 = 0.0;
-    let mut h2 = 0.0;
-    // Literal: shader bodies cannot name `DEGENERATE_EPS` (see above).
-    if dt2 > 1e-12 {
-        h0 = inertia[0] / dt2;
-        h1 = inertia[1] / dt2;
-        h2 = inertia[2] / dt2;
-    }
-    return Vec3::new(h0, h1, h2);
-}
-
-/// Rung-1 AVBD helper: diagonal LDL solve (`L = I`), one 3-block.
-/// Degenerate axes solve to `0.0` (no `Option` in WGSL); the CPU
-/// [`avbd_diag_solve_cpu`] mirrors this exactly — the two agree on
-/// strictly positive systems (pinned by test).
-#[wgsl_fn]
-fn avbd_diag_solve(h: Vec3, r: Vec3) -> Vec3 {
-    let mut x0 = 0.0;
-    let mut x1 = 0.0;
-    let mut x2 = 0.0;
-    // Literals: shader bodies cannot name `DEGENERATE_EPS` (see above).
-    if h[0] > 1e-12 {
-        x0 = r[0] / h[0];
-    }
-    if h[1] > 1e-12 {
-        x1 = r[1] / h[1];
-    }
-    if h[2] > 1e-12 {
-        x2 = r[2] / h[2];
-    }
-    return Vec3::new(x0, x1, x2);
-}
-
-/// Rung-1 AVBD device kernel: per-body inertial Hessian diagonal + diagonal
-/// LDL solve (one invocation per body).
+/// Rung-1 entry point of the translated module.
 ///
-/// Each body reads its mass entry, assembles the 6-entry lumped Hessian
-/// diagonal (`m/dt²` linear, body-frame `I/dt²` angular) and solves the
-/// diagonal system against its rhs entry into the delta buffer. Contact
-/// rows and the dense 6x6 LDL stay future work; the kernel moves no engine
-/// state (no dispatch exists yet) — it pins the buffer/bindings/dispatch
-/// shape plus the exact per-body math the CPU tests verify in tolerances.
-//
-// qual:allow(abc) — kernel-DSL body: every statement is translated
-// verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
-// ONLY this function's body into `fn main`. Extracting helpers would emit
-// calls to functions that do not exist in the shader; splitting requires a
-// macro-level helper-inclusion feature, not a local edit.
-#[gpu_pipeline(
-    workgroup_size = 64,
-    storage(avbd_mass: [GpuAvbdMass; 64], read),
-    storage(avbd_rhs: [GpuBodyState; 64], read),
-    storage(avbd_delta: [GpuBodyState; 64], read_write),
-    uniform(avbd_count: [u32; 4]),
-    uniform(avbd_dt: [f32; 4]),
-    builtin(gid: workgroup_id),
-    helpers(avbd_hessian_lin, avbd_hessian_ang, avbd_diag_solve),
-)]
-fn avbd_stub_kernel() {
-    // qual:allow(abc) — kernel-DSL body: every statement is translated
-    // verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
-    // ONLY this function's body into `fn main`. Extracting helpers would emit
-    // calls to functions that do not exist in the shader; splitting requires a
-    // macro-level helper-inclusion feature, not a local edit. Array dimensions
-    // stay integer literals for the same reason (`[T; N]` lowers literal N
-    // only — a Rust `const` has no WGSL spelling at macro time); host-side
-    // mirrors use `SPATIAL_DOF`.
-    if gid.x >= avbd_count.x {
-        return;
-    }
-    let m = avbd_mass[gid.x];
-    let r = avbd_rhs[gid.x];
-    let dt = avbd_dt.x;
-    let hl = avbd_hessian_lin(m.inv_mass, dt);
-    let h_lin = vec3(hl, hl, hl);
-    let h_ang = avbd_hessian_ang(m.inertia, dt);
-    let x_lin = avbd_diag_solve(h_lin, r.velocity);
-    let x_ang = avbd_diag_solve(h_ang, r.angular);
-    avbd_delta[gid.x].velocity = x_lin;
-    avbd_delta[gid.x].angular = x_ang;
-}
+/// The stub has no pipeline yet (spike surface, like [`avbd_stub_wgsl`]), so the
+/// name is dead until one exists — the artifact is what pins it.
+#[allow(dead_code)]
+pub const AVBD_STUB_ENTRY: &str = "cs_main";
 
-/// Rung-1 kernel WGSL source: mass/body layouts + inertial-Hessian/diagonal-
-/// LDL entry (no contacts, no engine state). Pure (no device) so tests pin
-/// it without an adapter.
+/// Rung-1 kernel WGSL: the inertial Hessian diagonal and its diagonal LDL,
+/// translated from Rust through LLVM IR (`crates/gpu-avbd`, artifact
+/// `avbd_stub_generated.wgsl`). Pure (no device) so tests pin it without an
+/// adapter.
 ///
 /// Unwired spike surface (no engine holds one yet), hence `allow(dead_code)`.
 #[allow(dead_code)]
 pub fn avbd_stub_wgsl() -> String {
-    format!(
-        "{}\n{}\n{}",
-        GpuAvbdMass::WGSL_SOURCE,
-        GpuBodyState::WGSL_SOURCE,
-        avbd_stub_kernel::wgsl_source()
-    )
+    include_str!("avbd_stub_generated.wgsl").to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -511,7 +408,7 @@ pub fn avbd_ldl_6x6_cpu(
 /// CPU reference staging for the rung-2 device dispatch: per body, assemble
 /// the lumped inertial Hessian diagonal ([`avbd_inertial_hessian_diag`],
 /// same approximation as rung 1), stamp that body's [`GpuAvbdRow`] and solve
-/// the dense system ([`avbd_ldl_6x6_cpu`]) — exactly what `avbd_row_kernel`
+/// the dense system ([`avbd_ldl_6x6_cpu`]) — exactly what `cs_main_row`
 /// computes per invocation. The device path validates against this in
 /// tolerance, per member plus the breakdown flag, never bit-identical.
 /// Returns `None` only on a bodies/rhs/rows length mismatch.
@@ -550,175 +447,26 @@ pub fn avbd_stage_contact_solve(
         .collect()
 }
 
-// qual:allow(abc) — kernel-DSL body: every statement is translated
-// verbatim into the WGSL compute shader by #[gpu_pipeline], which embeds
-// ONLY this function's body into `fn main`. Extracting helpers would emit
-// calls to functions that do not exist in the shader; splitting requires a
-// macro-level helper-inclusion feature, not a local edit.
-//
-/// Rung-2 AVBD device kernel: per-body inertial Hessian + one stamped
-/// contact row + dense 6x6 LDL with breakdown signal (one invocation per
-/// body, `global_invocation_id` over `ceil(count/64)` workgroups of 64).
-///
-/// Each body reads its mass entry, assembles the 6x6 lumped inertial system
-/// (same diagonal approximation as rung 1), stamps its contact row (same
-/// math as [`avbd_stamp_row_cpu`]), solves the dense LDL (same math as
-/// [`solve_6x6`](crate::avbd::solve_6x6)) and writes the delta plus the `ok`
-/// flag (`1.0` solved, `0.0` breakdown with a zeroed delta). Multi-row
-/// manifolds and engine-step integration stay rung-3 work; the kernel moves
-/// no engine state — it pins the buffer/bindings/dispatch shape plus the
-/// exact per-body math the CPU tests verify in tolerances.
-#[gpu_pipeline(
-    workgroup_size = 64,
-    storage(avbd_sys: [GpuAvbdSystem; 64], read),
-    storage(avbd_delta: [GpuBodyState; 64], read_write),
-    storage(avbd_ok: [f32; 64], read_write),
-    uniform(avbd_count: [u32; 4]),
-    uniform(avbd_dt: [f32; 4]),
-    builtin(gid: global_invocation_id),
-    helpers(avbd_hessian_lin, avbd_hessian_ang),
-)]
-fn avbd_row_kernel() {
-    // qual:allow(abc) — kernel-DSL body, see the item docs above.
-    if gid.x >= avbd_count.x {
-        return;
-    }
-    let s = avbd_sys[gid.x];
-    let m = s.mass;
-    let r = s.state;
-    let row = s.row;
-    let dt = avbd_dt.x;
-    let hl = avbd_hessian_lin(m.inv_mass, dt);
-    let h_ang = avbd_hessian_ang(m.inertia, dt);
-    let mut h: [[f32; 6]; 6] = [[0.0; 6]; 6];
-    h[0][0] = hl;
-    h[1][1] = hl;
-    h[2][2] = hl;
-    h[3][3] = h_ang[0];
-    h[4][4] = h_ang[1];
-    h[5][5] = h_ang[2];
-    let mut b: [f32; 6] = [0.0; 6];
-    b[0] = r.velocity[0];
-    b[1] = r.velocity[1];
-    b[2] = r.velocity[2];
-    b[3] = r.angular[0];
-    b[4] = r.angular[1];
-    b[5] = r.angular[2];
-    // One contact row: nn = sign*axis, t = r×nn (mirrors
-    // `avbd_stamp_row_cpu`; components bounce through scratch arrays so
-    // the loop indices stay plain array indexing).
-    let nn = row.axis * row.sign;
-    let t = cross(row.lever, nn);
-    let mut na: [f32; 3] = [0.0; 3];
-    na[0] = nn[0];
-    na[1] = nn[1];
-    na[2] = nn[2];
-    let mut ta: [f32; 3] = [0.0; 3];
-    ta[0] = t[0];
-    ta[1] = t[1];
-    ta[2] = t[2];
-    for x in 0u32..3u32 {
-        for y in 0u32..3u32 {
-            h[x][y] = h[x][y] + row.pen * na[x] * na[y];
-            h[3u32 + x][3u32 + y] = h[3u32 + x][3u32 + y] + row.pen * ta[x] * ta[y];
-            h[x][3u32 + y] = h[x][3u32 + y] + row.pen * na[x] * ta[y];
-            h[3u32 + x][y] = h[3u32 + x][y] + row.pen * ta[x] * na[y];
-        }
-        b[x] = b[x] + row.force * na[x];
-        b[3u32 + x] = b[3u32 + x] + row.force * ta[x];
-    }
-    // Dense LDL without pivoting (mirrors `solve_6x6`): breakdown sets the
-    // flag and the write below zeroes the delta instead of the garbage the
-    // scratch holds (division by a non-positive pivot is well-defined f32
-    // arithmetic, never a trap — its result is discarded via `ok`).
-    // No `else` arms: the DSL lowers plain `if`s only.
-    let mut l: [[f32; 6]; 6] = [[0.0; 6]; 6];
-    let mut d: [f32; 6] = [0.0; 6];
-    let mut ok = 1.0;
-    for i in 0u32..6u32 {
-        for j in 0u32..6u32 {
-            if j <= i {
-                let mut s = h[i][j];
-                for k in 0u32..6u32 {
-                    if k < j {
-                        s = s - l[i][k] * d[k] * l[j][k];
-                    }
-                }
-                if i == j {
-                    if s <= 1e-12 {
-                        ok = 0.0;
-                    }
-                    d[i] = s;
-                    l[i][i] = 1.0;
-                }
-                if i != j {
-                    l[i][j] = s / d[j];
-                }
-            }
-        }
-    }
-    let mut y: [f32; 6] = [0.0; 6];
-    for i in 0u32..6u32 {
-        let mut s = b[i];
-        for k in 0u32..6u32 {
-            if k < i {
-                s = s - l[i][k] * y[k];
-            }
-        }
-        y[i] = s;
-    }
-    let mut z: [f32; 6] = [0.0; 6];
-    for i in 0u32..6u32 {
-        z[i] = y[i] / d[i];
-    }
-    // Back substitution runs top-down (the DSL lowers increasing ranges
-    // only: count down via index arithmetic).
-    let mut x: [f32; 6] = [0.0; 6];
-    for ri in 0u32..6u32 {
-        let i: u32 = 5u32 - ri;
-        let mut s = z[i];
-        for k in 0u32..6u32 {
-            if k > i {
-                s = s - l[k][i] * x[k];
-            }
-        }
-        x[i] = s;
-    }
-    if ok > 0.5 {
-        avbd_delta[gid.x].velocity = vec3(x[0], x[1], x[2]);
-        avbd_delta[gid.x].angular = vec3(x[3], x[4], x[5]);
-        avbd_ok[gid.x] = 1.0;
-    }
-    if ok <= 0.5 {
-        avbd_delta[gid.x].velocity = vec3(0.0, 0.0, 0.0);
-        avbd_delta[gid.x].angular = vec3(0.0, 0.0, 0.0);
-        avbd_ok[gid.x] = 0.0;
-    }
-}
+/// Rung-2 entry point of the translated module.
+pub const AVBD_ROW_ENTRY: &str = "cs_main_row";
 
-/// Rung-2 kernel WGSL source: mass/body/row/system layouts +
-/// contact-row/dense-LDL entry (no engine state). Pure (no device) so tests
-/// pin it without an adapter.
+/// Rung-2 kernel WGSL: the inertial Hessian, one stamped contact row and the
+/// dense 6x6 LDL, translated from Rust through LLVM IR (`crates/gpu-avbd`,
+/// artifact `avbd_row_generated.wgsl`). Pure (no device) so tests pin it
+/// without an adapter.
 pub fn avbd_row_wgsl() -> String {
-    format!(
-        "{}\n{}\n{}\n{}\n{}",
-        GpuAvbdMass::WGSL_SOURCE,
-        GpuBodyState::WGSL_SOURCE,
-        GpuAvbdRow::WGSL_SOURCE,
-        GpuAvbdSystem::WGSL_SOURCE,
-        avbd_row_kernel::wgsl_source()
-    )
+    include_str!("avbd_row_generated.wgsl").to_owned()
 }
 
 // ---------------------------------------------------------------------------
-// Rung-2 device solver: buffers + pipeline over `avbd_row_kernel`
+// Rung-2 device solver: buffers + pipeline over `cs_main_row`
 // ---------------------------------------------------------------------------
 
 /// Number of bytes per staged GPU AVBD system (see [`GpuAvbdSystem`]; same
 /// compile-time layout check as the body/batch strides).
 pub const GPU_AVBD_SYSTEM_STRIDE: u64 = std::mem::size_of::<GpuAvbdSystem>() as u64;
 
-/// Rung-2 GPU AVBD solver: dispatches [`avbd_row_kernel`] over staged
+/// Rung-2 GPU AVBD solver: dispatches `cs_main_row` over staged
 /// per-body systems ([`GpuAvbdSystem`]: mass roster + base residual + one
 /// contact row) and reads back the dense-LDL delta plus the breakdown flag
 /// per body.
@@ -800,7 +548,7 @@ impl WgpuAvbdSolver {
             label: Some("physics_avbd_row_pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: Some("main"),
+            entry_point: Some(AVBD_ROW_ENTRY),
             compilation_options: Default::default(),
             cache: None,
         });
