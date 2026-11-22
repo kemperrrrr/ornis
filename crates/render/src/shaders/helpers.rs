@@ -1,9 +1,10 @@
 //! Shading constants shared by the render passes.
 //!
 //! The values live here once so the CPU mirrors (`msaa_edge`, the cluster
-//! CPU reference, the CSM tests) and the WGSL const block cannot drift: each
-//! one is declared as Rust and printed by [`wgsl_consts`] through `f32_lit`,
-//! which round-trips bit-exactly.
+//! CPU reference, the CSM tests) and the shader kernels cannot drift: the
+//! translated kernel crates take the same names from their own side, and the
+//! tests below pin the numeric agreement. Nothing here is printed into WGSL
+//! any more — the last DSL `const` block went with the quad vertex stage.
 //!
 //! The layer evaluators that used to live here (`evaluate_*`,
 //! `transmission_btdf`, `csm_visibility`, `octahedral_decode`,
@@ -79,22 +80,8 @@ pub const SPECULAR_AA_KERNEL_CAP: f32 = 0.2;
 pub const KARIS_LUMA_BIAS: f32 = 1.0;
 /// Magnitude past which an HDR channel is treated as non-finite and zeroed.
 pub const HDR_FINITE_LIMIT: f32 = 1.0e20;
-/// [`crate::renderer::ShadingDebug::Beauty`].
-pub const SHADING_DEBUG_BEAUTY: u32 = 0;
-/// [`crate::renderer::ShadingDebug::DirectSpecular`].
-pub const SHADING_DEBUG_DIRECT_SPECULAR: u32 = 1;
-/// [`crate::renderer::ShadingDebug::IblSpecular`].
-pub const SHADING_DEBUG_IBL_SPECULAR: u32 = 2;
-/// [`crate::renderer::ShadingDebug::Diffuse`].
-pub const SHADING_DEBUG_DIFFUSE: u32 = 3;
-/// [`crate::renderer::ShadingDebug::Roughness`].
-pub const SHADING_DEBUG_ROUGHNESS: u32 = 4;
-/// [`crate::renderer::ShadingDebug::Metallic`].
-pub const SHADING_DEBUG_METALLIC: u32 = 5;
-/// [`crate::renderer::ShadingDebug::Shadow`].
-pub const SHADING_DEBUG_SHADOW: u32 = 6;
-/// [`crate::renderer::ShadingDebug::Heat`].
-pub const SHADING_DEBUG_HEAT: u32 = 7;
+// The `ShadingDebug` discriminants live in `renderer::lights` (one source);
+// the shader side has its own copy inside `ornis-gpu-openpbr`.
 /// Pre-tonemap luma above which the heat view paints the pixel red.
 pub const SHADING_DEBUG_HOT_LUMA: f32 = 1.0;
 /// GPU encoding threshold for the unlit shading-mode flag
@@ -103,92 +90,3 @@ pub const SHADING_DEBUG_HOT_LUMA: f32 = 1.0;
 /// puts the same-named `const` into the WGSL block below, so the CPU
 /// decode and both GPU evaluators agree by construction.
 pub const UNLIT_THRESHOLD: f32 = ornis_core::material::UNLIT_THRESHOLD;
-
-/// WGSL `const` block for the helpers, generated from the Rust constants
-/// above: the name travels via `stringify!` (rename-proof), the value via
-/// `f32_lit` (bit-exact, WGSL-valid). No second spelling.
-pub fn wgsl_consts() -> String {
-    macro_rules! decl {
-        ($name:ident) => {
-            format!(
-                "const {}: f32 = {};\n",
-                stringify!($name),
-                super::f32_lit($name)
-            )
-        };
-    }
-    let floats = [
-        decl!(PI),
-        decl!(EPS),
-        decl!(INV_PI),
-        decl!(SHADOW_REF_BIAS),
-        decl!(CLEAR_DEPTH),
-        decl!(NORMAL_AGREE),
-        decl!(DEPTH_EDGE),
-        decl!(ALPHA_CUTOFF),
-        decl!(MSAA_SAMPLES_F),
-        decl!(POINT_OR_SPOT_KIND_EDGE),
-        decl!(SPOT_KIND_EDGE),
-        decl!(RANGE_CUTOFF_INNER_FRACTION),
-        decl!(NDC_TO_UV_HALF),
-        decl!(MOTION_VALID_THRESHOLD),
-        decl!(DEPTH_ROUNDING_BIAS),
-        decl!(PREVIOUS_DEPTH_MAX),
-        decl!(SHADOW_CUBE_NEAR),
-        decl!(CSM_BLEND_FRACTION),
-        decl!(CSM_ACTIVE_EDGE),
-        decl!(LIGHT_SELECTOR_SPLIT),
-        decl!(SPECULAR_AA_VARIANCE),
-        decl!(SPECULAR_AA_KERNEL_SCALE),
-        decl!(SPECULAR_AA_KERNEL_CAP),
-        decl!(KARIS_LUMA_BIAS),
-        decl!(HDR_FINITE_LIMIT),
-        decl!(SHADING_DEBUG_HOT_LUMA),
-        decl!(UNLIT_THRESHOLD),
-    ]
-    .concat();
-    macro_rules! decl_u32 {
-        ($name:ident) => {
-            format!("const {}: u32 = {}u;\n", stringify!($name), $name)
-        };
-    }
-    let ints = [
-        decl_u32!(SHADING_DEBUG_BEAUTY),
-        decl_u32!(SHADING_DEBUG_DIRECT_SPECULAR),
-        decl_u32!(SHADING_DEBUG_IBL_SPECULAR),
-        decl_u32!(SHADING_DEBUG_DIFFUSE),
-        decl_u32!(SHADING_DEBUG_ROUGHNESS),
-        decl_u32!(SHADING_DEBUG_METALLIC),
-        decl_u32!(SHADING_DEBUG_SHADOW),
-        decl_u32!(SHADING_DEBUG_HEAT),
-        decl_u32!(CSM_LAST_CASCADE),
-        decl_u32!(PREVIOUS_DEPTH_INVALID),
-    ]
-    .concat();
-    // Cluster grid constants (#130): formatted from the single renderer
-    // source (`renderer::clusters`), so the CPU reference, this consts
-    // block and the assignment compute shader cannot drift.
-    let cluster = format!(
-        "const CLUSTERS_X: u32 = {x}u;\n\
-         const CLUSTERS_Y: u32 = {y}u;\n\
-         const CLUSTERS_Z: u32 = {z}u;\n\
-         const CLUSTER_DEPTH_NEAR: f32 = {near};\n\
-         const CLUSTER_SLICE_SCALE: f32 = {scale};\n\
-         const CLUSTER_SLICE_LOOKUP_EPS: f32 = {eps};\n",
-        x = crate::renderer::CLUSTER_TILE_COUNT_X,
-        y = crate::renderer::CLUSTER_TILE_COUNT_Y,
-        z = crate::renderer::CLUSTER_SLICE_COUNT,
-        near = super::f32_lit(crate::renderer::CLUSTER_DEPTH_NEAR),
-        scale = super::f32_lit(crate::renderer::cluster_slice_scale()),
-        eps = super::f32_lit(crate::renderer::CLUSTER_SLICE_LOOKUP_EPS),
-    );
-    format!("{floats}{ints}{cluster}{}", msaa_samples_wgsl())
-}
-
-/// `u32` sample count shared with [`crate::renderer::MSAA_SAMPLE_COUNT`].
-fn msaa_samples_wgsl() -> String {
-    format!(
-        "const MSAA_SAMPLES: u32 = {}u;\n",
-        crate::renderer::MSAA_SAMPLE_COUNT
-    )
-}

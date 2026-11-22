@@ -55,10 +55,7 @@ pub use ao::{AoBlurInputs, AoRawInputs};
 pub(crate) use ao::{AoPipelines, AoUniform};
 pub use buffers::{InstanceData, MaterialIdx, PerObjectGpu};
 pub use clusters::ClusterLightStats;
-pub(crate) use clusters::{
-    CLUSTER_DEPTH_NEAR, CLUSTER_SLICE_COUNT, CLUSTER_SLICE_LOOKUP_EPS, CLUSTER_TILE_COUNT_X,
-    CLUSTER_TILE_COUNT_Y, ClusterParams, ClusterSpan, ClusteredLights, cluster_slice_scale,
-};
+pub(crate) use clusters::{ClusterParams, ClusterSpan, ClusteredLights};
 // Cluster-assignment reference and readback selector for the GPU parity
 // gate (test-only, like the extraction culler's CPU mirror).
 #[cfg(test)]

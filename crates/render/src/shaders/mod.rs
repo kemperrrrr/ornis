@@ -14,11 +14,9 @@ pub mod fog_generated;
 pub mod gbuffer_generated;
 pub mod hdr_composite_generated;
 pub mod helpers;
-pub mod interface;
 pub mod lighting_generated;
 pub mod material_textures;
 pub mod math;
-pub mod naga_ir;
 pub mod outline_generated;
 pub mod pbr_generated;
 pub mod quad_vertex_generated;
@@ -117,23 +115,6 @@ impl ResourceKind {
         }
     }
 
-    /// `var<…>` address-space prefix, or `var` for textures/samplers.
-    fn wgsl_var(&self) -> &'static str {
-        match self {
-            Self::Uniform(_) => "var<uniform>",
-            Self::StorageRead(_) | Self::StorageReadArray(_) => "var<storage, read>",
-            Self::StorageRw(_) => "var<storage, read_write>",
-            Self::TextureFloat
-            | Self::TextureUint
-            | Self::TextureDepth
-            | Self::TextureDepthArray
-            | Self::TextureDepthCubeArray
-            | Self::TextureCube
-            | Self::Sampler
-            | Self::SamplerComparison => "var",
-        }
-    }
-
     /// The matching `wgpu` binding type; `multisampled` threads the runtime
     /// MSAA flag through to texture resources.
     pub fn bgl_ty(&self, multisampled: bool) -> wgpu::BindingType {
@@ -196,9 +177,9 @@ impl ResourceKind {
 }
 
 /// One pass resource: where it binds, when it is visible, under what WGSL
-/// name. A pass's `*_RESOURCES` table is the single source of truth for
-/// both the WGSL declaration ([`resource_decl`]) and the `wgpu` layout
-/// entry ([`bgl_entry`]) — the numbers cannot drift between shader and
+/// name. A pass's `*_RESOURCES` table is the single source of truth for the
+/// `wgpu` layout entry ([`bgl_entry`]) and for the artifact tests that parse
+/// the checked-in WGSL back — the numbers cannot drift between shader and
 /// pipeline layout.
 #[derive(Debug, Clone, Copy)]
 pub struct Resource {
@@ -218,24 +199,12 @@ pub struct Resource {
     pub min_size: Option<u64>,
 }
 
-/// WGSL declaration lines for a subset of a [`Resource`] table (one
-/// shader stage): `bindings` lists the `@binding` indices that stage
-/// declares, in order.
-pub fn resource_decls(table: &[Resource], bindings: &[u32]) -> String {
-    let mut out = String::new();
-    for b in bindings {
-        let Some(r) = table.iter().find(|r| r.binding == *b) else {
-            continue;
-        };
-        out.push_str(&resource_decl(r));
-    }
-    out
-}
-
 /// WGSL-valid rendering of an `f32` value: Rust `{}` prints the shortest
 /// round-tripping decimal, plus the `.0` fix for whole values (mirrors
 /// the lowering's `float_lit` for literal tokens). Non-finite values
 /// have no WGSL spelling — loud in debug, clamped caller's problem.
+/// Test-only: the last production `const` block went with the DSL.
+#[cfg(test)]
 pub(crate) fn f32_lit(v: f32) -> String {
     debug_assert!(v.is_finite(), "non-finite f32 has no WGSL spelling");
     let base = format!("{v}");
@@ -245,11 +214,6 @@ pub(crate) fn f32_lit(v: f32) -> String {
         format!("{base}.0")
     }
 }
-/// WGSL declaration line for one [`Resource`].
-pub fn resource_decl(r: &Resource) -> String {
-    resource_decl_for_samples(r, 1)
-}
-
 /// Whether a resource bound to an MSAA target keeps multisampled storage
 /// instead of resolving into a single-sample texture upstream.
 ///
@@ -262,25 +226,6 @@ pub fn resource_decl(r: &Resource) -> String {
 /// never runs MSAA).
 pub fn resource_stays_multisampled(kind: &ResourceKind) -> bool {
     matches!(kind, ResourceKind::TextureDepth | ResourceKind::TextureUint)
-}
-
-/// WGSL declaration line for one [`Resource`] at a sample count: identical to
-/// [`resource_decl`] at 1x; in MSAA mode depth/integer layers spell the
-/// multisampled texture types (see [`resource_stays_multisampled`]).
-pub fn resource_decl_for_samples(r: &Resource, sample_count: u32) -> String {
-    resource_decl_with_ty(r, &r.kind.wgsl_ty_for_samples(sample_count))
-}
-
-/// One `@group`/`@binding` line spelling `ty` for `r`.
-fn resource_decl_with_ty(r: &Resource, ty: &str) -> String {
-    format!(
-        "@group({}) @binding({}) {} {}: {};\n",
-        r.group,
-        r.binding,
-        r.kind.wgsl_var(),
-        r.name,
-        ty,
-    )
 }
 
 /// Runtime bind-group entries from a [`Resource`] table: binding numbers
@@ -303,109 +248,6 @@ pub fn bind_group_entries<'a>(
             })
         })
         .collect()
-}
-
-/// Ordered shader-module assembly: call sites declare WHAT goes in,
-/// [`emit`](ShaderModule::emit) owns section order and separators.
-/// WGSL needs decl-before-use; the former per-site `format!` skeletons
-/// encoded that order by hand (and could drift) — here the order
-/// (types → resources → consts → helpers → entries) is fixed once.
-/// Pieces are taken verbatim except edge-newline normalization (leading
-/// and trailing `\n` trimmed, sections joined with single `\n`): WGSL is
-/// whitespace-insensitive, and naga plus the pixel probes pin the result.
-pub struct ShaderModule {
-    decls: Vec<String>,
-    resources: Vec<String>,
-    consts: Vec<String>,
-    helpers: Vec<String>,
-    entries: Vec<String>,
-}
-
-impl ShaderModule {
-    /// Empty assembly.
-    pub fn new() -> Self {
-        Self {
-            decls: Vec::new(),
-            resources: Vec::new(),
-            consts: Vec::new(),
-            helpers: Vec::new(),
-            entries: Vec::new(),
-        }
-    }
-
-    /// One type/varying declaration block (derived `WGSL_SOURCE`,
-    /// `wgsl_decl`-wrapped or raw).
-    pub fn decl(mut self, src: impl Into<String>) -> Self {
-        self.decls.push(src.into());
-        self
-    }
-
-    /// Resource declarations from a [`Resource`] table subset (same rows
-    /// the pass layout builds its BGL from).
-    pub fn resources(mut self, table: &[Resource], bindings: &[u32]) -> Self {
-        self.resources.push(resource_decls(table, bindings));
-        self
-    }
-
-    /// One `const` block (quad corners/UVs from Rust data, via IR).
-    pub fn consts(mut self, src: impl Into<String>) -> Self {
-        self.consts.push(src.into());
-        self
-    }
-
-    /// One helper/kernel function source.
-    pub fn helper(mut self, src: impl Into<String>) -> Self {
-        self.helpers.push(src.into());
-        self
-    }
-
-    /// Several helper/kernel sources at once.
-    pub fn helpers<I, S>(mut self, srcs: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.helpers.extend(srcs.into_iter().map(Into::into));
-        self
-    }
-
-    /// One entry point (translated body). A module normally carries one;
-    /// several are allowed where the legacy assembly did.
-    pub fn entry(mut self, src: impl Into<String>) -> Self {
-        self.entries.push(src.into());
-        self
-    }
-
-    /// Render the module: sections in fixed order, normalized whitespace.
-    pub fn emit(self) -> String {
-        let mut pieces: Vec<String> = Vec::new();
-        for section in [
-            self.decls,
-            self.resources,
-            self.consts,
-            self.helpers,
-            self.entries,
-        ] {
-            for piece in section {
-                let trimmed = piece.trim_matches('\n');
-                if !trimmed.is_empty() {
-                    pieces.push(trimmed.to_string());
-                }
-            }
-        }
-        let mut out = String::from("\n");
-        if !pieces.is_empty() {
-            out.push_str(&pieces.join("\n"));
-            out.push('\n');
-        }
-        out
-    }
-}
-
-impl Default for ShaderModule {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// `wgpu` bind-group-layout entry for one [`Resource`]; `multisampled`
@@ -490,57 +332,10 @@ pub(crate) fn declared_bindings(module: &naga::Module) -> Vec<(u32, u32)> {
         .collect()
 }
 
-/// DSL-only GPU handle markers: nominal field types for stage-entry context
-/// bundles (`ctx: LightingContext`). The Rust functions are never compiled,
-/// so these are never instantiated — they exist so context structs are real,
-/// name-resolving Rust items whose fields document the WGSL global each maps
-/// to (field name === global name, enforced by `stage_globals_declared`).
-/// No constructors, no methods, no runtime footprint.
-pub struct Texture2d;
-/// Color cube-texture handle marker (IBL prefilter / irradiance); see [`Texture2d`].
-pub struct TextureCube;
-/// Sampler handle marker; see [`Texture2d`].
-pub struct Sampler;
-/// Comparison-sampler handle marker (shadow PCF); see [`Texture2d`].
-pub struct ComparisonSampler;
-
-/// Builtin index newtypes: a bare `u32` cannot say *which* index it is
-/// (`vertex_index`, `instance_index`, `@location(0)` and a plain local are
-/// all `u32`), so the meaning travels in the type. `#[stage]` maps
-/// `VertexIndex` → `@builtin(vertex_index) …: u32` (and likewise for
-/// `InstanceIndex`) with no attribute — one source of truth. Newtypes live
-/// in signature position only; bodies use the bare ident (no `.0` tax).
-pub struct VertexIndex(pub u32);
-/// Per-instance index newtype; see [`VertexIndex`].
-pub struct InstanceIndex(pub u32);
-
 /// The WGSL type name of the shared material declaration (no derive:
-/// the CPU side is grouped, so the name lives next to the slot list).
+/// the CPU side is grouped, so the name lives here and the layout is
+/// asserted against the artifact).
 pub(crate) const OPENPBR_WGSL_NAME: &str = "OpenPBRMaterial";
-
-/// The 20 `vec4` slots of `OpenPBRMaterial`, in declaration order.
-pub(crate) const OPENPBR_SLOTS: [&str; 20] = [
-    "base_params",
-    "base_color",
-    "specular_params",
-    "specular_color",
-    "transmission_params",
-    "transmission_color",
-    "transmission_scatter",
-    "subsurface_params",
-    "subsurface_color",
-    "subsurface_radius_scale_gb",
-    "fuzz_params",
-    "fuzz_color",
-    "coat_params",
-    "coat_color",
-    "coat_ior",
-    "thin_film_params",
-    "emission_params",
-    "emission_color",
-    "geometry_params",
-    "geometry_params2",
-];
 
 // ── COMPOSITE_VERTEX ────────────────────────────────────────────────
 
@@ -867,11 +662,11 @@ mod tests {
     }
 
     /// The grouped CPU-side `OpenPBRMaterial` must lay out its groups in the
-    /// exact order the shared WGSL declaration lists the `vec4` slots:
+    /// exact order the WGSL declaration lists the `vec4` slots:
     /// base(0) → specular(32) → transmission(64) → subsurface(112) →
     /// fuzz(160) → coat(192) → thin_film(240) → emission(256) →
-    /// geometry(288), 320 bytes total. Any reordering breaks every pass that
-    /// splices [`OPENPBR_MATERIAL_DECL`].
+    /// geometry(288), 320 bytes total. Any reordering shifts every word the
+    /// shader reads, so the offsets are the contract.
     #[test]
     fn openpbr_rust_layout_matches_wgsl_order() {
         use ornis_core::material::OpenPBRMaterial;
@@ -885,8 +680,52 @@ mod tests {
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, thin_film), 240);
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, emission), 256);
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, geometry), 288);
-        // Within-group slot order mirrors the WGSL field order.
-        assert_eq!(OPENPBR_SLOTS.len(), 20);
+        // 20 `vec4` slots of 16 bytes each fill the 320-byte record.
+        // The GPU side addresses the record by word index, so its stride is
+        // the CPU record's size: a group added on one side only would make the
+        // shader read the neighbouring entity's bytes.
+        assert_eq!(
+            ornis_gpu_pbr::layout::MATERIAL_STRIDE as usize * 4,
+            std::mem::size_of::<OpenPBRMaterial>()
+        );
+        let words = std::mem::size_of::<OpenPBRMaterial>() / 4;
+        let src = super::lighting_generated::wgsl_source_for_samples(1);
+        let mut reads = 0;
+        let mut highest = 0u32;
+        for read in src.match_indices("storage_0_2_[") {
+            let call = &src[read.0..];
+            let call = &call[..call.find(']').unwrap_or(call.len())];
+            // `base | lane` (folded word) or `base + lane` (full word).
+            for (at, _) in call.match_indices('|').chain(call.match_indices('+')) {
+                let lane: String = call[at + 1..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if let Ok(lane) = lane.parse::<u32>() {
+                    highest = highest.max(lane);
+                }
+            }
+            reads += 1;
+        }
+        assert!(reads > 20, "expected the material reads, found {reads}");
+        assert!(
+            highest as usize + 1 <= words,
+            "the lighting kernel reads material word {highest} of a {words}-word record"
+        );
+        for (group, offset) in [
+            (std::mem::offset_of!(OpenPBRMaterial, base), 0),
+            (std::mem::offset_of!(OpenPBRMaterial, specular), 32),
+            (std::mem::offset_of!(OpenPBRMaterial, transmission), 64),
+            (std::mem::offset_of!(OpenPBRMaterial, subsurface), 112),
+            (std::mem::offset_of!(OpenPBRMaterial, fuzz), 160),
+            (std::mem::offset_of!(OpenPBRMaterial, coat), 192),
+            (std::mem::offset_of!(OpenPBRMaterial, thin_film), 240),
+            (std::mem::offset_of!(OpenPBRMaterial, emission), 256),
+            (std::mem::offset_of!(OpenPBRMaterial, geometry), 288),
+        ] {
+            assert_eq!(group, offset);
+            assert_eq!(group % 16, 0, "group must start on a slot boundary");
+        }
     }
 
     /// MSAA declaration policy: at 1x every spelling is the legacy

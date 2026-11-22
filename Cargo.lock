@@ -3087,6 +3087,7 @@ dependencies = [
  "ornis-core",
  "ornis-gpu-cluster",
  "ornis-gpu-openpbr",
+ "ornis-gpu-pbr",
  "ornis-gpu-shader",
  "ornis-macros",
  "ornis-mesh-editor",

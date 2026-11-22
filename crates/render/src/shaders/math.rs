@@ -1,14 +1,17 @@
 //! Rust reference implementations of the WGSL/PBR BRDF math (OpenPBR spec).
 //!
-//! Every public function here is also compiled to WGSL by the `#[kernel]`
-//! macro pipeline and spliced into the engine's shaders via `wgsl_source()`,
-//! keeping GPU shading and CPU-side verification on one source of truth.
+//! These are CPU mirrors: the GPU side of the same math lives in
+//! `crates/gpu-openpbr` (layers, math) and reaches the passes as translated
+//! artifacts, so the two are kept in step by the parity tests below
+//! (`*_agree` compares a ported function against its mirror) rather than by
+//! generating WGSL from these bodies.
 // These functions mirror the WGSL/PBR shader signatures (OpenPBR spec), so
-// some of them take more than 7 arguments — a deliberate match.
+// some of them take more than 7 arguments and keep the shader-side parameter
+// names (`NoH`, `H`, `T` …) — both are a deliberate match.
 #![allow(clippy::too_many_arguments)]
+#![allow(non_snake_case)]
 
 use glam::Vec3Swizzles;
-use ornis_macros::kernel;
 
 /// Pi, re-exported into WGSL kernels by name.
 pub const PI: f32 = std::f32::consts::PI;
@@ -83,72 +86,19 @@ pub const THIN_FILM_WAVELENGTH_B_NM: f32 = 450.0;
 /// Optical-path cycles in the thin-film phase (`4 π n d cos / λ`).
 pub const THIN_FILM_PHASE_CYCLES: f32 = 4.0;
 
-/// WGSL `const` block for the kernel coefficients above.
-///
-/// Names travel via `stringify!` and values via `f32_lit`,
-/// so a rename or a bit-exact tweak cannot drift from the Rust constants.
-/// Every shader that splices a kernel referencing these names must splice
-/// this block too (`PI` / `EPS` / `INV_PI` stay in [`super::helpers::wgsl_consts`]).
-pub fn wgsl_consts() -> String {
-    macro_rules! decl {
-        ($name:ident) => {
-            format!(
-                "const {}: f32 = {};\n",
-                stringify!($name),
-                super::f32_lit($name)
-            )
-        };
-    }
-    [
-        decl!(REC709_LUMA_R),
-        decl!(REC709_LUMA_G),
-        decl!(REC709_LUMA_B),
-        decl!(ACES_FIT_A),
-        decl!(ACES_FIT_B),
-        decl!(ACES_FIT_C),
-        decl!(ACES_FIT_D),
-        decl!(ACES_FIT_E),
-        decl!(SCHLICK_FRESNEL_POWER),
-        decl!(F82_PIVOT_COSINE),
-        decl!(F82_CORRECTION_POWER),
-        decl!(SMITH_GGX_VISIBILITY_SCALE),
-        decl!(OREN_NAYAR_A_NUMERATOR),
-        decl!(OREN_NAYAR_A_OFFSET),
-        decl!(OREN_NAYAR_B_NUMERATOR),
-        decl!(OREN_NAYAR_B_OFFSET),
-        decl!(MICROFACET_SPECULAR_SCALE),
-        decl!(COLOR_CHANNEL_FLOOR),
-        decl!(SUBSURFACE_DIFFUSION),
-        decl!(LAW_OF_COSINES_HALF),
-        decl!(SRGB_LINEAR_CUTOFF),
-        decl!(SRGB_LINEAR_SLOPE),
-        decl!(SRGB_OFFSET),
-        decl!(SRGB_SCALE),
-        decl!(SRGB_GAMMA),
-        decl!(THIN_FILM_WAVELENGTH_R_NM),
-        decl!(THIN_FILM_WAVELENGTH_G_NM),
-        decl!(THIN_FILM_WAVELENGTH_B_NM),
-        decl!(THIN_FILM_PHASE_CYCLES),
-    ]
-    .concat()
-}
-
 /// Rec.709 relative luminance of a linear RGB color.
-#[kernel]
-fn luminance(c: glam::Vec3) -> f32 {
+pub fn luminance(c: glam::Vec3) -> f32 {
     c.dot(glam::Vec3::new(REC709_LUMA_R, REC709_LUMA_G, REC709_LUMA_B))
 }
 
 /// ACES filmic tone-mapping curve (Narkowicz approximation), HDR -> LDR.
-#[kernel]
-fn aces_tonemap(color: glam::Vec3) -> glam::Vec3 {
+pub fn aces_tonemap(color: glam::Vec3) -> glam::Vec3 {
     color * (ACES_FIT_A * color + ACES_FIT_B)
         / (color * (ACES_FIT_C * color + ACES_FIT_D) + ACES_FIT_E)
 }
 
 /// Normal-incidence Fresnel reflectance F0 from an index of refraction.
-#[kernel]
-fn fresnel0_from_ior(ior: f32) -> f32 {
+pub fn fresnel0_from_ior(ior: f32) -> f32 {
     let f = (ior - 1.0) / (ior + 1.0);
     f * f
 }
@@ -156,8 +106,7 @@ fn fresnel0_from_ior(ior: f32) -> f32 {
 /// Split-sum image-based light: prefiltered specular times the BRDF LUT
 /// (scale/bias) plus irradiance times the diffuse color, gated by `weight`
 /// (0 leaves the direct-light result unchanged).
-#[kernel]
-fn evaluate_ibl(
+pub fn evaluate_ibl(
     prefiltered: glam::Vec3,
     irradiance: glam::Vec3,
     lut_scale: f32,
@@ -175,8 +124,7 @@ fn evaluate_ibl(
 }
 
 /// Specular half of [`evaluate_ibl`]: prefiltered radiance times the LUT Fresnel.
-#[kernel]
-fn evaluate_ibl_specular(
+pub fn evaluate_ibl_specular(
     prefiltered: glam::Vec3,
     lut_scale: f32,
     lut_bias: f32,
@@ -188,8 +136,7 @@ fn evaluate_ibl_specular(
 }
 
 /// Diffuse half of [`evaluate_ibl`]: irradiance times the diffuse color.
-#[kernel]
-fn evaluate_ibl_diffuse(
+pub fn evaluate_ibl_diffuse(
     irradiance: glam::Vec3,
     lut_bias: f32,
     diffuse_color: glam::Vec3,
@@ -201,22 +148,19 @@ fn evaluate_ibl_diffuse(
 }
 
 /// Scalar Schlick approximation of the Fresnel term (`cos_theta` = NoV or NoL).
-#[kernel]
-fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
+pub fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
     f0 + (1.0 - f0) * (1.0 - cos_theta).powf(SCHLICK_FRESNEL_POWER)
 }
 
 /// RGB Schlick Fresnel with spectral F0 (metals).
-#[kernel]
-fn fresnel_schlick_vec(cos_theta: f32, f0: glam::Vec3) -> glam::Vec3 {
+pub fn fresnel_schlick_vec(cos_theta: f32, f0: glam::Vec3) -> glam::Vec3 {
     f0 + (glam::Vec3::splat(1.0) - f0) * (1.0 - cos_theta).powf(SCHLICK_FRESNEL_POWER)
 }
 
 /// Holzschuch--Pacanowsky "F82 tint" Fresnel: Schlick plus a correction
 /// term that pins reflectance to `f82_tint` at 82 degrees, matching measured
 /// metal data better than plain Schlick.
-#[kernel]
-fn fresnel_f82_tint(cos_theta: f32, f0: glam::Vec3, f82_tint: glam::Vec3) -> glam::Vec3 {
+pub fn fresnel_f82_tint(cos_theta: f32, f0: glam::Vec3, f82_tint: glam::Vec3) -> glam::Vec3 {
     let mu_bar = F82_PIVOT_COSINE;
     let schlick_at_mu_bar =
         f0 + (glam::Vec3::splat(1.0) - f0) * (1.0_f32 - mu_bar).powf(SCHLICK_FRESNEL_POWER);
@@ -231,8 +175,7 @@ fn fresnel_f82_tint(cos_theta: f32, f0: glam::Vec3, f82_tint: glam::Vec3) -> gla
 }
 
 /// GGX/Trowbridge-Reitz normal distribution for isotropic roughness.
-#[kernel]
-fn ggx_ndf(NoH: f32, alpha: f32) -> f32 {
+pub fn ggx_ndf(NoH: f32, alpha: f32) -> f32 {
     let a2 = alpha * alpha;
     let denom = NoH * NoH * (a2 - 1.0) + 1.0;
     a2 / (PI * denom * denom)
@@ -245,8 +188,7 @@ fn ggx_ndf(NoH: f32, alpha: f32) -> f32 {
 /// previous spelling dropped `NoH²` and scaled by `1/(αu²·αv²)`,
 /// inflating specular energy ~10⁴× at roughness 0.1 and stamping hard
 /// terminator seams on smooth materials.
-#[kernel]
-fn ggx_ndf_aniso(
+pub fn ggx_ndf_aniso(
     NoH: f32,
     H: glam::Vec3,
     T: glam::Vec3,
@@ -262,8 +204,7 @@ fn ggx_ndf_aniso(
 
 /// Map (roughness, anisotropy) to the alpha_u/alpha_v pair used by the
 /// anisotropic NDF and visibility terms.
-#[kernel]
-fn openpbr_anisotropy(roughness: f32, anisotropy: f32) -> glam::Vec2 {
+pub fn openpbr_anisotropy(roughness: f32, anisotropy: f32) -> glam::Vec2 {
     let r2 = roughness * roughness;
     let aniso_inv = 1.0 - anisotropy;
     let aniso_inv_sq = aniso_inv * aniso_inv;
@@ -277,8 +218,7 @@ fn openpbr_anisotropy(roughness: f32, anisotropy: f32) -> glam::Vec2 {
 
 /// Smith height-correlated GGX visibility term (isotropic), the
 /// `G / (4 NoV NoL)` factor already folded in.
-#[kernel]
-fn smith_ggx_correlated(NoV: f32, NoL: f32, alpha: f32) -> f32 {
+pub fn smith_ggx_correlated(NoV: f32, NoL: f32, alpha: f32) -> f32 {
     let a2 = alpha * alpha;
     let ggxv = NoV * (NoL * NoL * (1.0 - a2) + a2).max(EPS).sqrt();
     let ggxl = NoL * (NoV * NoV * (1.0 - a2) + a2).max(EPS).sqrt();
@@ -286,8 +226,7 @@ fn smith_ggx_correlated(NoV: f32, NoL: f32, alpha: f32) -> f32 {
 }
 
 /// Height-correlated Smith GGX visibility for anisotropic distributions.
-#[kernel]
-fn smith_ggx_aniso(
+pub fn smith_ggx_aniso(
     NoV: f32,
     NoL: f32,
     V: glam::Vec3,
@@ -309,8 +248,7 @@ fn smith_ggx_aniso(
 }
 
 /// Oren--Nayar diffuse BRDF (`alpha` = roughness sigma), normalized by 1/PI.
-#[kernel]
-fn oren_nayar_brdf(NoV: f32, NoL: f32, cos_phi: f32, alpha: f32) -> f32 {
+pub fn oren_nayar_brdf(NoV: f32, NoL: f32, cos_phi: f32, alpha: f32) -> f32 {
     let sigma = alpha.max(EPS);
     let sigma2 = sigma * sigma;
     let A = 1.0 - OREN_NAYAR_A_NUMERATOR * sigma2 / (sigma2 + OREN_NAYAR_A_OFFSET);
@@ -328,8 +266,7 @@ fn oren_nayar_brdf(NoV: f32, NoL: f32, cos_phi: f32, alpha: f32) -> f32 {
 /// The base albedo is already scaled by `(1 - metalness)` at the call
 /// site. Multiplying by metalness again darkened partial metals by
 /// `(1 - metalness)²` (a 0.5 metal kept a quarter of its diffuse).
-#[kernel]
-fn base_diffuse_energy(specular_luma: f32) -> f32 {
+pub fn base_diffuse_energy(specular_luma: f32) -> f32 {
     (1.0 - specular_luma).max(0.0)
 }
 
@@ -339,8 +276,7 @@ fn base_diffuse_energy(specular_luma: f32) -> f32 {
 /// (a zero-thickness film with the default water IOR still returns
 /// about 1.04), and the evaluators used to multiply that into every
 /// material because `thin_film_weight` was loaded and ignored.
-#[kernel]
-fn thin_film_weight_mix(weight: f32, modulation: glam::Vec3) -> glam::Vec3 {
+pub fn thin_film_weight_mix(weight: f32, modulation: glam::Vec3) -> glam::Vec3 {
     glam::Vec3::splat(1.0).lerp(modulation, weight.clamp(0.0, 1.0))
 }
 
@@ -352,8 +288,7 @@ fn thin_film_weight_mix(weight: f32, modulation: glam::Vec3) -> glam::Vec3 {
 /// coat transmits at normal incidence and blocks at grazing; the previous
 /// factor was the Fresnel term itself, so a coated emitter went black
 /// head-on and lit up on the silhouette.
-#[kernel]
-fn coated_emission(
+pub fn coated_emission(
     emission_color: glam::Vec3,
     emission_luminance: f32,
     coat_weight: f32,
@@ -371,8 +306,7 @@ fn coated_emission(
 }
 
 /// Fabric sheen lobe (Charlie-style D with approximate visibility).
-#[kernel]
-fn sheen_brdf(NoV: f32, NoL: f32, NoH: f32, VoH: f32, roughness: f32) -> f32 {
+pub fn sheen_brdf(NoV: f32, NoL: f32, NoH: f32, VoH: f32, roughness: f32) -> f32 {
     let alpha = roughness * roughness;
     let D = alpha / (PI * (NoH * NoH * (alpha - 1.0) + 1.0).powf(2.0));
     let G = 1.0 / (1.0 + alpha * (1.0 / NoV + 1.0 / NoL - 2.0));
@@ -382,8 +316,7 @@ fn sheen_brdf(NoV: f32, NoL: f32, NoH: f32, VoH: f32, roughness: f32) -> f32 {
 
 /// Convert transmission tint + thickness into a Beer--Lambert extinction
 /// coefficient `sigma_t = -ln(c) / depth` per channel.
-#[kernel]
-fn transmission_color_to_extinction(
+pub fn transmission_color_to_extinction(
     transmission_color: glam::Vec3,
     transmission_depth: f32,
 ) -> glam::Vec3 {
@@ -402,8 +335,7 @@ fn transmission_color_to_extinction(
 /// evaluated to `1/EPS` whenever the light sat near the view (a white
 /// firefly on the subsurface preset). The phase uses the scattering
 /// cosine recovered from the same chord, not `cos(distance)`.
-#[kernel]
-fn subsurface_brdf(
+pub fn subsurface_brdf(
     NoV: f32,
     NoL: f32,
     distance: f32,
@@ -421,8 +353,7 @@ fn subsurface_brdf(
 }
 
 /// Decode sRGB-encoded RGB to linear light (piecewise IEC 61966-2-1 OETF inverse).
-#[kernel]
-fn srgb_to_linear(c: glam::Vec3) -> glam::Vec3 {
+pub fn srgb_to_linear(c: glam::Vec3) -> glam::Vec3 {
     let cutoff = SRGB_LINEAR_CUTOFF;
     let r = if c.x <= cutoff {
         c.x / SRGB_LINEAR_SLOPE
@@ -444,8 +375,7 @@ fn srgb_to_linear(c: glam::Vec3) -> glam::Vec3 {
 
 /// Coat darkening, part 1: the base albedo darkening under a coated
 /// surface (Kcoat attenuation of the underlying BRDF response).
-#[kernel]
-fn coat_base_darkening(
+pub fn coat_base_darkening(
     coat_ior: f32,
     base_metalness: f32,
     base_color: glam::Vec3,
@@ -477,8 +407,11 @@ fn coat_base_darkening(
 /// The product used to be added onto the coat lobe (`darkening *
 /// coat_albedo`), which brightened the coat. Callers multiply the base
 /// lobe by this factor instead.
-#[kernel]
-fn coat_blend_darkened(base_darkening: glam::Vec3, coat_weight: f32, coat_dark: f32) -> glam::Vec3 {
+pub fn coat_blend_darkened(
+    base_darkening: glam::Vec3,
+    coat_weight: f32,
+    coat_dark: f32,
+) -> glam::Vec3 {
     if coat_weight <= 0.0 {
         return glam::Vec3::splat(1.0);
     }
@@ -488,8 +421,7 @@ fn coat_blend_darkened(base_darkening: glam::Vec3, coat_weight: f32, coat_dark: 
 
 /// Thin-film interference modulation over white: phase per RGB wavelength
 /// from film IOR/thickness (nanometers), Airy-like reflectance boost.
-#[kernel]
-fn thin_film_modulation(
+pub fn thin_film_modulation(
     cos_theta: f32,
     film_ior: f32,
     thickness_nm: f32,
@@ -511,8 +443,7 @@ fn thin_film_modulation(
 }
 
 /// Octahedral mapping of a unit vector to [-1,1]^2 — compact normal storage.
-#[kernel]
-fn octahedral_encode(n: glam::Vec3) -> glam::Vec2 {
+pub fn octahedral_encode(n: glam::Vec3) -> glam::Vec2 {
     let p = n.xy() / (n.x.abs() + n.y.abs() + n.z.abs());
     let q = glam::Vec2::new(p.x, p.y);
     let sign_x = if q.x >= 0.0 { 1.0 } else { -1.0 };
@@ -522,7 +453,7 @@ fn octahedral_encode(n: glam::Vec3) -> glam::Vec2 {
     if n.z < 0.0 {
         return flipped;
     }
-    return q;
+    q
 }
 
 #[cfg(test)]
@@ -531,42 +462,36 @@ mod tests {
 
     #[test]
     fn luminance_black() {
-        assert_eq!(luminance::eval(glam::Vec3::ZERO), 0.0);
+        assert_eq!(luminance(glam::Vec3::ZERO), 0.0);
     }
 
     #[test]
     fn luminance_white() {
-        let result = luminance::eval(glam::Vec3::ONE);
+        let result = luminance(glam::Vec3::ONE);
         assert!((result - 1.0).abs() < 0.001);
     }
 
     #[test]
     fn aces_tonemap_red() {
-        let result = aces_tonemap::eval(glam::Vec3::new(1.0, 0.0, 0.0));
+        let result = aces_tonemap(glam::Vec3::new(1.0, 0.0, 0.0));
         assert!((result.x - 0.8038).abs() < 0.001);
     }
 
     #[test]
     fn aces_tonemap_black() {
-        let result = aces_tonemap::eval(glam::Vec3::ZERO);
+        let result = aces_tonemap(glam::Vec3::ZERO);
         assert!((result.x).abs() < 0.001);
     }
 
     #[test]
-    fn wgsl_generates() {
-        assert!(luminance::wgsl_source().contains("fn luminance"));
-        assert!(aces_tonemap::wgsl_source().contains("fn aces_tonemap"));
-    }
-
-    #[test]
     fn fresnel0_from_ior_glass() {
-        let result = fresnel0_from_ior::eval(1.5);
+        let result = fresnel0_from_ior(1.5);
         assert!((result - 0.04).abs() < 0.01);
     }
 
     #[test]
     fn ggx_ndf_peak() {
-        let result = ggx_ndf::eval(1.0, 0.1);
+        let result = ggx_ndf(1.0, 0.1);
         assert!(result > 0.0);
     }
 
@@ -574,7 +499,7 @@ mod tests {
     fn ggx_ndf_aniso_peak_matches_closed_form() {
         // Peak (H == N) is exactly 1/(π·αu·αv); the old spelling
         // (dropped Noh², 1/(αu²·αv²) scale) returned ~625× this at α=0.04.
-        let d = ggx_ndf_aniso::eval(1.0, glam::Vec3::Z, glam::Vec3::X, glam::Vec3::Y, 0.04, 0.04);
+        let d = ggx_ndf_aniso(1.0, glam::Vec3::Z, glam::Vec3::X, glam::Vec3::Y, 0.04, 0.04);
         let expected = 1.0 / (PI * 0.04 * 0.04);
         assert!(
             (d - expected).abs() / expected < 1e-4,
@@ -591,37 +516,37 @@ mod tests {
             std::f32::consts::FRAC_1_SQRT_2,
             std::f32::consts::FRAC_1_SQRT_2,
         );
-        let d = ggx_ndf_aniso::eval(h.z, h, glam::Vec3::X, glam::Vec3::Y, 0.04, 0.04);
+        let d = ggx_ndf_aniso(h.z, h, glam::Vec3::X, glam::Vec3::Y, 0.04, 0.04);
         assert!((d - 0.00203).abs() / 0.00203 < 0.01, "d={d}");
     }
 
     #[test]
     fn smith_ggx_zero_to_one() {
-        let result = smith_ggx_correlated::eval(1.0, 1.0, 0.5);
+        let result = smith_ggx_correlated(1.0, 1.0, 0.5);
         assert!(result > 0.0 && result <= 1.0);
     }
 
     #[test]
     fn srgb_to_linear_black() {
-        let result = srgb_to_linear::eval(glam::Vec3::ZERO);
+        let result = srgb_to_linear(glam::Vec3::ZERO);
         assert_eq!(result, glam::Vec3::ZERO);
     }
 
     #[test]
     fn srgb_to_linear_white() {
-        let result = srgb_to_linear::eval(glam::Vec3::ONE);
+        let result = srgb_to_linear(glam::Vec3::ONE);
         assert!((result.x - 1.0).abs() < 0.001);
     }
 
     #[test]
     fn transmission_color_to_extinction_degenerate() {
-        let result = transmission_color_to_extinction::eval(glam::Vec3::splat(0.5), 0.0);
+        let result = transmission_color_to_extinction(glam::Vec3::splat(0.5), 0.0);
         assert_eq!(result, glam::Vec3::ZERO);
     }
 
     #[test]
     fn thin_film_modulation_produces_finite() {
-        let result = thin_film_modulation::eval(0.5, 1.5, 300.0, 1.0);
+        let result = thin_film_modulation(0.5, 1.5, 300.0, 1.0);
         assert!(result.x.is_finite());
         assert!(result.y.is_finite());
         assert!(result.z.is_finite());
@@ -630,7 +555,7 @@ mod tests {
     #[test]
     fn octahedral_encode_roundtrip() {
         let n = glam::Vec3::new(0.577, 0.577, 0.577).normalize();
-        let enc = octahedral_encode::eval(n);
+        let enc = octahedral_encode(n);
         let dec = crate::shaders::octahedral_decode_rust(enc);
         for i in 0..3 {
             assert!(
@@ -657,7 +582,7 @@ mod tests {
         ];
         for n in cases {
             let n = n.normalize();
-            let enc = octahedral_encode::eval(n);
+            let enc = octahedral_encode(n);
             let dec = crate::shaders::octahedral_decode_rust(enc);
             let err_deg = n.dot(dec).clamp(-1.0, 1.0).acos().to_degrees();
             assert!(err_deg < 1.0, "n={n} dec={dec} err={err_deg}°");
@@ -675,7 +600,7 @@ mod tests {
         /// Dielectric IOR shared by both presets.
         const DIELECTRIC_IOR: f32 = 1.5;
         let base = glam::Vec3::new(0.8, 0.2, 0.1);
-        let f0_dielectric = glam::Vec3::splat(fresnel0_from_ior::eval(DIELECTRIC_IOR));
+        let f0_dielectric = glam::Vec3::splat(fresnel0_from_ior(DIELECTRIC_IOR));
         let f0 = |metalness: f32| f0_dielectric.lerp(base, metalness);
         let diffuse = |metalness: f32| base * (1.0 - metalness);
         let f0_dielectric_end = f0(0.0);
@@ -707,7 +632,7 @@ mod tests {
     /// Severity: medium. Partial metals must lose diffuse once.
     #[test]
     fn partial_metal_diffuse_energy_is_not_squared() {
-        let energy = base_diffuse_energy::eval(0.04);
+        let energy = base_diffuse_energy(0.04);
         assert!((energy - 0.96).abs() < 1e-5, "{energy}");
         // The old weight was `energy * (1 - metalness)`. At metalness 0.5
         // that kept 0.48 instead of 0.96.
@@ -721,17 +646,17 @@ mod tests {
         // A mid-grey dielectric does not, so the coat factor is an
         // attenuator rather than an extra light.
         let grey = glam::Vec3::splat(0.2);
-        let darkened = coat_base_darkening::eval(1.5, 0.0, grey, 1.0, 1.0, 0.0, grey);
+        let darkened = coat_base_darkening(1.5, 0.0, grey, 1.0, 1.0, 0.0, grey);
         assert!(
             darkened.x < 0.6,
             "coat should darken a grey dielectric, got {darkened}"
         );
-        let off = coat_blend_darkened::eval(darkened, 0.0, 1.0);
+        let off = coat_blend_darkened(darkened, 0.0, 1.0);
         assert!(
             (off - glam::Vec3::ONE).length() < 1e-5,
             "weight 0 must be identity, got {off}"
         );
-        let on = coat_blend_darkened::eval(darkened, 1.0, 1.0);
+        let on = coat_blend_darkened(darkened, 1.0, 1.0);
         assert!((on - darkened).length() < 1e-5, "full coat, got {on}");
     }
 
@@ -739,14 +664,14 @@ mod tests {
     #[test]
     fn thin_film_weight_zero_cancels_the_zero_thickness_bias() {
         // Default material: weight 0, thickness 0, IOR 1.33 (water).
-        let raw = thin_film_modulation::eval(1.0, 1.33, 0.0, 1.0);
+        let raw = thin_film_modulation(1.0, 1.33, 0.0, 1.0);
         assert!(
             (raw.x - 1.0401).abs() < 1e-3,
             "zero-thickness Airy bias, got {raw}"
         );
-        let off = thin_film_weight_mix::eval(0.0, raw);
+        let off = thin_film_weight_mix(0.0, raw);
         assert!((off.x - 1.0).abs() < 1e-6 && (off - glam::Vec3::ONE).length() < 1e-5);
-        let on = thin_film_weight_mix::eval(1.0, raw);
+        let on = thin_film_weight_mix(1.0, raw);
         assert!((on.x - raw.x).abs() < 1e-6);
     }
 
@@ -754,17 +679,17 @@ mod tests {
     #[test]
     fn emission_is_luminance_and_coat_transmits_head_on() {
         let white = glam::Vec3::ONE;
-        let bare = coated_emission::eval(white, 2.0, 0.0, white, 0.2);
+        let bare = coated_emission(white, 2.0, 0.0, white, 0.2);
         assert!(
             (bare.x - 2.0).abs() < 1e-5,
             "bare emitter was divided by π, got {bare}"
         );
-        let head_on = coated_emission::eval(white, 1.0, 1.0, white, 1.0);
+        let head_on = coated_emission(white, 1.0, 1.0, white, 1.0);
         assert!(
             (head_on.x - 1.0).abs() < 1e-4,
             "coated emitter at normal incidence was black, got {head_on}"
         );
-        let grazing = coated_emission::eval(white, 1.0, 1.0, white, 0.0);
+        let grazing = coated_emission(white, 1.0, 1.0, white, 0.0);
         assert!(
             grazing.x < 1e-4,
             "grazing coat should block emission, got {grazing}"
@@ -775,7 +700,7 @@ mod tests {
     #[test]
     fn subsurface_aligned_directions_stay_finite() {
         let radius = glam::Vec3::splat(0.1);
-        let got = subsurface_brdf::eval(1.0, 1.0, 0.0, radius, 0.0);
+        let got = subsurface_brdf(1.0, 1.0, 0.0, radius, 0.0);
         let expected = INV_PI;
         assert!(
             (got.x - expected).abs() < 1e-4 && got.x < 1.0,
@@ -783,13 +708,13 @@ mod tests {
         );
         // Anisotropy uses the scattering cosine (1 when L aligns with V),
         // not cos(distance). The old phase was `1 + g * cos(distance)`.
-        let phased = subsurface_brdf::eval(1.0, 1.0, 0.0, radius, 1.0);
+        let phased = subsurface_brdf(1.0, 1.0, 0.0, radius, 1.0);
         assert!(
             (phased.x - 2.0 * INV_PI).abs() < 1e-4,
             "phase, got {phased}"
         );
         // A zero radius used to divide the dipole coefficient by 0.
-        let collapsed = subsurface_brdf::eval(1.0, 1.0, 0.0, glam::Vec3::ZERO, 0.0);
+        let collapsed = subsurface_brdf(1.0, 1.0, 0.0, glam::Vec3::ZERO, 0.0);
         assert!(collapsed.x.is_finite() && collapsed.x < 1.0, "{collapsed}");
     }
 
@@ -797,14 +722,14 @@ mod tests {
     #[test]
     fn second_aces_pass_crushes_midtones() {
         let scene = glam::Vec3::splat(1.0);
-        let once = aces_tonemap::eval(scene);
-        let twice = aces_tonemap::eval(once);
+        let once = aces_tonemap(scene);
+        let twice = aces_tonemap(once);
         assert!(twice.x < once.x - 0.05, "once={once} twice={twice}");
     }
 
     #[test]
     fn evaluate_ibl_is_zero_when_weight_is_zero() {
-        let got = evaluate_ibl::eval(
+        let got = evaluate_ibl(
             glam::Vec3::ONE,
             glam::Vec3::ONE,
             1.0,
@@ -814,7 +739,7 @@ mod tests {
             0.0,
         );
         assert!(got.length() < 1.0e-6, "{got}");
-        let lit = evaluate_ibl::eval(
+        let lit = evaluate_ibl(
             glam::Vec3::ONE,
             glam::Vec3::ONE,
             1.0,
@@ -832,61 +757,13 @@ mod tests {
         let irradiance = glam::Vec3::new(0.3, 0.3, 0.3);
         let f0 = glam::Vec3::splat(0.04);
         let diffuse = glam::Vec3::new(0.8, 0.2, 0.05);
-        let both = evaluate_ibl::eval(prefiltered, irradiance, 0.5, 0.1, f0, diffuse, 1.0);
-        let spec = evaluate_ibl_specular::eval(prefiltered, 0.5, 0.1, f0, 1.0);
-        let diff = evaluate_ibl_diffuse::eval(irradiance, 0.1, diffuse, 1.0);
+        let both = evaluate_ibl(prefiltered, irradiance, 0.5, 0.1, f0, diffuse, 1.0);
+        let spec = evaluate_ibl_specular(prefiltered, 0.5, 0.1, f0, 1.0);
+        let diff = evaluate_ibl_diffuse(irradiance, 0.1, diffuse, 1.0);
         assert!(
             (both - spec - diff).length() < 1.0e-5,
             "ibl {both} != spec {spec} + diff {diff}"
         );
-    }
-
-    #[test]
-    fn all_wgsl_sources_compile() {
-        let funcs: [&str; 26] = [
-            luminance::wgsl_source(),
-            aces_tonemap::wgsl_source(),
-            fresnel0_from_ior::wgsl_source(),
-            fresnel_schlick::wgsl_source(),
-            fresnel_schlick_vec::wgsl_source(),
-            fresnel_f82_tint::wgsl_source(),
-            ggx_ndf::wgsl_source(),
-            ggx_ndf_aniso::wgsl_source(),
-            openpbr_anisotropy::wgsl_source(),
-            smith_ggx_correlated::wgsl_source(),
-            smith_ggx_aniso::wgsl_source(),
-            oren_nayar_brdf::wgsl_source(),
-            base_diffuse_energy::wgsl_source(),
-            thin_film_weight_mix::wgsl_source(),
-            coated_emission::wgsl_source(),
-            sheen_brdf::wgsl_source(),
-            transmission_color_to_extinction::wgsl_source(),
-            subsurface_brdf::wgsl_source(),
-            srgb_to_linear::wgsl_source(),
-            coat_base_darkening::wgsl_source(),
-            coat_blend_darkened::wgsl_source(),
-            thin_film_modulation::wgsl_source(),
-            octahedral_encode::wgsl_source(),
-            evaluate_ibl::wgsl_source(),
-            evaluate_ibl_specular::wgsl_source(),
-            evaluate_ibl_diffuse::wgsl_source(),
-        ];
-        for src in funcs.iter() {
-            assert!(src.starts_with("fn "), "bad source: {src}");
-            assert!(src.contains("->"), "missing return type: {src}");
-        }
-    }
-
-    fn assert_valid_wgsl(name: &str, source: &str) {
-        let module = naga::front::wgsl::parse_str(source)
-            .unwrap_or_else(|e| panic!("{name} must parse: {e}"));
-        let mut validator = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        );
-        validator
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("{name} must validate: {e}"));
     }
 
     /// Named coefficients are the same f32 bits as the historical literals,
@@ -921,7 +798,7 @@ mod tests {
         ];
         for c in probes {
             let historical_luma = c.dot(glam::Vec3::new(0.2126, 0.7152, 0.0722));
-            assert_eq!(luminance::eval(c).to_bits(), historical_luma.to_bits());
+            assert_eq!(luminance(c).to_bits(), historical_luma.to_bits());
 
             let a = 2.51_f32;
             let b = 0.03_f32;
@@ -929,15 +806,27 @@ mod tests {
             let d = 0.59_f32;
             let e = 0.14_f32;
             let historical_aces = c * (a * c + b) / (c * (cc * c + d) + e);
-            let aces = aces_tonemap::eval(c);
+            let aces = aces_tonemap(c);
             assert_eq!(aces.x.to_bits(), historical_aces.x.to_bits());
             assert_eq!(aces.y.to_bits(), historical_aces.y.to_bits());
             assert_eq!(aces.z.to_bits(), historical_aces.z.to_bits());
 
             let historical_srgb =
                 glam::Vec3::new(srgb_channel(c.x), srgb_channel(c.y), srgb_channel(c.z));
-            assert_eq!(srgb_to_linear::eval(c), historical_srgb);
+            assert_eq!(srgb_to_linear(c), historical_srgb);
         }
+    }
+
+    fn assert_valid_wgsl(name: &str, source: &str) {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{name} must parse: {e}"));
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name} must validate: {e}"));
     }
 
     fn srgb_channel(channel: f32) -> f32 {
@@ -945,58 +834,6 @@ mod tests {
             channel / 12.92
         } else {
             ((channel + 0.055) / 1.055).powf(2.4)
-        }
-    }
-
-    /// Kernel WGSL names the coefficients, and the const block spells each
-    /// one with the bit-exact `f32_lit` decimal. Stitching that block in
-    /// front of every kernel (plus `PI`/`EPS`/`INV_PI`) still validates.
-    #[test]
-    fn kernel_wgsl_is_numerically_equivalent() {
-        let block = wgsl_consts();
-        for name in [
-            REC709_LUMA_R,
-            ACES_FIT_A,
-            SCHLICK_FRESNEL_POWER,
-            SMITH_GGX_VISIBILITY_SCALE,
-            SRGB_LINEAR_CUTOFF,
-            THIN_FILM_PHASE_CYCLES,
-            COLOR_CHANNEL_FLOOR,
-        ] {
-            let spelling = super::super::f32_lit(name);
-            assert!(
-                block.contains(&format!(" = {spelling};")),
-                "missing bit-exact spelling {spelling} in {block}"
-            );
-        }
-        let luma = luminance::wgsl_source();
-        assert!(luma.contains("REC709_LUMA_R"));
-        assert!(!luma.contains("0.2126"));
-        let aces = aces_tonemap::wgsl_source();
-        assert!(aces.contains("ACES_FIT_A"));
-        assert!(!aces.contains("2.51"));
-        let srgb = srgb_to_linear::wgsl_source();
-        assert!(srgb.contains("SRGB_LINEAR_CUTOFF"));
-        assert!(!srgb.contains("0.04045"));
-
-        let header = format!("{}\n{}", crate::shaders::helpers::wgsl_consts(), block);
-        let kernels = [
-            luminance::wgsl_source(),
-            aces_tonemap::wgsl_source(),
-            fresnel_schlick::wgsl_source(),
-            fresnel_f82_tint::wgsl_source(),
-            smith_ggx_correlated::wgsl_source(),
-            oren_nayar_brdf::wgsl_source(),
-            sheen_brdf::wgsl_source(),
-            transmission_color_to_extinction::wgsl_source(),
-            subsurface_brdf::wgsl_source(),
-            srgb_to_linear::wgsl_source(),
-            coat_base_darkening::wgsl_source(),
-            thin_film_modulation::wgsl_source(),
-            ggx_ndf::wgsl_source(),
-        ];
-        for src in kernels {
-            assert_valid_wgsl("kernel", &format!("{header}\n{src}"));
         }
     }
 
@@ -1076,12 +913,11 @@ mod tests {
     }
 }
 
-/// Numeric parity between the reference kernels above and the shader-side port
+/// Numeric parity between the reference mirrors above and the shader-side port
 /// in `ornis-gpu-openpbr`.
 ///
-/// The port is what the GPU translates; the kernels here are the `#[kernel]`
-/// sources the legacy WGSL is spliced from. They have to agree before a pass
-/// can move over, so every function is compared on the host, per lane.
+/// The port is what the GPU translates; the functions here are the CPU
+/// reference it replaced. Every function is compared on the host, per lane.
 #[cfg(test)]
 mod openpbr_math_parity {
     use super::*;
@@ -1116,18 +952,14 @@ mod openpbr_math_parity {
         for (r, g, b) in [(0.3, 0.6, 0.9), (0.0, 0.0, 0.0), (4.0, 1.0, 0.05)] {
             let reference = glam::Vec3::new(r, g, b);
             let ported = vec3(r, g, b);
-            close(
-                luminance::eval(reference),
-                port::luminance(ported),
-                "luminance",
-            );
+            close(luminance(reference), port::luminance(ported), "luminance");
             close3(
-                aces_tonemap::eval(reference),
+                aces_tonemap(reference),
                 port::aces_tonemap(ported),
                 "aces_tonemap",
             );
             close3(
-                srgb_to_linear::eval(reference),
+                srgb_to_linear(reference),
                 port::srgb_to_linear(ported),
                 "srgb_to_linear",
             );
@@ -1137,24 +969,24 @@ mod openpbr_math_parity {
     #[test]
     fn fresnel_terms_agree() {
         close(
-            fresnel0_from_ior::eval(1.5),
+            fresnel0_from_ior(1.5),
             port::fresnel0_from_ior(1.5),
             "fresnel0_from_ior",
         );
         for cos_theta in [0.05f32, 0.4, 0.95] {
             close(
-                fresnel_schlick::eval(cos_theta, 0.04),
+                fresnel_schlick(cos_theta, 0.04),
                 port::fresnel_schlick(cos_theta, 0.04),
                 "fresnel_schlick",
             );
             let f0 = glam::Vec3::new(0.9, 0.7, 0.3);
             close3(
-                fresnel_schlick_vec::eval(cos_theta, f0),
+                fresnel_schlick_vec(cos_theta, f0),
                 port::fresnel_schlick_vec(cos_theta, vec3(0.9, 0.7, 0.3)),
                 "fresnel_schlick_vec",
             );
             close3(
-                fresnel_f82_tint::eval(cos_theta, f0, glam::Vec3::new(0.5, 0.6, 0.7)),
+                fresnel_f82_tint(cos_theta, f0, glam::Vec3::new(0.5, 0.6, 0.7)),
                 port::fresnel_f82_tint(cos_theta, vec3(0.9, 0.7, 0.3), vec3(0.5, 0.6, 0.7)),
                 "fresnel_f82_tint",
             );
@@ -1164,18 +996,14 @@ mod openpbr_math_parity {
     #[test]
     fn microfacet_terms_agree() {
         for alpha in [0.1f32, 0.45, 1.0] {
+            close(ggx_ndf(0.8, alpha), port::ggx_ndf(0.8, alpha), "ggx_ndf");
             close(
-                ggx_ndf::eval(0.8, alpha),
-                port::ggx_ndf(0.8, alpha),
-                "ggx_ndf",
-            );
-            close(
-                smith_ggx_correlated::eval(0.7, 0.6, alpha),
+                smith_ggx_correlated(0.7, 0.6, alpha),
                 port::smith_ggx_correlated(0.7, 0.6, alpha),
                 "smith_ggx_correlated",
             );
         }
-        let (alpha_u, alpha_v) = openpbr_anisotropy::eval(0.4, 0.3).into();
+        let (alpha_u, alpha_v) = openpbr_anisotropy(0.4, 0.3).into();
         let (port_u, port_v) = port::openpbr_anisotropy(0.4, 0.3);
         close(alpha_u, port_u, "openpbr_anisotropy.u");
         close(alpha_v, port_v, "openpbr_anisotropy.v");
@@ -1183,7 +1011,7 @@ mod openpbr_math_parity {
         let t = glam::Vec3::new(1.0, 0.0, 0.0);
         let b = glam::Vec3::new(0.0, 1.0, 0.0);
         close(
-            ggx_ndf_aniso::eval(h.z, h, t, b, alpha_u, alpha_v),
+            ggx_ndf_aniso(h.z, h, t, b, alpha_u, alpha_v),
             port::ggx_ndf_aniso(
                 h.z,
                 vec3(h.x, h.y, h.z),
@@ -1197,7 +1025,7 @@ mod openpbr_math_parity {
         let v = glam::Vec3::new(0.2, 0.1, 0.97).normalize();
         let l = glam::Vec3::new(-0.4, 0.3, 0.86).normalize();
         close(
-            smith_ggx_aniso::eval(v.z, l.z, v, l, t, b, alpha_u, alpha_v),
+            smith_ggx_aniso(v.z, l.z, v, l, t, b, alpha_u, alpha_v),
             port::smith_ggx_aniso(
                 v.z,
                 l.z,
@@ -1216,18 +1044,18 @@ mod openpbr_math_parity {
     fn diffuse_and_sheen_terms_agree() {
         for (no_v, no_l) in [(0.9f32, 0.5f32), (0.3, 0.95)] {
             close(
-                oren_nayar_brdf::eval(no_v, no_l, 0.45, 0.36),
+                oren_nayar_brdf(no_v, no_l, 0.45, 0.36),
                 port::oren_nayar_brdf(no_v, no_l, 0.45, 0.36),
                 "oren_nayar_brdf",
             );
             close(
-                sheen_brdf::eval(no_v, no_l, 0.95, 0.8, 0.3),
+                sheen_brdf(no_v, no_l, 0.95, 0.8, 0.3),
                 port::sheen_brdf(no_v, no_l, 0.95, 0.8, 0.3),
                 "sheen_brdf",
             );
         }
         close(
-            base_diffuse_energy::eval(0.12),
+            base_diffuse_energy(0.12),
             port::base_diffuse_energy(0.12),
             "base_diffuse_energy",
         );
@@ -1240,7 +1068,7 @@ mod openpbr_math_parity {
         let f0 = glam::Vec3::new(0.04, 0.04, 0.04);
         let diffuse_color = glam::Vec3::new(0.5, 0.4, 0.3);
         close3(
-            evaluate_ibl::eval(prefiltered, irradiance, 0.8, 0.2, f0, diffuse_color, 0.75),
+            evaluate_ibl(prefiltered, irradiance, 0.8, 0.2, f0, diffuse_color, 0.75),
             port::evaluate_ibl(
                 vec3(0.4, 0.5, 0.6),
                 vec3(0.1, 0.2, 0.3),
@@ -1253,7 +1081,7 @@ mod openpbr_math_parity {
             "evaluate_ibl",
         );
         close3(
-            evaluate_ibl_specular::eval(prefiltered, 0.8, 0.2, f0, 0.75),
+            evaluate_ibl_specular(prefiltered, 0.8, 0.2, f0, 0.75),
             port::evaluate_ibl_specular(
                 vec3(0.4, 0.5, 0.6),
                 0.8,
@@ -1264,7 +1092,7 @@ mod openpbr_math_parity {
             "evaluate_ibl_specular",
         );
         close3(
-            evaluate_ibl_diffuse::eval(irradiance, 0.2, diffuse_color, 0.75),
+            evaluate_ibl_diffuse(irradiance, 0.2, diffuse_color, 0.75),
             port::evaluate_ibl_diffuse(vec3(0.1, 0.2, 0.3), 0.2, vec3(0.5, 0.4, 0.3), 0.75),
             "evaluate_ibl_diffuse",
         );
@@ -1275,7 +1103,7 @@ mod openpbr_math_parity {
         let base_color = glam::Vec3::new(0.6, 0.5, 0.4);
         let subsurface_color = glam::Vec3::new(0.7, 0.2, 0.2);
         close3(
-            coat_base_darkening::eval(1.6, 0.3, base_color, 0.9, 0.8, 0.4, subsurface_color),
+            coat_base_darkening(1.6, 0.3, base_color, 0.9, 0.8, 0.4, subsurface_color),
             port::coat_base_darkening(
                 1.6,
                 0.3,
@@ -1289,27 +1117,27 @@ mod openpbr_math_parity {
         );
         let darkened = glam::Vec3::new(0.8, 0.85, 0.9);
         close3(
-            coat_blend_darkened::eval(darkened, 0.7, 0.5),
+            coat_blend_darkened(darkened, 0.7, 0.5),
             port::coat_blend_darkened(vec3(0.8, 0.85, 0.9), 0.7, 0.5),
             "coat_blend_darkened",
         );
         close3(
-            thin_film_weight_mix::eval(0.6, glam::Vec3::new(1.1, 0.9, 1.05)),
+            thin_film_weight_mix(0.6, glam::Vec3::new(1.1, 0.9, 1.05)),
             port::thin_film_weight_mix(0.6, vec3(1.1, 0.9, 1.05)),
             "thin_film_weight_mix",
         );
         close3(
-            thin_film_modulation::eval(0.8, 1.4, 450.0, 1.0),
+            thin_film_modulation(0.8, 1.4, 450.0, 1.0),
             port::thin_film_modulation(0.8, 1.4, 450.0, 1.0),
             "thin_film_modulation",
         );
         close3(
-            transmission_color_to_extinction::eval(glam::Vec3::new(0.8, 0.5, 0.3), 2.0),
+            transmission_color_to_extinction(glam::Vec3::new(0.8, 0.5, 0.3), 2.0),
             port::transmission_color_to_extinction(vec3(0.8, 0.5, 0.3), 2.0),
             "transmission_color_to_extinction",
         );
         close3(
-            subsurface_brdf::eval(0.8, 0.6, 0.35, glam::Vec3::new(0.2, 0.1, 0.05), 0.4),
+            subsurface_brdf(0.8, 0.6, 0.35, glam::Vec3::new(0.2, 0.1, 0.05), 0.4),
             port::subsurface_brdf(0.8, 0.6, 0.35, vec3(0.2, 0.1, 0.05), 0.4),
             "subsurface_brdf",
         );
@@ -1318,7 +1146,7 @@ mod openpbr_math_parity {
     #[test]
     fn emission_and_normal_encoding_agree() {
         close3(
-            coated_emission::eval(
+            coated_emission(
                 glam::Vec3::new(0.9, 0.8, 0.7),
                 3.0,
                 0.6,
@@ -1330,7 +1158,7 @@ mod openpbr_math_parity {
         );
         for (x, y, z) in [(0.0, 0.0, 1.0), (0.5, -0.4, -0.76), (-0.3, 0.2, 0.93)] {
             let n = glam::Vec3::new(x, y, z).normalize();
-            let reference = octahedral_encode::eval(n);
+            let reference = octahedral_encode(n);
             let ported = port::octahedral_encode(vec3(n.x, n.y, n.z));
             close(reference.x, ported.0, "octahedral_encode.x");
             close(reference.y, ported.1, "octahedral_encode.y");

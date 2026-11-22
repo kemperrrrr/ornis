@@ -1044,7 +1044,7 @@ mod tests {
                 .expect("positive density"),
         );
         let tonemap = |rgb: [f32; 3]| {
-            let mapped = crate::shaders::math::aces_tonemap::eval(glam::Vec3::from(rgb));
+            let mapped = crate::shaders::math::aces_tonemap(glam::Vec3::from(rgb));
             [mapped.x, mapped.y, mapped.z]
         };
         // The pass mixes in scene-linear space, then applies the same ACES
@@ -1348,7 +1348,7 @@ mod tests {
             ]
         };
         let aces = |rgb: [f32; 3]| {
-            let mapped = aces_tonemap::eval(glam::Vec3::from(rgb));
+            let mapped = aces_tonemap(glam::Vec3::from(rgb));
             [mapped.x, mapped.y, mapped.z]
         };
         let near = |actual: [f32; 3], expected: [f32; 3]| {

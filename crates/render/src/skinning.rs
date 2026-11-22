@@ -98,12 +98,12 @@ pub const PALETTE_BYTE_SIZE: usize = 16 * 1024;
 /// Skinned vertex input: bind-pose attributes plus joint influences.
 ///
 /// Same locations 0–3 as
-/// [`GbufferVertexInput`](crate::shaders::interface::GbufferVertexInput)
+/// [`GbufferVertexInput`](crate::shaders::gbuffer_generated::wgsl_vertex_source)
 /// (position, normal, uv, tangent), then joints (`vec4<u32>`) and weights
 /// (`vec4<f32>`). The shader reads lanes unrolled (`.x/.y/.z/.w`), so no
 /// dynamic vector indexing is needed — only the palette index is dynamic.
 ///
-/// Declaration-only mirror (like `shaders::interface`): the WGSL derive is
+/// Declaration-only mirror (like the deleted `shaders::interface`): the WGSL derive is
 /// the use; Rust never reads the fields.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, WgslInterface)]
@@ -400,7 +400,6 @@ pub fn skinned_entry_point() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shaders::interface::GbufferVertexInput as ClassicVertexInput;
     use ornis_animation::{CPU_GPU_TOLERANCE as TOL, SkinningMode as Mode};
     use ornis_animation::{SkinningResources, blend_vertex_reference, skin_vertices};
 
@@ -442,16 +441,34 @@ mod tests {
         assert!(src.contains("@location(3) tangent: vec3<f32>"));
         assert!(src.contains("@location(4) joints: vec4<u32>"));
         assert!(src.contains("@location(5) weights: vec4<f32>"));
-        // Same prefix spelling as the classic input (shared buffers).
-        for line in [
-            "@location(0) position: vec3<f32>",
-            "@location(1) normal: vec3<f32>",
-            "@location(2) uv: vec2<f32>",
-            "@location(3) tangent: vec3<f32>",
+        // The shared buffers are a type-level contract, so the classic
+        // g-buffer vertex artifact is the oracle: locations 0–3 must carry the
+        // same types there, or one pipeline would read bytes the other bound
+        // as something else.
+        let classic = crate::shaders::gbuffer_generated::wgsl_vertex_source();
+        for (location, ty) in [
+            ("0", "vec3<f32>"),
+            ("1", "vec3<f32>"),
+            ("2", "vec2<f32>"),
+            ("3", "vec3<f32>"),
         ] {
+            let entry = classic
+                .find(&format!("fn vs_main("))
+                .map(|at| &classic[at..])
+                .expect("g-buffer vertex artifact has vs_main");
+            let signature = &entry[..entry.find("->").expect("entry returns a struct")];
             assert!(
-                ClassicVertexInput::WGSL_SOURCE.contains(line),
-                "classic input drifted from {line}"
+                signature.contains(&format!("@location({location}) ")),
+                "g-buffer input lost location {location}"
+            );
+            let at = signature
+                .find(&format!("@location({location}) "))
+                .expect("just matched");
+            let decl = &signature[at..];
+            let decl = &decl[..decl.find(',').unwrap_or(decl.len())];
+            assert!(
+                decl.contains(ty),
+                "classic input drifted at {location}: expected {ty}, got {decl}"
             );
         }
     }

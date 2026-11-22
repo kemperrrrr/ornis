@@ -25,7 +25,7 @@
 
 mod clusters;
 mod direct;
-mod layout;
+pub mod layout;
 mod lights;
 mod material;
 mod shadows;

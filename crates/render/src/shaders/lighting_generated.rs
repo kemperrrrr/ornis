@@ -332,16 +332,14 @@ mod tests {
         assert!(src.contains("textureSampleCompareLevel(tex_0_18_"), "{src}");
     }
 
-    /// The resource table drives both sides: WGSL declarations and `wgpu`
-    /// layout entries agree on numbers, visibility and kinds.
+    /// The resource table drives the `wgpu` layout: numbers, visibility and
+    /// kinds survive the MSAA flag exactly where a texture can resolve.
     #[test]
-    fn lighting_resources_drive_bgl_and_wgsl() {
-        use super::super::{bgl_entry, resource_decl};
+    fn lighting_resources_drive_the_layout() {
+        use super::super::bgl_entry;
         use super::LIGHTING_RESOURCES;
         assert_eq!(LIGHTING_RESOURCES.len(), 23);
         for r in LIGHTING_RESOURCES {
-            let decl = resource_decl(&r);
-            assert!(decl.starts_with(&format!("@group({}) @binding({}) ", r.group, r.binding)));
             let plain = bgl_entry(&r, false);
             let msaa = bgl_entry(&r, true);
             assert_eq!(plain.binding, r.binding);
