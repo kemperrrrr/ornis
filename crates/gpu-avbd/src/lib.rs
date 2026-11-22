@@ -195,8 +195,8 @@ fn stamp(
             put(h, 3 + x, y, at(h, 3 + x, y) + pen * tx * ny);
             y += 1;
         }
-        b[x as usize] = b[x as usize] + force * na[x as usize];
-        b[(3 + x) as usize] = b[(3 + x) as usize] + force * ta[x as usize];
+        b[x as usize] += force * na[x as usize];
+        b[(3 + x) as usize] += force * ta[x as usize];
         x += 1;
     }
 }
@@ -223,7 +223,7 @@ fn solve(h: &[f32; MATRIX_ELEMS], b: &[f32; DOF], out: &mut [f32; DOF]) -> f32 {
                 let mut k = 0u32;
                 while k < DOF as u32 {
                     if k < j {
-                        s = s - at(&l, i, k) * d[k as usize] * at(&l, j, k);
+                        s -= at(&l, i, k) * d[k as usize] * at(&l, j, k);
                     }
                     k += 1;
                 }
@@ -251,7 +251,7 @@ fn solve(h: &[f32; MATRIX_ELEMS], b: &[f32; DOF], out: &mut [f32; DOF]) -> f32 {
         let mut k = 0u32;
         while k < DOF as u32 {
             if k < i {
-                s = s - at(&l, i, k) * y[k as usize];
+                s -= at(&l, i, k) * y[k as usize];
             }
             k += 1;
         }
@@ -268,7 +268,7 @@ fn solve(h: &[f32; MATRIX_ELEMS], b: &[f32; DOF], out: &mut [f32; DOF]) -> f32 {
         let mut k = 0u32;
         while k < DOF as u32 {
             if k > i {
-                s = s - at(&l, k, i) * out[k as usize];
+                s -= at(&l, k, i) * out[k as usize];
             }
             k += 1;
         }
