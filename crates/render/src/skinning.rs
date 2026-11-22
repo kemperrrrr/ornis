@@ -453,7 +453,7 @@ mod tests {
             ("3", "vec3<f32>"),
         ] {
             let entry = classic
-                .find(&format!("fn vs_main("))
+                .find("fn vs_main(")
                 .map(|at| &classic[at..])
                 .expect("g-buffer vertex artifact has vs_main");
             let signature = &entry[..entry.find("->").expect("entry returns a struct")];

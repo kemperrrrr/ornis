@@ -709,7 +709,7 @@ mod tests {
         }
         assert!(reads > 20, "expected the material reads, found {reads}");
         assert!(
-            highest as usize + 1 <= words,
+            (highest as usize) < words,
             "the lighting kernel reads material word {highest} of a {words}-word record"
         );
         for (group, offset) in [
