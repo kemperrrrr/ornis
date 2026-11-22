@@ -197,14 +197,14 @@ fn cs_main_row(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         let _e544 = (_e412 + 20u);
         let _e547 = h[_e544];
         h[_e544] = bitcast<u32>(((_e337 * _e407) + bitcast<f32>(_e547)));
-        let _e554 = (0u + _e401);
-        let _e557 = b[_e554];
-        let _e562 = na[(0u + _e401)];
-        b[_e554] = bitcast<u32>((bitcast<f32>(_e557) + (_e397 * bitcast<f32>(_e562))));
-        let _e570 = (_e554 + 3u);
-        let _e573 = b[_e570];
-        let _e578 = ta[(0u + _e401)];
-        b[_e570] = bitcast<u32>((bitcast<f32>(_e573) + (_e397 * bitcast<f32>(_e578))));
+        let _e557 = na[(0u + _e401)];
+        let _e560 = (0u + _e401);
+        let _e563 = b[_e560];
+        b[_e560] = bitcast<u32>((bitcast<f32>(_e563) + (_e397 * bitcast<f32>(_e557))));
+        let _e572 = ta[(0u + _e401)];
+        let _e576 = (_e560 + 3u);
+        let _e579 = b[_e576];
+        b[_e576] = bitcast<u32>((bitcast<f32>(_e579) + (_e397 * bitcast<f32>(_e572))));
         let _e586 = (_e401 + 1u);
         if (_e586 == 3u) {
             break;
