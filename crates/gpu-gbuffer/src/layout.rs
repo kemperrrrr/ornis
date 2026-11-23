@@ -197,6 +197,7 @@ pub(crate) fn view_lane<const LANE: usize>(
 }
 
 /// Row `LANE` of `previous_view_proj · (x, y, z, w)`.
+// qual:allow(test_quality, untested) reason: "reads the camera uniform; the host build has no uniform, and the gbuffer device gate covers the projection"
 #[inline(always)]
 pub(crate) fn previous_view_lane<const LANE: usize>(
     camera: &Uniform<Camera, 0, 0>,

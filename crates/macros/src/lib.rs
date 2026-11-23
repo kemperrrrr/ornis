@@ -23,11 +23,6 @@
 
 mod auto_pipeline;
 mod for_each_entity;
-mod gpu_pipeline;
-mod gpu_pipeline_pack;
-mod gpu_pipeline_pack_layout;
-mod kernel;
-mod kernel_types;
 mod pack;
 mod pack_gpu;
 mod pack_lanes;
@@ -46,19 +41,10 @@ mod smart_system_lanes;
 mod smart_system_parse;
 mod smart_system_parse_params;
 mod smart_system_step;
-mod stages;
 mod static_profile;
-mod wgsl;
-mod wgsl_context;
-mod wgsl_entity_shape;
-mod wgsl_gather;
-mod wgsl_gather_emit;
-mod wgsl_gather_rejects;
-mod wgsl_gather_scan;
 mod wgsl_interface;
-mod wgsl_lower;
-mod wgsl_options;
 mod wgsl_struct;
+mod words;
 
 use proc_macro::TokenStream;
 
@@ -121,24 +107,6 @@ pub fn derive_pipeline_config(input: TokenStream) -> TokenStream {
     pipeline_config::derive(input)
 }
 
-/// Attribute macro declaring a GPU pipeline on a function or struct.
-///
-/// Transforms the annotated item into a pipeline definition (shader source,
-/// bind-group/layout descriptors, entry point) that the renderer can build
-/// directly, replacing hand-written `wgpu` boilerplate.
-#[proc_macro_attribute]
-pub fn gpu_pipeline(attr: TokenStream, item: TokenStream) -> TokenStream {
-    gpu_pipeline::gpu_pipeline(attr, item)
-}
-
-/// Derive the `GLOBALS` contract list on a stage-entry context bundle.
-///
-/// See the private `wgsl_context` module for the bundle contract.
-#[proc_macro_derive(ShaderContext)]
-pub fn derive_shader_context(input: TokenStream) -> TokenStream {
-    wgsl_context::derive(input)
-}
-
 /// Derive the structural "no interior mutability" marker for a
 /// `#[smart_system]` resource.
 ///
@@ -163,36 +131,6 @@ pub fn derive_plain_resource(input: TokenStream) -> TokenStream {
 #[allow(dead_code)] // proc-macro entry: invoked by the compiler on attribute use, invisible to the call graph (8 sibling entries carry the same note via baseline)
 pub fn smart_system(attr: TokenStream, item: TokenStream) -> TokenStream {
     smart_system::attribute(attr, item)
-}
-
-/// Translate a stage-entry Rust function to a WGSL entry point.
-///
-/// The input function is DSL-only (free binding identifiers, mirror-typed
-/// locals) and is replaced by a module exposing `wgsl_source()`; see the
-/// private `stages` module for the contract.
-#[proc_macro_attribute]
-pub fn stage(attr: TokenStream, item: TokenStream) -> TokenStream {
-    stages::stage(attr, item)
-}
-
-/// Translate a plain WGSL helper function from Rust.
-///
-/// Same body translation as [`stage`] but without the
-/// `@vertex`/`@fragment` wrapper: `fn name(params) -> Ret`. The Rust body is
-/// never compiled, so helper bodies may name shader-side values freely.
-#[proc_macro_attribute]
-pub fn wgsl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
-    stages::wgsl_fn(attr, item)
-}
-
-/// Translate a small Rust function into WGSL compute-shader code.
-///
-/// Parses the annotated function's AST (not runtime execution) and re-emits
-/// it as WGSL — the mechanism behind the engine's Rust-authored BRDF/shader
-/// math (`render/shaders/math.rs`) staying a single source of truth.
-#[proc_macro_attribute]
-pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
-    kernel::kernel(attr, item)
 }
 
 /// Derive the canonical component name for the F0 registry.

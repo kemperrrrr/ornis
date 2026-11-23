@@ -921,6 +921,7 @@ pub(crate) fn local_invocation_index() -> u32 {
 }
 
 /// Lane of the fragment's `@location(0)` UV.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
 #[inline(always)]
 pub(crate) fn fragment_uv_lane(lane: u32) -> f32 {
     call!(import_fragment_uv_lane(lane))
@@ -1001,18 +1002,21 @@ pub(crate) fn fragment_input_lane(location: u32, lanes: u32, lane: u32) -> f32 {
 }
 
 /// The scalar `u32` fragment input at `location`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
 #[inline(always)]
 pub(crate) fn fragment_input_u32(location: u32) -> u32 {
     call!(import_fragment_input_u32(location))
 }
 
 /// Write a `vec2<f32>` fragment output at `location`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
 #[inline(always)]
 pub(crate) fn fragment_store_2(location: u32, x: f32, y: f32) {
     call!(import_fragment_store_f32x2_location(location, x, y));
 }
 
 /// Write a scalar `u32` fragment output at `location`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
 #[inline(always)]
 pub(crate) fn fragment_store_u32(location: u32, value: u32) {
     call!(import_fragment_store_u32_location(location, value));

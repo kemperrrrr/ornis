@@ -93,3 +93,26 @@ pub fn fs_main(
     );
     fragment_store_at::<0>(r, g, b, 1.0);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SRGB_LINEAR_CUTOFF, srgb_lane};
+
+    fn close(got: f32, want: f32) {
+        assert!((got - want).abs() < 1e-6, "got {got}, want {want}");
+    }
+
+    /// The decode is the exact sRGB curve on both segments: the linear toe
+    /// below the cutoff, the power segment above it, and the two meet at the
+    /// cutoff (`0.04045 / 12.92 == 0.003131`) instead of leaving a step.
+    #[test]
+    fn srgb_decode_matches_the_standard_curve() {
+        close(srgb_lane(0.0), 0.0);
+        close(srgb_lane(SRGB_LINEAR_CUTOFF), 0.04045 / 12.92);
+        close(srgb_lane(0.5), 0.214_041_14);
+        close(srgb_lane(1.0), 1.0);
+        // The toe is linear, not a power segment: halving a small value halves
+        // the decode.
+        close(srgb_lane(0.02), srgb_lane(0.01) * 2.0);
+    }
+}

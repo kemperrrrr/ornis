@@ -181,3 +181,36 @@ pub fn fs_main(
     );
     fragment_store_at::<0>(r, g, b, 1.0);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{aces_lane, layer_mix, tone_map};
+
+    /// Layer mixing is a weighted sum: both weights zero is black, a full
+    /// single-layer weight passes that layer through untouched.
+    #[test]
+    fn layer_mix_is_a_weighted_sum() {
+        assert_eq!(layer_mix(0.25, 0.75, 0.0, 0.0), 0.0);
+        assert_eq!(layer_mix(0.25, 0.75, 1.0, 0.0), 0.25);
+        assert_eq!(layer_mix(0.25, 0.75, 0.0, 1.0), 0.75);
+        assert_eq!(layer_mix(0.25, 0.75, 0.5, 0.5), 0.5);
+    }
+
+    /// The tone curve is applied after exposure: zero stays zero, and one stop
+    /// of exposure brightens the result (ACES is monotone).
+    #[test]
+    fn tone_map_applies_bloom_and_exposure_before_the_curve() {
+        assert_eq!(tone_map(0.0, 0.0, 1.0, 2.0), 0.0);
+        let base = tone_map(0.5, 0.0, 1.0, 1.0);
+        assert!((base - aces_lane(0.5)).abs() < 1e-6);
+        assert!(
+            tone_map(0.5, 0.0, 1.0, 2.0) > base,
+            "exposure must brighten"
+        );
+        assert!(tone_map(0.5, 0.5, 1.0, 1.0) > base, "bloom must add light");
+        assert!(
+            (tone_map(0.5, 0.5, 0.0, 1.0) - base).abs() < 1e-6,
+            "zero intensity must drop bloom"
+        );
+    }
+}

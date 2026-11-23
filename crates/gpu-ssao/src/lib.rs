@@ -261,3 +261,27 @@ pub fn fs_main(
     let visibility = clamp(1.0 - (occluded / (TAPS as f32)) * intensity, 0.0, 1.0);
     fragment_store(visibility, visibility, visibility, 1.0);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::interleaved_gradient;
+
+    /// The interleaved-gradient hash stays in `[0, 1)` and decorrelates
+    /// neighbours: that is the whole point of the rotated pattern, and a
+    /// missing `fract` would show up here as a value outside the unit range.
+    #[test]
+    fn interleaved_gradient_is_unit_range_and_varied() {
+        let mut first = f32::INFINITY;
+        let mut last = f32::NEG_INFINITY;
+        for y in 0..8u32 {
+            for x in 0..8u32 {
+                let value = interleaved_gradient(x, y);
+                assert!((0.0..1.0).contains(&value), "hash {value} outside [0, 1)");
+                first = first.min(value);
+                last = last.max(value);
+            }
+        }
+        assert!(last - first > 0.5, "hash barely varies: {first}..{last}");
+        assert_eq!(interleaved_gradient(3, 5), interleaved_gradient(3, 5));
+    }
+}

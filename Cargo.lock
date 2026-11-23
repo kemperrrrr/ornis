@@ -3035,7 +3035,6 @@ dependencies = [
  "glam",
  "naga",
  "ornis-core",
- "ornis-shader-lang",
  "pollster",
  "proc-macro2",
  "quote",
@@ -3107,7 +3106,6 @@ dependencies = [
  "ornis-macros",
  "ornis-mesh-editor",
  "ornis-schedule",
- "ornis-shader-lang",
  "ornis-texture",
  "ornis-wasm2gpu-testkit",
  "png",
@@ -3141,14 +3139,6 @@ dependencies = [
  "fixedbitset",
  "rayon",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "ornis-shader-lang"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "syn 3.0.10",
 ]
 
 [[package]]
@@ -3250,7 +3240,6 @@ dependencies = [
  "bytemuck",
  "dirs",
  "ornis-core",
- "ornis-macros",
  "pollster",
  "serde",
  "serde_json",

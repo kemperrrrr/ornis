@@ -61,6 +61,7 @@ pub const Z_LANE_U: usize = 2;
 pub const W_LANE_U: usize = 3;
 
 /// `Camera::camera_pos.xyz`.
+// qual:allow(test_quality, untested) reason: "reads the camera uniform; the host build has no uniform, and the lighting device gate covers the position"
 #[inline(always)]
 pub(crate) fn camera_position(camera: &Uniform<Camera, GROUP, CAMERA_BINDING>) -> Vec3 {
     v3(

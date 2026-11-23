@@ -34,6 +34,7 @@ use crate::layout::Y_LANE_U;
 /// the same size in screen space as they recede. A position behind the near
 /// plane clamps into the first tile and the first slice instead of wrapping: the
 /// GPU conversion saturates, which is what the reference clamps after.
+// qual:allow(test_quality, untested) reason: "reads the camera uniform; the host build has no uniform, and the deferred lighting device gate covers the cluster lookup"
 #[inline(always)]
 pub fn cluster_index(camera: &Uniform<Camera, GROUP, CAMERA_BINDING>, world_pos: Vec3) -> u32 {
     let clip_x = clip_lane::<X_LANE_U>(camera, world_pos);
@@ -76,4 +77,20 @@ fn clip_lane<const LANE: usize>(
     let c2 = camera.vec4_lane::<{ CAMERA_VIEW_PROJ + 2 }, LANE>();
     let c3 = camera.vec4_lane::<{ CAMERA_VIEW_PROJ + LAST_COLUMN }, LANE>();
     c0 * world_pos.x + c1 * world_pos.y + c2 * world_pos.z + c3
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_index;
+
+    /// Cluster lookup clamps instead of wrapping: an index past the end lands
+    /// on the last slice, and everything inside is untouched.
+    #[test]
+    fn clamp_index_saturates_at_the_last_slice() {
+        assert_eq!(clamp_index(0, 4), 0);
+        assert_eq!(clamp_index(3, 4), 3);
+        assert_eq!(clamp_index(4, 4), 3);
+        assert_eq!(clamp_index(u32::MAX, 4), 3);
+        assert_eq!(clamp_index(0, 1), 0);
+    }
 }

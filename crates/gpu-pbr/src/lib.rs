@@ -157,6 +157,7 @@ fn max_f32(a: f32, b: f32) -> f32 {
 }
 
 /// Lanes `x`, `y`, `z` of the interface value at `LOC`.
+// qual:allow(test_quality, untested) reason: "reads fragment inputs; the host build has no invocation, and the forward-PBR parity gate covers the interface"
 #[inline(always)]
 fn input_xyz<const LOC: u32>() -> Vec3 {
     v3(
@@ -524,6 +525,7 @@ fn tangent_bitangent(n: Vec3, t: Vec3) -> Vec3 {
 }
 
 /// `Camera::camera_pos.xyz`.
+// qual:allow(test_quality, untested) reason: "reads the camera uniform; the host build has no uniform, and the lighting device gate covers the position"
 #[inline(always)]
 fn camera_position(camera: &Uniform<Camera, GROUP, CAMERA_BINDING>) -> Vec3 {
     v3(
@@ -541,4 +543,28 @@ fn ambient_color(lighting: &Uniform<Lighting, GROUP, LIGHTING_BINDING>) -> Vec3 
         lighting.vec4_lane::<AMBIENT_FIELD, Y_LANE_U>(),
         lighting.vec4_lane::<AMBIENT_FIELD, Z_LANE_U>(),
     )
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::tangent_bitangent;
+    use ornis_gpu_shader::Vec3;
+
+    /// The bitangent completes the frame: `t × b` returns the normal, so
+    /// `(t, b, n)` is right-handed, and a parallel tangent collapses to zero
+    /// instead of producing a NaN basis.
+    #[test]
+    fn bitangent_completes_the_surface_frame() {
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let t = Vec3::new(1.0, 0.0, 0.0);
+        let b = tangent_bitangent(n, t);
+        assert_eq!(b, Vec3::new(0.0, 1.0, 0.0));
+        let t_cross_b = Vec3::new(
+            t.y * b.z - t.z * b.y,
+            t.z * b.x - t.x * b.z,
+            t.x * b.y - t.y * b.x,
+        );
+        assert_eq!(t_cross_b, n);
+        assert_eq!(tangent_bitangent(n, n), Vec3::new(0.0, 0.0, 0.0));
+    }
 }

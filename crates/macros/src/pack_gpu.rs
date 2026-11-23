@@ -20,11 +20,11 @@
 //! `ornis_core::GpuBool` as a mirror).
 //!
 //! A field name becomes the lane's WGSL variable name, so spellings the
-//! WGSL grammar reserves (`ornis_shader_lang::WGSL_RESERVED_WORDS` —
+//! WGSL grammar reserves (`crate::words::WGSL_RESERVED_WORDS` —
 //! `ref`, `type`, `loop`, …) or the `__` identifier prefix are rejected
 //! here, on the field's span.
 
-use ornis_shader_lang::WGSL_RESERVED_WORDS;
+use crate::words::WGSL_RESERVED_WORDS;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;

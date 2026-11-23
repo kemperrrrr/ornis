@@ -368,8 +368,8 @@ impl Renderer3D {
 
     /// Builds the opt-in distance-fog fullscreen pass for `surface_format`.
     ///
-    /// The shader is generated from Rust
-    /// ([`crate::shaders::fog_generated`], `#[stage]` entries — no
+    /// The shader is translated from Rust
+    /// ([`crate::shaders::fog_generated`], checked-in artifact — no
     /// handwritten WGSL); the layout comes from its `FOG_RESOURCES` table.
     /// The params buffer starts at a benign enabled-neutral value (black,
     /// zero density is never drawn — [`render_fog`](Self::render_fog)

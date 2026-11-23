@@ -39,6 +39,7 @@ pub fn local_invocation_index() -> u32 {
 }
 
 /// Lane `LANE` (`0..2`) of the fragment's `@location(0)` UV.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
 #[inline(always)]
 #[must_use]
 pub fn fragment_uv<const LANE: u32>() -> f32 {
@@ -271,6 +272,7 @@ pub fn fragment_input_lane<const LOC: u32, const LANES: u32, const LANE: u32>() 
 ///
 /// The integer twin of [`fragment_input_lane`]: the vertex stage wrote one
 /// word at that location with [`vertex_store_u32`].
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
 #[inline(always)]
 #[must_use]
 pub fn fragment_input_u32<const LOC: u32>() -> u32 {
@@ -286,6 +288,7 @@ pub fn fragment_input_u32<const LOC: u32>() -> u32 {
 }
 
 /// Write the `vec2<f32>` fragment output at `LOC`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
 #[inline(always)]
 pub fn fragment_store_2_at<const LOC: u32>(x: f32, y: f32) {
     const { assert!(LOC < 16, "a fragment output is one of 16 locations") };
@@ -304,6 +307,7 @@ pub fn fragment_store_2_at<const LOC: u32>(x: f32, y: f32) {
 ///
 /// An integer attachment (material id, quantized depth) is a `u32` target, not
 /// a color: the output struct member is a plain `u32`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
 #[inline(always)]
 pub fn fragment_store_u32_at<const LOC: u32>(value: u32) {
     const { assert!(LOC < 16, "a fragment output is one of 16 locations") };

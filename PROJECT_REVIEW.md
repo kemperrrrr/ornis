@@ -412,10 +412,12 @@ active-100k) и #112.
   планировщиком» **частично неактуальна**: осталось перевести остаток
   step-пайплайна и render/gameplay-домены на тот же DAG.
 - **Rust→WGSL — трек закрыт полностью.** Ноль рукописного WGSL в
-  `crates/render/src/shaders/` (только `*_generated.rs` + `helpers.rs`/
-  `math.rs`), общий реестр `ornis-shader-lang` (`cdb4f5c`), `#[stage]`/
-  `#[gpu_pipeline]`/`#[wgsl_fn]`, typed pass resources driving WGSL+BGL
-  (`29ee83e`), `ShaderModule` владеет порядком сборки (`142ddff`).
+  `crates/render/src/shaders/` (только checked-in `*_generated.wgsl` +
+  `helpers.rs`/`math.rs` как CPU-зеркала). Историческая цепочка сборки
+  (`ornis-shader-lang`, `#[stage]`/`#[gpu_pipeline]`/`#[wgsl_fn]`,
+  `ShaderModule`) снята 2026-11-22 (#263, этап 5): шейдеры, включая физику,
+  идут stable rustc → LLVM IR → naga → WGSL, артефакты пинит
+  `xtask build-shaders --check`.
   §8 п.8 и все «остатки» в нём **неактуальны**.
 - **Render extraction без копий — закрыт (S5e X1–X4, 2026-09-07).**
   `RenderSubmit` читает лейны напрямую (X1 `403de05`), encoder context как
@@ -483,8 +485,8 @@ active-100k) и #112.
   shell — **актуально**.
 - Scope сужен 2026-09-22 (снесены rhai/rune/python + вендор; шов —
   `MutationBus`) — было «12 крейтов + rhai/rune/python/shader-lang»,
-  стало меньше на три крейта и вендор. Остаток широты — shader-lang
-  и mesh-editor — **актуально с оговоркой**.
+  стало меньше на три крейта и вендор. Остаток широты — mesh-editor
+  — **актуально**; shader-lang снят 2026-11-22 (#263).
 - ~~Синхронизация доков с кодом~~ — ✅ закрыт 2026-09-18: M3 Islands +
   hardening отражены в этом файле (§«Актуализация 2026-09-18»), README
   (§«Текущее состояние», Прил. A) и `PLAN.md` (M3 DONE); `docs/quality/`
@@ -596,10 +598,10 @@ active-100k) и #112.
 
 8. ~~**Единый источник шейдеров: перевести render на Rust→WGSL (путь 2)**~~ — ✅ **закрыт полностью 2026-09-08/09, неактуально как план (исторический текст ниже)**
 
-   > Статус 2026-09-12: ноль рукописного WGSL в `crates/render/src/shaders/`,
-   > общий реестр `ornis-shader-lang`, `#[stage]`/`#[gpu_pipeline]`/`#[wgsl_fn]`,
-   > typed pass resources, `ShaderModule` владеет сборкой. Абзац ниже —
-   > исторический снимок 2026-08-28.
+   > Статус 2026-11-22: ноль рукописного WGSL в `crates/render/src/shaders/`
+   > и `crates/physics/src/gpu/`; шейдеры транслируются из Rust через
+   > llvm2gpu (`crates/gpu-*` → checked-in `.wgsl`), DSL и его крейт сняты.
+   > Абзац ниже — исторический снимок 2026-08-28.
 
    После удаления мёртвого `shader.rs` канонический источник render-шейдеров
    — builder'ы в `crates/render/src/shaders/`. Физика уже генерирует шейдеры
@@ -1344,8 +1346,8 @@ browser reconnect test и полноценное чтение client close frame
 ### Приоритет 5 — documentation lint
 
 > ✅ 2026-11-03: закрыто. `#![warn(missing_docs)]` включён во всех
-> workspace-крейтах (animation, app, mesh-editor, schedule, shader-lang —
-> в #248, `26c539c`; shell и wasm2gpu-testkit — в #252), а гейт `doc` в `xtask/src/quality.rs`
+> workspace-крейтах (animation, app, mesh-editor, schedule — в #248,
+> `26c539c`; shell и wasm2gpu-testkit — в #252; shader-lang снят в #263), а гейт `doc` в `xtask/src/quality.rs`
 > запускает `cargo doc --workspace --no-deps` с `-D warnings` (с #87, `af81ea9`).
 
 ~~В репозитории уже зафиксировано большое количество недокументированного public API.~~ Сделано:

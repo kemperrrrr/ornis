@@ -77,7 +77,6 @@ unmatched_behavior = "strict_error"
 paths = [
     "crates/schedule/**",
     "crates/input/**",
-    "crates/shader-lang/**",
     "crates/gpu-abi/**",
     "crates/gpu-abi-macros/**",
     "crates/wasm2gpu/**",
@@ -232,7 +231,6 @@ forbidden_in = [
     "crates/animation/**",
     "crates/audio/**",
     "crates/input/**",
-    "crates/shader-lang/**",
     "crates/gpu-abi/**",
     "crates/wasm2gpu/**",
     "crates/wasm2gpu-shader/src/**",

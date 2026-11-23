@@ -47,7 +47,6 @@ png = "0.18"
 proptest = "1"
 wgpu = "30"
 glam = "0.34"
-ornis-shader-lang = { path = "../shader-lang", version = "0.1.0" }
 ornis-gpu-cluster = { path = "../gpu-cluster", version = "0.1.0" }
 ornis-gpu-openpbr = { path = "../gpu-openpbr", version = "0.1.0" }
 ornis-gpu-pbr = { path = "../gpu-pbr", version = "0.1.0" }

@@ -4,7 +4,6 @@ members = [
     "crates/core",
     "crates/input",
     "crates/macros",
-    "crates/shader-lang",
     "crates/gpu-abi",
     "crates/gpu-abi-macros",
     "crates/wasm2gpu",

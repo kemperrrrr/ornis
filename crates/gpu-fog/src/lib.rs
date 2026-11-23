@@ -166,3 +166,27 @@ pub fn fs_main(
     let b = aces_lane(hdr_b + (fog_b - hdr_b) * factor);
     fragment_store_at::<0>(r, g, b, 1.0);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::aces_lane;
+
+    /// The ACES fit is monotonic and anchored: black stays black, and a
+    /// mid-grey lands on the film curve's shoulder rather than on a straight
+    /// line. The render gate compares pixels; this pins the curve itself.
+    #[test]
+    fn aces_fit_is_monotonic_and_anchored() {
+        assert!(aces_lane(0.0).abs() < 1e-9, "black must stay black");
+        let mut previous = f32::NEG_INFINITY;
+        for step in 0..64 {
+            let value = step as f32 * 0.25;
+            let mapped = aces_lane(value);
+            assert!(mapped > previous, "ACES fit must be strictly increasing");
+            previous = mapped;
+        }
+        assert!(
+            aces_lane(1.0) > 0.7 && aces_lane(1.0) < 0.9,
+            "mid-grey shoulder"
+        );
+    }
+}

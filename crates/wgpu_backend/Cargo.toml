@@ -11,7 +11,6 @@ description = "GPU execution backend built on wgpu"
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
 ornis-core = { path = "../core", version = "0.1.0" }
-ornis-macros = { path = "../macros", version = "0.1.0" }
 pollster = "1.0"
 bitflags = "2"
 serde = { version = "1", features = ["derive"] }

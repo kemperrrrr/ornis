@@ -128,6 +128,7 @@ struct Bounds {
 }
 
 /// Write the resolved colour and its depth to both targets.
+// qual:allow(test_quality, untested) reason: "writes fragment targets; the host build has no invocation, and the device parity gate compares the resolved frame"
 #[inline(always)]
 fn store_outputs(r: f32, g: f32, b: f32, depth: f32) {
     fragment_store_at::<0>(r, g, b, 1.0);
