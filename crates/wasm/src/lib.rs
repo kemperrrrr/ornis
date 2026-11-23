@@ -34,7 +34,6 @@ use ornis_render::{
     RenderLights, Renderer3D, Technique, camera_view_projection, read_orbit_camera,
 };
 
-mod scene_api;
 // Public so the `qual:api` marker on the `set_editor_mode` wasm-bindgen
 // export is nameable from outside the crate (a private module makes it an
 // ORPHAN_SUPPRESSION finding).
@@ -49,7 +48,7 @@ pub mod snap;
 pub mod viewport;
 
 use mode::{editor_mode, install_replica_chrome_gate, sync_editor_mode};
-use scene_api::{LiveEntityMeta, LiveScene};
+use ornis_app::{SceneSnapshot, SnapshotEntityMeta};
 use snap::snap_settings;
 use viewport::{
     PENDING_MODE, VIEWPORT_MODE, apply_mode_request, apply_pending_gizmo, gizmo_mode, gizmo_space,
@@ -98,9 +97,9 @@ impl raw_window_handle::HasWindowHandle for CanvasWindow {
 /// error, non-OK status, malformed JSON or the reduced server variant
 /// without per-entity transform/mesh/material — so the caller reports the
 /// error instead of rendering (no static scene fallback in unified runtime).
-async fn fetch_live_scene() -> Option<LiveScene> {
+async fn fetch_live_scene() -> Option<SceneSnapshot> {
     let text = fetch_api_text("/api/scene").await?;
-    match scene_api::parse_scene_json(&text) {
+    match ornis_app::parse_scene_json(&text) {
         Ok(live) => Some(live),
         Err(e) => {
             console::warn_1(&format!("[ornis-wasm] /api/scene parse failed: {e}").into());
@@ -699,7 +698,7 @@ struct ServerEntityId {
 /// The authoritative world owns the selection: the replica takes the first
 /// `selected` mark as the exclusive choice, so a malformed multi-selected
 /// snapshot still resolves to one entity.
-fn apply_live_marks(world: &mut ReplicaGameWorld, meta: &[LiveEntityMeta]) -> Vec<u32> {
+fn apply_live_marks(world: &mut ReplicaGameWorld, meta: &[SnapshotEntityMeta]) -> Vec<u32> {
     let handles: Vec<Entity> = world.scene_entities().iter().copied().collect();
     let Some(store) = world.engine_mut().world_mut().store_mut() else {
         return Vec::new();
@@ -976,6 +975,31 @@ fn make_instance() -> wgpu::Instance {
     })
 }
 
+/// Why initialization failed when no adapter could be obtained.
+///
+/// This is a **contract with the page**: `editor-v2/viewport.js` treats exactly
+/// this message (and nothing else) as "this environment has no WebGPU", showing
+/// the written fallback instead of a red failure canvas. Any other error — a
+/// lost device, a validation failure, an unsupported format — must stay a loud
+/// defect, which is why the page compares the string with `===` rather than a
+/// substring or regex.
+///
+/// `the_page_recognises_exactly_this_adapter_message` pins the JS constant
+/// against this one, so the two cannot drift apart silently.
+pub const ADAPTER_NOT_FOUND: &str = "adapter not found";
+
+/// The adapter this crate renders on, and the one the page's pre-flight probe
+/// must ask for.
+///
+/// A pre-flight check is only meaningful if it selects the *same* adapter the
+/// renderer will use: asking for a different preference could validate the
+/// integrated GPU and then render on the discrete one (or fail on the latter).
+/// `editor-v2/viewport.js` keeps its own copy of the value (it is JS, not a
+/// wasm-bindgen export), and
+/// `the_page_requests_the_high_performance_adapter` compares the two so a
+/// change here cannot leave the page probing a different adapter.
+pub const POWER_PREFERENCE: wgpu::PowerPreference = wgpu::PowerPreference::HighPerformance;
+
 /// Everything the render loop needs from WebGPU initialization.
 struct GpuContext {
     // SAFETY invariant: the phantom window lifetime is pinned to `'static`;
@@ -1004,12 +1028,12 @@ async fn init_webgpu(
 
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: POWER_PREFERENCE,
             compatible_surface: Some(&surface),
             ..Default::default()
         })
         .await
-        .map_err(|_| JsValue::from_str("adapter not found"))?;
+        .map_err(|_| JsValue::from_str(ADAPTER_NOT_FOUND))?;
 
     // WebGPU spec defaults: max_storage_buffers_per_shader_stage = 8, which is
     // what Renderer3D's bind groups need (camera + per-object + materials +
@@ -1096,7 +1120,7 @@ fn pick_surface_format(caps: &wgpu::SurfaceCapabilities) -> wgpu::TextureFormat 
 /// When the remote server is unavailable the renderer returns an error instead of
 /// falling back to a static scene, ensuring the single `Engine/Schedule/World` host
 /// is the sole source of truth.
-async fn load_initial_scene() -> Result<LiveScene, JsValue> {
+async fn load_initial_scene() -> Result<SceneSnapshot, JsValue> {
     if let Some(live) = fetch_live_scene().await {
         console::log_1(
             &format!(
@@ -1195,7 +1219,7 @@ impl<'a> FrameState<'a> {
     /// Rebuild the client ECS scene through the shared `Engine` schedule,
     /// extract its components and re-upload the resulting GPU snapshot. No
     /// device/surface recreation is needed for a live scene update.
-    fn apply_live_scene(&mut self, live: &LiveScene, applied_version: &Cell<u64>) {
+    fn apply_live_scene(&mut self, live: &SceneSnapshot, applied_version: &Cell<u64>) {
         self.render_world.replace_scene(&live.scene);
         // The server owns the selection: mirror its marks on the fresh
         // handles and remember them, so `sync_selection` does not echo the
@@ -1724,7 +1748,7 @@ fn accept_live_scene_version(
 /// Kick off a `/api/scene` poll unless one is already in flight. Deposits a
 /// newer parsed scene into `pending_scene`; cleared on completion.
 fn poll_live_scene(
-    pending_scene: &Rc<RefCell<Option<LiveScene>>>,
+    pending_scene: &Rc<RefCell<Option<SceneSnapshot>>>,
     fetch_in_flight: &Rc<Cell<bool>>,
     applied_version: &Rc<Cell<u64>>,
 ) {
@@ -1755,7 +1779,7 @@ fn poll_live_scene(
 struct LoopHandles {
     window: web_sys::Window,
     canvas: web_sys::HtmlCanvasElement,
-    pending_scene: Rc<RefCell<Option<LiveScene>>>,
+    pending_scene: Rc<RefCell<Option<SceneSnapshot>>>,
     fetch_in_flight: Rc<Cell<bool>>,
     live_mode: bool,
     input: Rc<RefCell<InputState>>,
@@ -1770,7 +1794,7 @@ struct LoopHandles {
 // qual:allow(test_quality, untested) reason: "browser construction edge; delegates to host-tested installers and mark mirroring"
 fn init_editor_replica(
     render_world: &mut ReplicaGameWorld,
-    meta: &[LiveEntityMeta],
+    meta: &[SnapshotEntityMeta],
     canvas: &web_sys::HtmlCanvasElement,
 ) {
     // Editor domain on the replica: click/hover picking plus the plane
@@ -1828,7 +1852,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     let instance = make_instance();
     let ctx = init_webgpu(&instance, &canvas).await?;
 
-    let LiveScene {
+    let SceneSnapshot {
         scene,
         version: initial_version,
         meta,
@@ -2056,6 +2080,78 @@ mod integration_tests {
     use super::*;
     use ornis_render::MaterialIdx;
 
+    /// The `/api/scene` contract payload, shared with the parser's own tests
+    /// through one data file (`crates/app/tests/fixtures/api_scene.json`): the
+    /// JSON → lanes → `frame_upload` chain is pinned against the same bytes
+    /// both crates assert on.
+    const FULL_CONTRACT: &str = include_str!("../../app/tests/fixtures/api_scene.json");
+
+    /// `editor-v2/viewport.js`, embedded at compile time.
+    ///
+    /// `include_str!` rather than a runtime `read_to_string`: the path is
+    /// resolved relative to this file, so the test works under `cargo test`
+    /// from any working directory *and* when the test binary runs on wasm32
+    /// (where `std::fs` has no real filesystem). It is also what keeps the
+    /// assertions below honest — see the adapter test.
+    const VIEWPORT_JS: &str = include_str!("../../../editor-v2/viewport.js");
+
+    /// The adapter-failure message is a contract with the page, and the page
+    /// keeps its own copy of the string. This asserts `viewport.js` declares
+    /// exactly the Rust constant — so a rename on either side breaks a test
+    /// instead of silently turning every "no adapter" into a red canvas (or,
+    /// worse, every adapter mention into a help blurb).
+    #[test]
+    fn the_page_recognises_exactly_this_adapter_message() {
+        let declaration = format!("const ADAPTER_NOT_FOUND = '{}';", ADAPTER_NOT_FOUND);
+        assert!(
+            VIEWPORT_JS.contains(&declaration),
+            "viewport.js must declare {declaration:?} — the page matches this exact \
+             string to detect an environment without WebGPU"
+        );
+        // And it must compare exactly, not by substring: `includes`/regex would
+        // swallow real defects that merely mention an adapter.
+        assert!(
+            VIEWPORT_JS.contains("=== ADAPTER_NOT_FOUND"),
+            "viewport.js must compare the adapter message with === (not includes/regex)"
+        );
+        assert!(
+            !VIEWPORT_JS.contains(".includes(ADAPTER_NOT_FOUND)")
+                && !VIEWPORT_JS.contains("test(ADAPTER_NOT_FOUND)"),
+            "a substring or regex match would classify real defects as environment limits"
+        );
+    }
+
+    /// The adapter request the page makes before loading the module must ask
+    /// for the same adapter this crate renders on, or the pre-flight check
+    /// could validate one GPU while the renderer uses another.
+    ///
+    /// The comparison is against [`POWER_PREFERENCE`] itself, not against a
+    /// string copied into this test: a literal check would match its own text
+    /// through `include_str!` and could never fail. Changing
+    /// `POWER_PREFERENCE` to `LowPower` therefore breaks this test until the
+    /// page is updated with it.
+    #[test]
+    fn the_page_requests_the_high_performance_adapter() {
+        // `wgpu::PowerPreference` is `#[non_exhaustive]` on native but
+        // exhaustive on wasm32, so the wildcard arm is only needed (and only
+        // warned about) on the host. `allow` keeps both targets warning-free
+        // while a future variant still fails loudly on the host that has one.
+        #[allow(unreachable_patterns)]
+        let expected = match POWER_PREFERENCE {
+            wgpu::PowerPreference::HighPerformance => "high-performance",
+            wgpu::PowerPreference::LowPower => "low-power",
+            // `None` means "no preference", which is not a value the page can
+            // meaningfully mirror; a future variant must extend this match.
+            wgpu::PowerPreference::None => "none",
+            _ => panic!("new PowerPreference variant: teach the page about it"),
+        };
+        let probe = format!("powerPreference: '{expected}'");
+        assert!(
+            VIEWPORT_JS.contains(&probe),
+            "the pre-flight adapter query must use {{ {probe} }}, matching POWER_PREFERENCE"
+        );
+    }
+
     /// The off-browser fallback of `device_pixel_ratio`: host builds never
     /// touch `web_sys::window()` (it panics on non-wasm targets), so the
     /// wire and the surface math see the documented `1.0`.
@@ -2132,8 +2228,8 @@ mod integration_tests {
 
     #[test]
     fn live_snapshot_crosses_serialization_boundary_into_shared_game_world() {
-        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         let mut render_world = ReplicaGameWorld::from_scene_replica(&live.scene);
 
         assert_eq!(render_world.entity_count(), live.scene.entities.len());
@@ -2158,8 +2254,8 @@ mod integration_tests {
 
     #[test]
     fn live_marks_mirror_selection_and_map_server_ids() {
-        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         let mut render_world = ReplicaGameWorld::new_replica();
         install_editor(render_world.engine_mut());
         render_world.replace_scene(&live.scene);
@@ -2175,7 +2271,7 @@ mod integration_tests {
 
         // A snapshot without selected marks clears the replica selection;
         // the outbound command is then an explicit clear.
-        let cleared = vec![LiveEntityMeta::default()];
+        let cleared = vec![SnapshotEntityMeta::default()];
         assert!(apply_live_marks(&mut render_world, &cleared).is_empty());
         let store = render_world.engine().world().store().expect("store");
         assert_eq!(server_selection(store), Some(None));
@@ -2222,7 +2318,7 @@ mod integration_tests {
             "lights": [],
             "camera": {"position":[0,0,5],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0}
         }"#;
-        let live = scene_api::parse_scene_json(json).expect("gizmo snapshot must parse");
+        let live = ornis_app::parse_scene_json(json).expect("gizmo snapshot must parse");
         let mut world = ReplicaGameWorld::new_replica();
         install_editor(world.engine_mut());
         world.replace_scene(&live.scene);
@@ -2256,8 +2352,8 @@ mod integration_tests {
 
     /// A replica with one entity pre-selected and pre-hovered.
     fn selected_replica() -> (ReplicaGameWorld, Entity) {
-        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         let mut render_world = ReplicaGameWorld::new_replica();
         install_editor(render_world.engine_mut());
         render_world.replace_scene(&live.scene);
@@ -2295,15 +2391,15 @@ mod integration_tests {
         let (mut world, entity) = selected_replica();
         assert_eq!(marks_of(&world, entity), (true, true), "precondition");
         let longer = vec![
-            LiveEntityMeta {
+            SnapshotEntityMeta {
                 editor: EditorMarks {
                     editor_only: false,
                     selected: true,
                     hovered: true,
                 },
-                ..LiveEntityMeta::default()
+                ..SnapshotEntityMeta::default()
             },
-            LiveEntityMeta::default(),
+            SnapshotEntityMeta::default(),
         ];
         assert!(apply_live_marks(&mut world, &longer).is_empty());
         assert_eq!(
@@ -2324,10 +2420,10 @@ mod integration_tests {
     #[test]
     fn live_marks_without_server_id_never_address_entity_zero() {
         let (mut world, entity) = selected_replica();
-        let with_id = vec![LiveEntityMeta {
+        let with_id = vec![SnapshotEntityMeta {
             id: Some(4),
             generation: Some(2),
-            ..LiveEntityMeta::default()
+            ..SnapshotEntityMeta::default()
         }];
         apply_live_marks(&mut world, &with_id);
         let store = world.engine().world().store().expect("store");
@@ -2335,7 +2431,7 @@ mod integration_tests {
         assert_eq!(server_selection(store), Some(Some((4, 2))), "precondition");
 
         // Same handles, but the snapshot omits the identity.
-        apply_live_marks(&mut world, &[LiveEntityMeta::default()]);
+        apply_live_marks(&mut world, &[SnapshotEntityMeta::default()]);
         let store = world.engine().world().store().expect("store");
         set_selection(store, Some(entity));
         assert!(
@@ -2356,14 +2452,14 @@ mod integration_tests {
     #[test]
     fn live_marks_mismatch_drops_stale_server_ids() {
         let (mut world, entity) = selected_replica();
-        let with_id = vec![LiveEntityMeta {
+        let with_id = vec![SnapshotEntityMeta {
             id: Some(4),
             generation: Some(2),
-            ..LiveEntityMeta::default()
+            ..SnapshotEntityMeta::default()
         }];
         apply_live_marks(&mut world, &with_id);
 
-        let mismatched = vec![LiveEntityMeta::default(), LiveEntityMeta::default()];
+        let mismatched = vec![SnapshotEntityMeta::default(), SnapshotEntityMeta::default()];
         assert!(apply_live_marks(&mut world, &mismatched).is_empty());
         let store = world.engine().world().store().expect("store");
         assert!(
@@ -2450,8 +2546,8 @@ mod integration_tests {
 
     #[test]
     fn outline_flags_map_selection_and_hover_to_instances() {
-        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         let mut render_world = ReplicaGameWorld::new_replica();
         install_editor(render_world.engine_mut());
         render_world.replace_scene(&live.scene);
@@ -2531,8 +2627,8 @@ mod integration_tests {
         // This pins the same chain headlessly instead — `/api/scene` JSON
         // → `ReplicaGameWorld::replace_scene` → `frame` → `frame_upload`
         // (`frame_upload`), with lights published as the shared resource.
-        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         let mut render_world = ReplicaGameWorld::new_replica();
         render_world.replace_scene(&live.scene);
         assert_eq!(render_world.entity_count(), live.scene.entities.len());
@@ -2691,8 +2787,8 @@ mod integration_tests {
         // Headless half of the pixel e2e: pins the exact extraction bytes
         // for `FULL_CONTRACT` (JSON → lanes → `frame_upload`), so any drift
         // in the scene→ECS→GPU chain fails here without a browser.
-        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         assert_eq!(live.version, 5);
         assert_eq!(live.sequence, 12);
 
@@ -2754,8 +2850,8 @@ mod integration_tests {
     fn snapshot_versioning_replaces_without_stale_instances() {
         // v5 → v6 moves the extraction; downgrades are rejected; an empty
         // scene clears instances so no stale upload survives.
-        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         assert_eq!(live.version, 5);
         let mut render_world = ReplicaGameWorld::new_replica();
         render_world.replace_scene(&live.scene);
@@ -2793,41 +2889,41 @@ mod integration_tests {
         // The parser returns `Err` (never panics) for every malformed leg:
         // truncation at any point, empty/foreign shapes, NUL bytes, wrong
         // types, the `camera: null` placeholder, and trailing garbage.
-        let full = scene_api::FULL_CONTRACT;
+        let full = FULL_CONTRACT;
         for pct in [10, 25, 50, 75, 90, 95] {
             let cut = full.len() * pct / 100;
             assert!(
-                scene_api::parse_scene_json(&full[..cut]).is_err(),
+                ornis_app::parse_scene_json(&full[..cut]).is_err(),
                 "truncation at {pct}% must be rejected"
             );
         }
         for bad in ["", "null", "[]", "{}", "not json"] {
             assert!(
-                scene_api::parse_scene_json(bad).is_err(),
+                ornis_app::parse_scene_json(bad).is_err(),
                 "payload {bad:?} must be rejected"
             );
         }
 
         // NUL bytes: prefix, suffix, and injected mid-payload.
-        assert!(scene_api::parse_scene_json(&format!("\0{full}")).is_err());
-        assert!(scene_api::parse_scene_json(&format!("{full}\0")).is_err());
+        assert!(ornis_app::parse_scene_json(&format!("\0{full}")).is_err());
+        assert!(ornis_app::parse_scene_json(&format!("{full}\0")).is_err());
         let mut nul_mid = full.to_string();
         nul_mid.insert(full.len() / 2, '\0');
-        assert!(scene_api::parse_scene_json(&nul_mid).is_err());
+        assert!(ornis_app::parse_scene_json(&nul_mid).is_err());
 
         // Foreign types where the contract expects shaped values.
         let version_string = full.replace("\"version\": 5", "\"version\": \"5\"");
-        assert!(scene_api::parse_scene_json(&version_string).is_err());
+        assert!(ornis_app::parse_scene_json(&version_string).is_err());
         let entities_number = full.replace("\"entities\": [{", "\"entities\": 42, \"dropped\": [{");
-        assert!(scene_api::parse_scene_json(&entities_number).is_err());
+        assert!(ornis_app::parse_scene_json(&entities_number).is_err());
         let camera_null = r#"{"version": 5, "sequence": 12,
             "entities": [], "lights": [],
             "camera": null, "ambient": [0.10, 0.10, 0.15]}"#;
-        assert!(scene_api::parse_scene_json(camera_null).is_err());
+        assert!(ornis_app::parse_scene_json(camera_null).is_err());
 
         // Trailing garbage after an otherwise valid payload.
-        assert!(scene_api::parse_scene_json(&format!("{full} trailing garbage")).is_err());
-        assert!(scene_api::parse_scene_json(&format!("{full}{{\"extra\": 1}}")).is_err());
+        assert!(ornis_app::parse_scene_json(&format!("{full} trailing garbage")).is_err());
+        assert!(ornis_app::parse_scene_json(&format!("{full}{{\"extra\": 1}}")).is_err());
     }
 
     /// Probes `PATH` for a browser binary the pixel harness could drive.
@@ -2871,8 +2967,8 @@ mod integration_tests {
         };
         // Enabled path pins the contract input the harness renders, so
         // contract drift still fails the test even before any pixels.
-        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
-            .expect("the shared API contract must parse");
+        let live =
+            ornis_app::parse_scene_json(FULL_CONTRACT).expect("the shared API contract must parse");
         assert_eq!(live.version, 5);
         assert_eq!(live.scene.entities.len(), 1);
         eprintln!("browser_pixel_e2e enabled with browser={browser}");

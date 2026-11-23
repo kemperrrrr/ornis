@@ -179,8 +179,70 @@ button { font: inherit; color: inherit; }
 .center-top #toggle-right.docked { right: 6px; }
 .viewport { position: relative; flex: 1; min-height: 0; overflow: hidden;
   background: var(--viewport); }
+/* The viewport box is focusable (keyboard navigation reaches the engine only
+   while it holds focus). WebKit would otherwise draw its system blue ring, so
+   the focus indicator follows the palette instead. */
+.viewport:focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--accent); }
 .viewport-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .viewport-canvas.failed { background: #300; }
+/* `hidden` is a UA rule of the lowest specificity: a class rule with
+   `display: block` beats it, so the attribute alone would not hide the canvas
+   when the written fallback replaces it. */
+.viewport-canvas[hidden] { display: none; }
+/* Native viewport (PLAN.md §j, вариант 1): the shell draws the scene into a
+   layer UNDER the webview, so the page's own viewport box must let it show
+   through. Only in embedded mode — Chrome keeps the opaque canvas.
+
+   The whole *ancestor chain* must be transparent, not just `.viewport`: an
+   opaque `background` anywhere above it (body, the panel, the grid container)
+   composites over the layer and the scene disappears behind flat `#232326`.
+   `body`, `.layout`, `.viewport-panel` and `.viewport` therefore drop their
+   fill, and the viewport panel's border is made transparent too
+   (`border-color: transparent`) so a frame does not sit over the layer.
+   Every other panel keeps its own background, so they still look solid.
+   `html` needs no rule: a `background` on `body` propagates to the root
+   canvas, so clearing it there is enough.
+
+   `.layout` still has 8px padding and an 8px row gap: those strips, and any
+   other gap around the viewport box, show the window background rather than
+   the scene, because the native layer is only placed under the viewport
+   rectangle itself. */
+body.ornis-native-viewport,
+body.ornis-native-viewport .layout,
+body.ornis-native-viewport .viewport-panel,
+body.ornis-native-viewport .viewport { background: transparent; }
+body.ornis-native-viewport .panel.viewport-panel { border-color: transparent; }
+body.ornis-native-viewport .viewport-canvas { visibility: hidden; }
+/* The toolbar's 3D/2D, gizmo and snap controls drive the WASM replica, which
+   does not exist when the shell renders. They stay visible (the frame is the
+   same) but read as unavailable, and one line of text says why. */
+body.ornis-native-viewport .viewport-mode,
+body.ornis-native-viewport .viewport-gizmos,
+body.ornis-native-viewport .snap-controls { opacity: .55; }
+/* `aria-disabled`, not `disabled`: a real `disabled` attribute would also
+   remove the controls from the tab order and from the a11y tree. */
+body.ornis-native-viewport .unavailable,
+body.ornis-native-viewport .unavailable:disabled { cursor: not-allowed; }
+.viewport-native-hint {
+  position: absolute; left: 50%; top: 8px; transform: translateX(-50%);
+  z-index: 2; margin: 0; max-width: min(52ch, calc(100% - 20px));
+  padding: 4px 10px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line); color: var(--muted);
+  font-size: 11px; line-height: 1.4; text-align: center;
+}
+.viewport-native-hint[hidden] { display: none; }
+/* Written fallback for "this webview has no WebGPU". Replaces the bare red
+   canvas: a dead end with no way forward is worse than nothing. */
+.viewport-notice {
+  position: absolute; inset: 0; z-index: 3;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; padding: 24px; text-align: center;
+  background: var(--viewport); color: var(--text);
+}
+.viewport-notice[hidden] { display: none; }
+.viewport-notice-title { margin: 0; font: 600 14px/1.3 "Inter", system-ui, sans-serif; color: var(--accent); }
+.viewport-notice-body { margin: 0; max-width: 52ch; font-size: 13px; line-height: 1.5; color: var(--text); }
+.viewport-notice-detail { margin: 4px 0 0; max-width: 52ch; font: 11px/1.5 ui-monospace, SFMono-Regular, monospace; color: var(--muted); word-break: break-word; }
 .plane-grid { position: absolute; inset: 0; pointer-events: none; }
 .viewport-gizmos {
   position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);

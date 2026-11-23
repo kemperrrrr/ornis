@@ -58,7 +58,19 @@
   <div class="panel viewport-panel">
       <div class="viewport" id="viewport">
         <canvas id="canvas" class="viewport-canvas"></canvas>
+        <!-- Written fallback when the embedded webview has no WebGPU
+             (PLAN.md §j): filled by viewport.js from the shell's marker, never
+             hardcoded here, so the Rust side owns the wording. -->
+        <div class="viewport-notice" id="viewport-notice" hidden>
+          <h2 class="viewport-notice-title" id="viewport-notice-title"></h2>
+          <p class="viewport-notice-body" id="viewport-notice-body"></p>
+          <p class="viewport-notice-detail" id="viewport-notice-detail"></p>
+        </div>
         <div class="plane-grid" id="plane-grid" hidden></div>
+        <!-- Native mode only: the toolbar drives the WASM replica, which does
+             not exist when the shell renders. Text comes from `viewport.js`
+             (`STRINGS.nativeToolbarNotice`), not hardcoded here. -->
+        <p class="viewport-native-hint" id="viewport-native-hint" hidden></p>
         <button class="viewport-settings" id="btn-settings" title="Settings">
           <svg viewBox="0 0 24 24"><use href="icons/settings.svg#icon" /></svg>
         </button>

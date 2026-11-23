@@ -34,6 +34,9 @@ pub mod ragdoll_proxy;
 pub mod ragdoll_runtime;
 pub mod ragdoll_sync;
 pub mod ragdoll_wiring;
+/// Client-side parser of the `/api/scene` snapshot contract (shared by the
+/// browser and the native viewport clients).
+pub mod scene_snapshot;
 /// Headless editor session: commands in, snapshots/events out.
 pub mod session;
 pub mod sync_harness;
@@ -47,6 +50,7 @@ pub use ornis_animation::{
     SkelLayer, SkelLayerStack, SkelPlayer, SkelTree, SyncMark, TreeCmp, TreeCond, TreeNodeDef,
     TreeParam, TreeTransition, TwoBoneIk, try_animator,
 };
+pub use scene_snapshot::{SceneSnapshot, SnapshotEntityMeta, parse_scene_json};
 
 /// Inserts the flat authored pose as both local [`Transform`] and world
 /// [`GlobalTransform`].

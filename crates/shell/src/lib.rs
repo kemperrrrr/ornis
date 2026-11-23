@@ -16,18 +16,41 @@
 //! [`GameEvent`](editor_backend::ipc::GameEvent)s flow back with a transport
 //! `sequence` cursor. All of that is pure functions in [`bridge`], unit
 //! tested without opening a window; the `wry` wiring lives in the binary.
+//!
+//! The shell-level channel is [`viewport_ipc`]: the page reports its
+//! viewport rectangle (`viewport_bounds`) and forwards pointer/wheel/key
+//! state over it (`viewport_input`). Both are pure parses here, so the native
+//! viewport prototype (`--native-viewport`) shares the exact protocol the
+//! browser page already speaks and CI tests it without a GPU.
 
 pub mod assets;
 pub mod bridge;
 pub mod error;
+pub mod native_viewport;
+pub mod notice;
+pub mod options;
 pub mod probe;
+pub mod runtime;
+pub mod serve;
+pub mod viewport_ipc;
 
 pub use assets::{
     AssetResponse, content_type_for, read_asset, request_file_path, resolve_editor_dir, start_url,
 };
 pub use bridge::{
-    AckOutcome, IncomingPost, ack_json, ack_message_json, allocate_request_id, dispatch_script,
-    event_json, events_message_json, init_script, parse_incoming,
+    AckOutcome, IncomingPost, ack_json, ack_message_json, acknowledge, allocate_request_id,
+    dispatch_script, event_json, events_message_json, init_script, init_script_for,
+    next_event_sequence, parse_incoming,
 };
 pub use error::{AssetError, BridgeError};
+pub use native_viewport::{ViewFrame, ViewportPlacement};
+pub use notice::{NATIVE_VIEWPORT_HOST_UNSUPPORTED, ShellCapabilities, WEBGPU_UNAVAILABLE_NOTICE};
+pub use options::{OptionAction, ParseOutcome, ShellOptions, USAGE, parse_args};
 pub use probe::probe_page;
+pub use runtime::{pump_events, spawn_event_pump, start_engine};
+pub use serve::{STATUS_NOT_FOUND, STATUS_OK, STATUS_SERVER_ERROR, serve_response};
+pub use viewport_ipc::{
+    MAX_PRESSED, MAX_SCALE, MAX_VIEWPORT_EDGE, MIN_SCALE, MIN_VIEWPORT_EDGE, PhysicalRect,
+    SCENE_EVENT_TAG, ViewportBounds, ViewportInput, ViewportMessage, WINDOW_HEIGHT, WINDOW_WIDTH,
+    full_window_bounds, parse_viewport_message, scene_snapshot_json,
+};
