@@ -33,9 +33,10 @@
 //! an `if`/`loop` or after an arm that returned is rejected instead of
 //! emitting WGSL Tint refuses (or native UB).
 //!
-//! Linear memory (`load`/`store`/`getelementptr`), irreducible CFGs, and
-//! multi-exit loops are rejected so an unknown shape never becomes a wrong
-//! shader.
+//! Linear memory outside `alloca`-backed locals and module constants,
+//! irreducible CFGs, and multi-exit loops are rejected so an unknown shape
+//! never becomes a wrong shader; every rejection names the function, block, and
+//! instruction it refused (see [`TranslateError`]).
 //!
 //! Kernels written against the typed SDK (`ornis-gpu-shader`) lower to the same
 //! IR as the raw `extern "C"` ones, so nothing here knows about `Storage` or
