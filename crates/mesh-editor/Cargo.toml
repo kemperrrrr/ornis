@@ -9,7 +9,7 @@ description = "Runtime mesh editing: canonical mesh data plus boolean operations
 
 [dependencies]
 glam = "0.34"
-manifold-rust = "0.19.3"
+manifold-rust = "0.19.6"
 # Typed validation errors (`thiserror::Error` on `BridgeError`/`MeshError`).
 thiserror = "2.0"
 
