@@ -196,10 +196,17 @@ button { font: inherit; color: inherit; }
    The whole *ancestor chain* must be transparent, not just `.viewport`: an
    opaque `background` anywhere above it (body, the panel, the grid container)
    composites over the layer and the scene disappears behind flat `#232326`.
-   The panel therefore keeps its frame (border, radius) but drops its fill, and
-   `body`/`.layout` drop theirs; every other panel keeps its own background, so
-   they still look solid. `html` needs no rule: a `background` on `body`
-   propagates to the root canvas, so clearing it there is enough. */
+   `body`, `.layout`, `.viewport-panel` and `.viewport` therefore drop their
+   fill, and the viewport panel's border is made transparent too
+   (`border-color: transparent`) so a frame does not sit over the layer.
+   Every other panel keeps its own background, so they still look solid.
+   `html` needs no rule: a `background` on `body` propagates to the root
+   canvas, so clearing it there is enough.
+
+   `.layout` still has 8px padding and an 8px row gap: those strips, and any
+   other gap around the viewport box, show the window background rather than
+   the scene, because the native layer is only placed under the viewport
+   rectangle itself. */
 body.ornis-native-viewport,
 body.ornis-native-viewport .layout,
 body.ornis-native-viewport .viewport-panel,

@@ -922,11 +922,38 @@ test('native mode makes the whole ancestor chain transparent', async () => {
       `styles.css must make \`${selector}\` transparent in native mode`,
     );
   }
-  // And it must be the native-mode branch only: Chrome keeps its opaque UI.
-  assert.ok(
-    !/(^|\n)\.viewport-panel\s*\{\s*background:\s*transparent/.test(css),
-    'the transparent panel must be scoped to native mode, not applied globally',
-  );
+  // Global transparency on an *existing* rule must also fail, even when the
+  // property is not the first declaration (`.viewport-panel { color: …;
+  // background: transparent }` would slip past a start-of-block regex).
+  // A selector's subject is the last compound; only a rule scoped to
+  // `body.ornis-native-viewport` may make these boxes transparent.
+  const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [];
+  const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
+  let match;
+  while ((match = ruleRe.exec(withoutComments))) {
+    const selectors = match[1].split(',').map((part) => part.trim()).filter(Boolean);
+    rules.push({ selectors, body: match[2] });
+  }
+  const transparentBackground = (body) =>
+    /(?:^|;)\s*background(?:-color)?\s*:\s*transparent\s*(?:;|$)/m.test(body);
+  const subject = (selector) => {
+    const last = selector.split(/[\s>+~]/).filter(Boolean).pop() || '';
+    return last.replace(/::?[\w-().]+/g, '').trim();
+  };
+  const nativeScoped = (selector) =>
+    /(?:^|\s)body\.ornis-native-viewport(?:$|\s|:)/.test(selector);
+  const watched = new Set(['body', '.layout', '.viewport-panel', '.viewport']);
+  for (const rule of rules) {
+    if (!transparentBackground(rule.body)) continue;
+    for (const selector of rule.selectors) {
+      if (watched.has(subject(selector)) && !nativeScoped(selector)) {
+        assert.fail(
+          `transparent background on \`${selector}\` must be scoped to body.ornis-native-viewport`,
+        );
+      }
+    }
+  }
 });
 
 test('a missing editor-v2/pkg shows a build notice, not a red canvas', async () => {
@@ -960,6 +987,35 @@ test('a missing editor-v2/pkg shows a build notice, not a red canvas', async () 
       'a missing build artifact is not a renderer defect',
     );
     assert.strictEqual(page.dom.canvas.hidden, true, 'the canvas steps aside');
+  } finally {
+    page.restore();
+  }
+});
+
+test('a broken editor-v2/pkg is not reported as a missing bundle', async () => {
+  // A present but invalid package is not a missing build artifact: the
+  // "run cargo xtask editor" notice would be the wrong diagnosis. The import
+  // error is rethrown and must land as a renderer defect (red canvas).
+  const page = await bootPage({
+    shell: { nativeViewport: false, webgpuNotice: 'environment notice' },
+    gpu: true,
+    stub: 'this is not valid javascript !!!',
+  });
+  try {
+    assert.notStrictEqual(
+      page.dom['viewport-notice-title'].textContent,
+      'Viewport bundle is missing',
+      'a syntax error in a present bundle is not a missing artifact',
+    );
+    assert.ok(
+      page.dom.canvas.classes.has('failed'),
+      'a broken bundle must stay a red canvas',
+    );
+    assert.match(
+      page.dom.canvas.title,
+      /WebGPU init failed:/,
+      'the canvas title must surface the original error',
+    );
   } finally {
     page.restore();
   }

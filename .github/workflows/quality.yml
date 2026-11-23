@@ -295,6 +295,10 @@ jobs:
       # GPU device tests must really execute here (mesa/lavapipe is
       # installed below): a missing adapter panics instead of skipping.
       ORNIS_REQUIRE_GPU: "1"
+      # `init_script_is_valid_javascript` runs `node --check`. Hosted
+      # runners already ship Node; this latch fails the shard if node
+      # disappears from PATH instead of silently skipping the brace check.
+      ORNIS_REQUIRE_NODE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -339,6 +343,7 @@ jobs:
           RUSTDOCFLAGS: -C link-arg=-fuse-ld=mold
         run: |
           mkdir -p target
+          node --version
           cargo xtask quality --ci --only test,test-lockfree 2>&1 | tee target/quality-test.log
 
       - name: Upload shard log
@@ -490,6 +495,9 @@ jobs:
       CARGO_INCREMENTAL: 0
       # No sccache here: the macOS minutes are few and a cold cache is not
       # worth the extra action; rust-cache below covers the normal case.
+      # Hosted runners ship Node; latch the shell's `node --check` test
+      # so a missing interpreter fails this job instead of skipping it.
+      ORNIS_REQUIRE_NODE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -513,6 +521,7 @@ jobs:
         run: |
           mkdir -p target
           {
+            node --version
             cargo clippy -p ornis-shell --all-targets -- -D warnings
             cargo test -p ornis-shell
           } 2>&1 | tee target/quality-macos.log

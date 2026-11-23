@@ -96,10 +96,10 @@ let snap = { enabled: false, translate: 0.5, rotateDeg: 15, scale: 0.25 };
 // The written fallback: there is nothing for the page to render here, so it
 // explains why instead of leaving a dead red canvas.
 //
-// `notice` carries the wording; `showNotice` takes the environment case (where
-// the shell owns the body text because it knows the host) and
-// `showBuildNotice` takes a build problem, whose fix is a command the page can
-// name itself.
+// `notice` carries the wording; `environmentNotice` and `buildNotice` prepare
+// the two cases, and `showNotice` paints either one. The environment case lets
+// the shell own the body text because it knows the host; a build problem names
+// a command the page can give itself.
 function showNotice(notice) {
     if (!noticeEl) return;
     if (noticeTitleEl) noticeTitleEl.textContent = notice.title;
@@ -141,6 +141,20 @@ function environmentNotice(detail) {
 // command instead of telling the user their GPU is at fault.
 function buildNotice(detail) {
     return { title: STRINGS.pkgMissingTitle, body: STRINGS.pkgMissingBody, detail: detail };
+}
+
+// Only a path that does not resolve counts as a missing bundle. Node reports
+// `ERR_MODULE_NOT_FOUND`; browsers use "Failed to fetch dynamically imported
+// module", "error loading dynamically imported module", or (WKWebView)
+// "Importing a module script failed". A SyntaxError or any other evaluation
+// failure in a file that *did* load is a defect, not a missing build step.
+function isMissingViewportBundle(err) {
+    if (!err) return false;
+    if (err.code === 'ERR_MODULE_NOT_FOUND') return true;
+    const message = String(err.message || err);
+    return /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|Cannot find module/i.test(
+        message,
+    );
 }
 
 // ── WebGPU capability ─────────────────────────────────────────────────────
@@ -647,10 +661,13 @@ async function boot() {
     // A missing `editor-v2/pkg` (the wasm-pack output, built by
     // `cargo xtask editor`) fails the import itself, before any GPU work. That
     // is a *build* problem with a concrete fix, so it is reported as such
-    // instead of as a renderer failure.
+    // instead of as a renderer failure. A present but broken bundle — a
+    // syntax error, a throw during evaluation — is not a missing artifact
+    // and is rethrown so `boot()`'s catch keeps the loud red canvas.
     try {
         wasm = await import('./pkg/ornis_wasm.js');
     } catch (err) {
+        if (!isMissingViewportBundle(err)) throw err;
         console.warn('[ornis-editor] wasm package missing:', err);
         showNotice(buildNotice(STRINGS.pkgMissingDetail));
         return;
