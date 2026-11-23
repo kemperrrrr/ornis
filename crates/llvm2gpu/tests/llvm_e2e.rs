@@ -90,6 +90,56 @@ start:
     assert!(translated.wgsl.contains(".y"), "{}", translated.wgsl);
 }
 
+/// A vertex stage that writes only `@builtin(position)` — no `@location`
+/// varying — is a legal WGSL entry with a one-member output struct. The stats
+/// blit is exactly that shape: it maps framebuffer pixels to texels itself, so
+/// it has nothing to interpolate.
+#[test]
+fn vertex_position_alone_is_a_stage_output() {
+    let ir = r#"
+declare i32 @vertex_index()
+declare void @vertex_position(float, float, float, float)
+define dso_local void @vs_main() {
+start:
+  %i = call i32 @vertex_index()
+  %shifted = shl i32 %i, 1
+  %x = sitofp i32 %shifted to float
+  %y = sitofp i32 %i to float
+  call void @vertex_position(float %x, float %y, float 0.000000e+00, float 1.000000e+00)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("position-only vertex entry");
+    assert!(
+        translated.wgsl.contains("@builtin(position)"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        !translated.wgsl.contains("@location(0)"),
+        "a position-only vertex must not grow a located output: {}",
+        translated.wgsl
+    );
+}
+
+/// The same shape on a fragment entry writes nothing at all, so it stays
+/// rejected rather than lowering to an empty output struct.
+#[test]
+fn fragment_without_an_output_is_rejected() {
+    let ir = r#"
+declare float @fragment_position_lane(i32)
+define dso_local void @fs_main() {
+start:
+  %x = call float @fragment_position_lane(i32 0)
+  ret void
+}
+"#;
+    assert!(
+        translate(ir).is_err(),
+        "a fragment entry with no @location write must be rejected"
+    );
+}
+
 #[test]
 fn workgroup_memory_barrier_and_atomic() {
     let ir = r#"

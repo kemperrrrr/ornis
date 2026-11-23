@@ -52,6 +52,24 @@ pub fn fragment_uv<const LANE: u32>() -> f32 {
     crate::host_unavailable()
 }
 
+/// Lane `LANE` (`0..4`) of the fragment's `@builtin(position)`.
+///
+/// The framebuffer-space position, in pixels: `x`/`y` are the sample point,
+/// `z` the depth, `w` the reciprocal of the interpolated `w`. A blit that
+/// copies one texel per pixel reads `x`/`y` and truncates.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
+#[inline(always)]
+#[must_use]
+pub fn fragment_position_lane<const LANE: u32>() -> f32 {
+    const { assert!(LANE < 4, "fragment position is a vec4") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_position_lane(LANE)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host_unavailable()
+}
+
 /// Drop the current fragment invocation.
 ///
 /// The invocation stops before the rest of the entry runs, so a fragment

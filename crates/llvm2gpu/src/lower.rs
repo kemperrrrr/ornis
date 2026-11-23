@@ -206,6 +206,12 @@ impl Lowering {
         func: &LlvmFunc,
         workgroup: [u32; 3],
     ) -> Result<(), TranslateError> {
+        // The entry checks below run before the body walk, so the site still
+        // holds whatever the parser last recorded — an instruction of an
+        // unrelated function. Naming the function here is the whole point of
+        // the message: an entry name without a stage prefix is the mistake
+        // that reaching for `ret void` sends the reader away from.
+        crate::site::enter_function(&func.name);
         let stage = entry_stage(func)?;
         self.lower_entry(func, stage, workgroup)
     }
@@ -247,6 +253,9 @@ impl Stage {
     /// draws the compacted visibility list, `fs_main_msaa` shades samples), and
     /// the pipeline names the entry it wants. The prefix decides the stage; the
     /// rest of the name only has to be unique within the module.
+    /// The canonical prefixes, spelled out for a rejection message.
+    const PREFIX_LIST: &'static str = "`cs_main`, `vs_main` or `fs_main`";
+
     const PREFIXES: [(&'static str, Self); 3] = [
         (ornis_gpu_abi::symbols::CS_MAIN, Self::Compute),
         (ornis_gpu_abi::symbols::VS_MAIN, Self::Vertex),
@@ -2301,7 +2310,18 @@ fn successors(term: &Terminator) -> Vec<&str> {
 /// return `f32`; a raster entry is `void` with no parameters, because its
 /// builtins and interface come from the stage-IO imports.
 fn entry_stage(func: &LlvmFunc) -> Result<Stage, TranslateError> {
-    let stage = Stage::of(&func.name).ok_or_else(TranslateError::unsupported)?;
+    // The stage comes from the *Rust* name, not the exported symbol: the export
+    // is a link-time attribute, while `#[gpu_entry]` names the symbol after the
+    // function. A name without one of the canonical prefixes is rejected here,
+    // so the message names the function and the prefixes rather than an
+    // instruction it was not reading.
+    let Some(stage) = Stage::of(&func.name) else {
+        return Err(TranslateError::Unsupported(format!(
+            "for {}: an entry name must start with {}",
+            crate::site::describe(),
+            Stage::PREFIX_LIST
+        )));
+    };
     let shape_ok = match stage {
         Stage::Compute => matches!(
             (func.ret_ty, func.params.as_slice()),
@@ -2445,7 +2465,11 @@ fn stage_output(
     if stage == Stage::Vertex && !io.position_out {
         return Err(TranslateError::unsupported());
     }
-    if io.outputs.is_empty() {
+    // A vertex entry may write `@builtin(position)` alone — a blit has no
+    // varying to interpolate — and the struct then has that one member, which
+    // is valid WGSL. A fragment entry with no `@location` writes nothing at
+    // all, so it is still rejected.
+    if io.outputs.is_empty() && !io.position_out {
         return Err(TranslateError::unsupported());
     }
     let OutputType {

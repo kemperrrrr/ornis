@@ -256,6 +256,8 @@ unsafe extern "C" {
     fn import_local_invocation_index() -> u32;
     #[link_name = "fragment_uv_lane"]
     fn import_fragment_uv_lane(lane: u32) -> f32;
+    #[link_name = "fragment_position_lane"]
+    fn import_fragment_position_lane(lane: u32) -> f32;
     #[link_name = "fragment_store_f32x4"]
     fn fragment_store_f32x4(r: f32, g: f32, b: f32, a: f32);
     #[link_name = "vertex_index"]
@@ -925,6 +927,13 @@ pub(crate) fn local_invocation_index() -> u32 {
 #[inline(always)]
 pub(crate) fn fragment_uv_lane(lane: u32) -> f32 {
     call!(import_fragment_uv_lane(lane))
+}
+
+/// Lane of the fragment's `@builtin(position)`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
+#[inline(always)]
+pub(crate) fn fragment_position_lane(lane: u32) -> f32 {
+    call!(import_fragment_position_lane(lane))
 }
 
 /// Write the fragment's `@location(0)` color.

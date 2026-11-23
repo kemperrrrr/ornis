@@ -104,6 +104,7 @@ paths = [
     "crates/gpu-adapt/**",
     "crates/gpu-ssao/**",
     "crates/gpu-blur/**",
+    "crates/gpu-blit/**",
     "crates/gpu-shader/**",
     "crates/gpu-shader-macros/**",
     "crates/gltf/**",

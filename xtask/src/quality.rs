@@ -162,8 +162,8 @@ impl QualityFlags {
     ///
     /// The clippy stage runs two commands (the workspace lint and the
     /// render-bench lint under `test-util`), and `build-shaders` checks
-    /// nineteen artifacts, so that id counts nineteen times: the denominator
-    /// has to be right before the first stage prints its header.
+    /// thirty artifacts, so that id counts thirty times: the denominator has
+    /// to be right before the first stage prints its header.
     fn total_stages(&self) -> usize {
         let stages = self
             .active_ids()
@@ -172,9 +172,10 @@ impl QualityFlags {
             .count();
         // `build-shaders` runs the base id plus one extra per remaining
         // artifact: cull, clusters, gtao, histogram, adapt, ssao, gtao 4x,
-        // ssao 4x, the AO blur, and the translated post passes (composite, hdr,
-        // fog 1x/4x, bloom, aa edge, aa taa 1x/4x, gbuffer, gbuffer vertex-only).
-        let shader_checks = 29 * usize::from(self.ci && self.enabled("build-shaders"));
+        // ssao 4x, the AO blur, the translated post passes (composite, hdr,
+        // fog 1x/4x, bloom, aa edge, aa taa 1x/4x, gbuffer, gbuffer
+        // vertex-only) and the stats blit.
+        let shader_checks = 30 * usize::from(self.ci && self.enabled("build-shaders"));
         stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
@@ -2333,6 +2334,13 @@ fn ci_stages(stages: &mut StageList<'_>) {
         Some("fs_main"),
         "crates/render/src/shaders/ao_blur_generated.wgsl",
         "cargo xtask build-shaders --check (ao blur WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-blit"),
+        Some("all"),
+        "crates/runner/src/stats/blit_generated.wgsl",
+        "cargo xtask build-shaders --check (stats blit WGSL drift)",
     );
 }
 

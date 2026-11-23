@@ -19,17 +19,22 @@ const FULLSCREEN_TRIANGLE: std::ops::Range<u32> = 0..3;
 /// Logical stats window size.
 const SIZE: (u32, u32) = (420, 380);
 
-const BLIT_WGSL: &str = "
-@group(0) @binding(0) var panel: texture_2d<f32>;
-@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
-    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
-    return vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
-}
-@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-    let size = vec2<i32>(textureDimensions(panel));
-    return textureLoad(panel, min(vec2<i32>(p.xy), size - 1), 0);
-}
-";
+/// The blit module, translated from `ornis-gpu-blit` through LLVM IR.
+///
+/// The source is ordinary stable Rust (`crates/gpu-blit`) and this file is
+/// generated: `cargo xtask build-shaders --package ornis-gpu-blit --entry all
+/// --artifact crates/runner/src/stats/blit_generated.wgsl`. The `docs` CI
+/// shard regenerates it and fails on a byte difference, so editing the WGSL
+/// here is editing a build artifact.
+const BLIT_WGSL: &str = include_str!("blit_generated.wgsl");
+
+/// Vertex entry of [`BLIT_WGSL`]: the name comes from the crate that exports
+/// it (`ornis-gpu-blit`), so a rename fails to compile here instead of failing
+/// at pipeline creation.
+const BLIT_VERTEX_ENTRY: &str = ornis_gpu_blit::VERTEX_ENTRY;
+
+/// Fragment entry of [`BLIT_WGSL`], from the same crate.
+const BLIT_FRAGMENT_ENTRY: &str = ornis_gpu_blit::FRAGMENT_ENTRY;
 
 /// Second window showing [`StatsCollector`] readouts.
 pub(crate) struct StatsWindow {
@@ -93,13 +98,13 @@ impl StatsWindow {
             layout: None,
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs"),
+                entry_point: Some(BLIT_VERTEX_ENTRY),
                 buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs"),
+                entry_point: Some(BLIT_FRAGMENT_ENTRY),
                 targets: &[Some(format.into())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),

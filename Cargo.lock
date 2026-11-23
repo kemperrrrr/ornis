@@ -2862,6 +2862,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ornis-gpu-blit"
+version = "0.1.0"
+dependencies = [
+ "ornis-gpu-shader",
+]
+
+[[package]]
 name = "ornis-gpu-bloom"
 version = "0.1.0"
 dependencies = [
@@ -3125,6 +3132,7 @@ dependencies = [
  "editor-backend",
  "ornis-app",
  "ornis-core",
+ "ornis-gpu-blit",
  "ornis-render",
  "ornis-schedule",
  "pollster",
