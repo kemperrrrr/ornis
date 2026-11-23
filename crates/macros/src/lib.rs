@@ -12,13 +12,18 @@
 //! - `#[derive(WgslInterface)]` — mirror a Rust struct as a WGSL
 //!   shader-interface struct (vertex inputs, varyings): location/builtin
 //!   assignments generated from field attributes.
-//! - `#[kernel]` — translate a small Rust function AST into WGSL compute
-//!   code (used e.g. for BRDF math in `render/shaders/math.rs`).
-//! - `#[gpu_pipeline]`, `#[derive(PipelineConfig)]` — declare pipelines
-//!   with static bind-group / layout metadata, letting the engine build
-//!   them without hand-written boilerplate; `for_each_entity!` stamps
-//!   per-component dispatch glue. `#[smart_system]` turns a per-object
-//!   function into a `System` whose accesses come from parameter types.
+//! - `#[derive(PipelineConfig)]` — declare pipeline metadata (bind-group
+//!   layout, backend selection) that the engine builds without hand-written
+//!   boilerplate.
+//! - `for_each_entity!` stamps per-component dispatch glue; `#[smart_system]`
+//!   turns a per-object function into a `System` whose accesses come from
+//!   parameter types.
+//!
+//! Shader *bodies* are not generated here: they are ordinary Rust in the
+//! `gpu-*` crates, translated by `ornis-llvm2gpu` (`crates/llvm2gpu`) from
+//! LLVM IR, with the WGSL checked in. The old DSL entry points (`#[stage]`,
+//! `#[wgsl_fn]`, `#[kernel]`, `#[gpu_pipeline]`) and the `ornis-shader-lang`
+//! crate they lowered through were removed in #263.
 #![warn(missing_docs)]
 
 mod auto_pipeline;

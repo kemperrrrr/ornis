@@ -1,8 +1,8 @@
 //! `#[pack(gpu)]` half of `#[derive(Pack)]`: SoA columns as storage lanes.
 //!
 //! The derive sees the struct definition, so it can describe each field
-//! column for the GPU without the caller re-declaring it in
-//! `#[gpu_pipeline]`: [`ornis_core::PackGpu`] impl emitting one
+//! column for the GPU without the caller re-declaring it: an
+//! [`ornis_core::PackGpu`] impl emitting one
 //! [`ornis_core::PackGpuLane`] per field (declaration order) plus the
 //! aligned serializer [`ornis_core::PackGpu::pack_gpu_upload`].
 //!
