@@ -454,6 +454,62 @@ pub const GPU_LN: &str = "gpu_ln";
 /// `(param f32) (result f32)` — `exp(value)`, one WGSL `exp`.
 pub const GPU_EXP: &str = "gpu_exp";
 
+/// `(param f32) (result f32)` — `exp2(value)`, one WGSL `exp2`.
+///
+/// Separate from [`GPU_EXP`] because `exp2` is not `exp(2^y)` rounded once: a
+/// shader that wrote the series would drift from the instruction.
+pub const GPU_EXP2: &str = "gpu_exp2";
+
+/// `(param f32) (result f32)` — `log2(value)`, one WGSL `log2`.
+pub const GPU_LOG2: &str = "gpu_log2";
+
+/// `(param f32) (result f32)` — `abs(value)`, one WGSL `abs`.
+pub const GPU_ABS: &str = "gpu_abs";
+
+/// `(param f32) (result f32)` — `sign(value)`, one WGSL `sign`.
+pub const GPU_SIGN: &str = "gpu_sign";
+
+/// `(param f32) (result f32)` — `fract(value)`, one WGSL `fract`.
+pub const GPU_FRACT: &str = "gpu_fract";
+
+/// `(param f32) (result f32)` — `cos(value)`, one WGSL `cos`.
+pub const GPU_COS: &str = "gpu_cos";
+
+/// `(param f32) (result f32)` — `sin(value)`, one WGSL `sin`.
+pub const GPU_SIN: &str = "gpu_sin";
+
+/// `(param f32) (result f32)` — `acos(value)`, one WGSL `acos`.
+pub const GPU_ACOS: &str = "gpu_acos";
+
+/// `(param f32 f32 f32) (result f32)` — `clamp(value, low, high)`.
+pub const GPU_CLAMP: &str = "gpu_clamp";
+
+/// `(param f32 f32 f32) (result f32)` — `mix(low, high, weight)`.
+pub const GPU_MIX: &str = "gpu_mix";
+
+/// `(param f32 f32) (result f32)` — x of `dot(vec2(a, b), vec2(a, b))`.
+///
+/// The two-lane dot the AO passes take of a corner offset: WGSL has no
+/// two-lane `dot` on scalars, so the sum is an import.
+pub const GPU_DOT2_XY: &str = "gpu_dot2_xy";
+
+/// `(param f32 f32 f32) (result f32)` — `dot(vec3, vec3)` of two operand triples.
+pub const GPU_DOT3_XYZ: &str = "gpu_dot3_xyz";
+
+/// `(param f32 f32 f32) (result f32)` — `length(vec3, vec3)` of one triple.
+pub const GPU_LENGTH3_XYZ: &str = "gpu_length3_xyz";
+
+/// `(param f32 f32 f32 f32 f32 f32) (result f32)` — lane of
+/// `cross(a, b)` computed from two operand triples.
+///
+/// The lane is an operand rather than a fourth argument so one import serves
+/// the three components.
+pub const GPU_CROSS3_LANE: &str = "gpu_cross3_lane";
+
+/// `(param f32 f32 f32 f32) (result f32)` — lane of `normalize(vec3)` computed
+/// from one operand triple.
+pub const GPU_NORMALIZE3_LANE: &str = "gpu_normalize3_lane";
+
 /// Compute entry. Optional: a module without this export still lowers.
 ///
 /// The translator binds the function's single `i32` parameter to

@@ -30,6 +30,7 @@
 
 use crate::error::TranslateError;
 use crate::parse::{BasicBlock, Instr, LlvmFunc, Operand, PtrBase, Terminator, Ty};
+use crate::symbol;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Synthetic post-dominator sink used while structuring the CFG.
@@ -87,6 +88,25 @@ impl Lowering {
 
     /// Remember the functions the parser skipped, so a call that reaches one
     /// reports what is wrong with it instead of a generic rejection.
+    pub(super) fn reserve_skipped(&mut self, skipped: Vec<(String, String)>) {
+        for (name, reason) in skipped {
+            self.builders.skipped_helpers.insert(name, reason);
+        }
+    }
+
+    /// Remember every function the module defines.
+    ///
+    /// A call to a defined name is a helper call; everything else is an import
+    /// or an intrinsic. This is what replaced guessing from the spelling of the
+    /// name, so a kernel helper is never mistaken for an ABI import.
+    pub(super) fn reserve_definitions(&mut self, funcs: &[LlvmFunc]) {
+        for func in funcs {
+            if Stage::of(&func.name).is_none() {
+                self.builders.defined.insert(func.name.clone());
+            }
+        }
+    }
+
     /// Remember the functions that never return, so their call sites can be
     /// dropped instead of translated.
     pub(super) fn reserve_diverging(&mut self, funcs: &[LlvmFunc]) {
@@ -105,12 +125,6 @@ impl Lowering {
     /// never returns, so its call site is dropped.
     pub(super) fn reserve_noreturn(&mut self, names: Vec<String>) {
         self.builders.diverging.extend(names);
-    }
-
-    pub(super) fn reserve_skipped(&mut self, skipped: Vec<(String, String)>) {
-        for (name, reason) in skipped {
-            self.builders.skipped_helpers.insert(name, reason);
-        }
     }
 
     /// Lower every helper the entries can call.
@@ -151,19 +165,32 @@ impl Lowering {
     }
 
     /// Lower `func`, or remember it as unusable when its body leaves the subset.
+    ///
+    /// The reason travels with the name: a call to a helper that failed to
+    /// lower is an error at *that* call, quoting why the helper could not be
+    /// translated. Dropping the error instead let the call fall through to the
+    /// import dispatch, which silently replaced the helper with whichever
+    /// import its name happened to contain.
     fn lower_or_skip<'f>(&mut self, func: &'f LlvmFunc, skipped: &mut Vec<&'f str>) {
-        let lowered = self.lower_helper(func);
-        if lowered.is_err() {
+        if let Err(error) = self.lower_helper(func) {
+            self.builders
+                .skipped_helpers
+                .insert(func.name.clone(), error.to_string());
             skipped.push(func.name.as_str());
         }
     }
 
     /// Whether every helper `func` calls is already lowered or skipped.
+    ///
+    /// A callee the module does not define is an import or an intrinsic, and
+    /// needs no ordering. Whether a name *is* a helper is not a question about
+    /// its spelling: `is_helper_name` used to answer it from substrings, which
+    /// let a helper of the kernel look like an import and skip its turn.
     fn callees_ready(&self, func: &LlvmFunc, skipped: &[&str]) -> bool {
         func.blocks.iter().all(|block| {
             block.instrs.iter().all(|instr| match instr {
                 Instr::Call { callee, .. } | Instr::CallVoid { callee, .. } => {
-                    !is_helper_name(callee)
+                    !self.builders.defined.contains(callee)
                         || self.builders.helpers.contains_key(callee)
                         || skipped.contains(&callee.as_str())
                 }
@@ -469,7 +496,7 @@ const IO_IMPORTS: [(&str, IoImport); 18] = [
 fn io_import(callee: &str) -> Option<IoImport> {
     IO_IMPORTS
         .iter()
-        .find(|(name, _)| callee.contains(name))
+        .find(|(name, _)| symbol::imported(callee) == *name)
         .map(|(_, import)| *import)
 }
 
@@ -795,29 +822,6 @@ const WORD_BITS: u32 = 32;
 /// Mask of one byte.
 const BYTE_MASK: u32 = 0xFF;
 
-/// Whether `callee` names a function the module defines rather than an import.
-///
-/// Imports are the `ornis_gpu` ABI and the `llvm.*` intrinsics; everything else
-/// is a helper the kernel calls.
-fn is_helper_name(callee: &str) -> bool {
-    const IMPORT_PREFIXES: [&str; 8] = [
-        "llvm.",
-        "ornis_gpu",
-        "storage_",
-        "uniform_",
-        "texture_",
-        "workgroup_",
-        "fragment_",
-        "vertex_",
-    ];
-    const IMPORT_NAMES: [&str; 3] = ["instance_index", "gpu_", "global_invocation"];
-    !IMPORT_PREFIXES
-        .iter()
-        .chain(IMPORT_NAMES.iter())
-        .any(|prefix| callee.contains(prefix))
-        && !callee.contains("local_invocation")
-}
-
 /// A helper function lowered into the module.
 #[derive(Clone, Copy)]
 struct Helper {
@@ -958,24 +962,20 @@ enum SampleMip {
 
 /// Shape and mip source of a texture-sample import, by its name.
 ///
-/// `texture_sample_level_*` is checked before `texture_sample_*`: the longer
-/// spelling is the explicit-level one and the shorter would otherwise swallow
-/// it.
+/// The names are matched whole, so `texture_sample_level_*` and
+/// `texture_sample_*` cannot answer for each other and the order of the arms
+/// carries no meaning.
 fn sample_import(callee: &str) -> Option<(SampleShape, SampleMip)> {
     use ornis_gpu_abi::symbols::{
         TEXTURE_SAMPLE_2D_F32X4, TEXTURE_SAMPLE_CUBE_F32X4, TEXTURE_SAMPLE_LEVEL_CUBE_F32X4,
     };
     const LEVEL_2D: &str = "texture_sample_level_2d_f32x4";
-    if callee.contains(TEXTURE_SAMPLE_LEVEL_CUBE_F32X4) {
-        Some((SampleShape::Cube, SampleMip::Operand))
-    } else if callee.contains(TEXTURE_SAMPLE_CUBE_F32X4) {
-        Some((SampleShape::Cube, SampleMip::Auto))
-    } else if callee.contains(LEVEL_2D) {
-        Some((SampleShape::Plane, SampleMip::Zero))
-    } else if callee.contains(TEXTURE_SAMPLE_2D_F32X4) {
-        Some((SampleShape::Plane, SampleMip::Auto))
-    } else {
-        None
+    match symbol::imported(callee) {
+        TEXTURE_SAMPLE_LEVEL_CUBE_F32X4 => Some((SampleShape::Cube, SampleMip::Operand)),
+        TEXTURE_SAMPLE_CUBE_F32X4 => Some((SampleShape::Cube, SampleMip::Auto)),
+        LEVEL_2D => Some((SampleShape::Plane, SampleMip::Zero)),
+        TEXTURE_SAMPLE_2D_F32X4 => Some((SampleShape::Plane, SampleMip::Auto)),
+        _ => None,
     }
 }
 
@@ -985,12 +985,10 @@ fn compare_import(callee: &str) -> Option<SampleShape> {
     use ornis_gpu_abi::symbols::{
         TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32, TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32,
     };
-    if callee.contains(TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32) {
-        Some(SampleShape::Cube)
-    } else if callee.contains(TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32) {
-        Some(SampleShape::Plane)
-    } else {
-        None
+    match symbol::imported(callee) {
+        TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32 => Some(SampleShape::Cube),
+        TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32 => Some(SampleShape::Plane),
+        _ => None,
     }
 }
 
@@ -1393,6 +1391,9 @@ struct Builders {
     helpers: HashMap<String, Helper>,
     /// Helpers outside the subset, with the reason a call cannot lower them.
     skipped_helpers: HashMap<String, String>,
+    /// Names the module defines: a call to one is a helper call, and every other
+    /// callee is an import or an intrinsic.
+    defined: HashSet<String>,
     /// Functions whose every path ends in `unreachable` (the panic shims).
     ///
     /// A call to one never returns, so the translator drops it and lets the
@@ -1422,6 +1423,7 @@ impl Builders {
             module_constants: HashMap::new(),
             helpers: HashMap::new(),
             skipped_helpers: HashMap::new(),
+            defined: HashSet::new(),
             diverging: HashSet::new(),
             structs: structs.iter().map(|tags| tags.to_vec()).collect(),
             sampling,
@@ -2276,14 +2278,16 @@ fn instruction_is_uniform(instr: &Instr, uniform: &HashSet<String>) -> bool {
 /// math builtins do; the invocation id, workgroup memory, storage reads, and
 /// texture fetches do not.
 fn uniform_callee(callee: &str) -> bool {
-    const UNIFORM: [&str; 5] = [
-        "uniform_",
-        "storage_len",
-        "texture_width",
-        "texture_height",
-        "gpu_",
-    ];
-    UNIFORM.iter().any(|prefix| callee.contains(prefix)) || callee.contains("llvm.")
+    let symbol = symbol::imported(callee);
+    // The `llvm.*` intrinsics are pure functions of their operands, so they are
+    // uniform whenever the operands are; the type suffix is why they match by
+    // prefix rather than by name.
+    symbol.starts_with("llvm.")
+        || symbol.starts_with("uniform_")
+        || symbol.starts_with("texture_width")
+        || symbol.starts_with("texture_height")
+        || symbol.starts_with("storage_len")
+        || symbol.starts_with("gpu_")
 }
 
 /// Blocks control can leave `term` for, in the order the IR names them.
@@ -4307,11 +4311,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             self.call_helper_void(out, helper, args)?;
             return Ok(true);
         }
-        if callee.contains("llvm.memset") {
+        if symbol::imported(callee).starts_with("llvm.memset") {
             self.memset(out, args)?;
             return Ok(true);
         }
-        if callee.contains("llvm.memcpy") {
+        if symbol::imported(callee).starts_with("llvm.memcpy") {
             self.memcpy(out, args)?;
             return Ok(true);
         }
@@ -4393,14 +4397,14 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if let Some(helper) = self.builders.helpers.get(callee).copied() {
             return self.call_helper(out, helper, args);
         }
-        if callee.contains("llvm.fptosi.sat") {
+        if symbol::imported(callee).starts_with("llvm.fptosi.sat") {
             if args.len() != 1 {
                 return Err(TranslateError::unsupported());
             }
             let value = self.cast(out, &args[0], naga::ScalarKind::Sint)?;
             return Ok(self.bitcast_uint(out, value));
         }
-        if callee.contains("llvm.fptoui.sat") {
+        if symbol::imported(callee).starts_with("llvm.fptoui.sat") {
             if args.len() != 1 {
                 return Err(TranslateError::unsupported());
             }
@@ -4412,7 +4416,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             }
             // `llvm.smin`/`smax` compare signed values; WGSL picks the
             // signed overload from the operand type.
-            let signed = callee.contains("llvm.smin") || callee.contains("llvm.smax");
+            let signed = symbol::imported(callee).starts_with("llvm.smin")
+                || symbol::imported(callee).starts_with("llvm.smax");
             let mut arg = self.operand(out, &args[0])?;
             let mut arg1 = self.operand(out, &args[1])?;
             if signed {
@@ -4435,26 +4440,26 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 value
             });
         }
-        if callee.contains("global_invocation_lane") {
+        if symbol::imported(callee) == "global_invocation_lane" {
             return self.global_invocation_lane(out, args);
         }
-        if callee.contains("vertex_index") {
+        if symbol::imported(callee) == "vertex_index" {
             return self.vertex_index.ok_or_else(TranslateError::unsupported);
         }
-        if callee.contains("instance_index") {
+        if symbol::imported(callee) == "instance_index" {
             return self.instance_index.ok_or_else(TranslateError::unsupported);
         }
-        if callee.contains("local_invocation_index") {
+        if symbol::imported(callee) == "local_invocation_index" {
             return self.local_index.ok_or_else(TranslateError::unsupported);
         }
-        if callee.contains("fragment_uv_lane") {
+        if symbol::imported(callee) == "fragment_uv_lane" {
             return self.input_lane(
                 out,
                 0,
                 args.first().ok_or_else(TranslateError::unsupported)?,
             );
         }
-        if callee.contains(ornis_gpu_abi::symbols::VERTEX_INPUT_U32X4) {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::VERTEX_INPUT_U32X4 {
             if args.len() != 2 {
                 return Err(TranslateError::unsupported());
             }
@@ -4465,29 +4470,31 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 IoValue::U32x4,
             );
         }
-        if callee.contains(ornis_gpu_abi::symbols::FRAGMENT_INPUT_U32)
-            || callee.contains(ornis_gpu_abi::symbols::VERTEX_INPUT_U32)
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::FRAGMENT_INPUT_U32
+            || symbol::imported(callee) == ornis_gpu_abi::symbols::VERTEX_INPUT_U32
         {
             return self.input_word(const_u32(
                 args.first().ok_or_else(TranslateError::unsupported)?,
             )?);
         }
-        if callee.contains("vertex_input_lane") || callee.contains("fragment_input_lane") {
+        if symbol::imported(callee) == "vertex_input_lane"
+            || symbol::imported(callee) == "fragment_input_lane"
+        {
             if args.len() != INPUT_LANE_ARGS {
                 return Err(TranslateError::unsupported());
             }
             return self.input_lane(out, const_u32(&args[0])?, &args[2]);
         }
-        if callee.contains("fragment_position_lane") {
+        if symbol::imported(callee) == "fragment_position_lane" {
             return self.fragment_position(out, args);
         }
-        if callee.contains("workgroup_atomic_add_u32") {
+        if symbol::imported(callee) == "workgroup_atomic_add_u32" {
             return self.workgroup_atomic_add(out, args);
         }
-        if callee.contains("workgroup_atomic_load_u32") {
+        if symbol::imported(callee) == "workgroup_atomic_load_u32" {
             return self.workgroup_load(out, args, true);
         }
-        if callee.contains("workgroup_load_u32") {
+        if symbol::imported(callee) == "workgroup_load_u32" {
             return self.workgroup_load(out, args, false);
         }
         if let Some((shape, level)) = sample_import(callee) {
@@ -4496,64 +4503,64 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if let Some(shape) = compare_import(callee) {
             return self.image_sample_compare(out, args, shape);
         }
-        if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_F32X4_SAMPLE) {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_F32X4_SAMPLE {
             return self.texture_load_lane_sample(out, args);
         }
-        if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_U32_SAMPLE) {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_U32_SAMPLE {
             return self.texture_load_sample_of(out, args, TextureKind::Unsigned, None);
         }
-        if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_F32_SAMPLE) {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_F32_SAMPLE {
             return self.texture_load_sample_of(out, args, TextureKind::Depth, None);
         }
-        if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_U32) {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_U32 {
             return self.texture_load_u32(out, args);
         }
-        if callee.contains("texture_load_2d_f32x4") {
+        if symbol::imported(callee) == "texture_load_2d_f32x4" {
             return self.texture_load_lane(out, args);
         }
-        if callee.contains("texture_load_2d_f32") {
+        if symbol::imported(callee) == "texture_load_2d_f32" {
             return self.texture_load_f32(out, args);
         }
-        if callee.contains("texture_width_2d_f32x4") {
+        if symbol::imported(callee) == "texture_width_2d_f32x4" {
             return self.texture_size(out, args, 0, TextureKind::Sampled);
         }
-        if callee.contains("texture_height_2d_f32x4") {
+        if symbol::imported(callee) == "texture_height_2d_f32x4" {
             return self.texture_size(out, args, 1, TextureKind::Sampled);
         }
-        if callee.contains("texture_width_2d") {
+        if symbol::imported(callee) == "texture_width_2d" {
             return self.texture_size(out, args, 0, TextureKind::Depth);
         }
-        if callee.contains("texture_height_2d") {
+        if symbol::imported(callee) == "texture_height_2d" {
             return self.texture_size(out, args, 1, TextureKind::Depth);
         }
-        if callee.contains(ornis_gpu_abi::symbols::UNIFORM_NESTED_VEC4_LANE) {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::UNIFORM_NESTED_VEC4_LANE {
             return self.uniform_nested_vec4_lane(out, args);
         }
-        if callee.contains(ornis_gpu_abi::symbols::UNIFORM_NESTED_ARRAY_VEC4_LANE) {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::UNIFORM_NESTED_ARRAY_VEC4_LANE {
             return self.uniform_nested_array_vec4_lane(out, args);
         }
-        if callee.contains(ornis_gpu_abi::symbols::UNIFORM_ARRAY_VEC4_LANE) {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::UNIFORM_ARRAY_VEC4_LANE {
             return self.uniform_array_vec4_lane(out, args);
         }
-        if callee.contains("uniform_nested_field_f32") {
+        if symbol::imported(callee) == "uniform_nested_field_f32" {
             return self.uniform_nested_field(out, args, ornis_gpu_abi::TYPE_TAG_F32);
         }
-        if callee.contains("uniform_nested_field_u32") {
+        if symbol::imported(callee) == "uniform_nested_field_u32" {
             return self.uniform_nested_field(out, args, ornis_gpu_abi::TYPE_TAG_U32);
         }
-        if callee.contains("uniform_field_vec4_plane_dot") {
+        if symbol::imported(callee) == "uniform_field_vec4_plane_dot" {
             return self.uniform_plane_dot(out, args);
         }
-        if callee.contains("uniform_field_vec4_component_f32") {
+        if symbol::imported(callee) == "uniform_field_vec4_component_f32" {
             return self.uniform_field_vec4_component(out, args);
         }
-        if callee.contains("uniform_field_f32") {
+        if symbol::imported(callee) == "uniform_field_f32" {
             return self.uniform_field(out, args, ornis_gpu_abi::TYPE_TAG_F32);
         }
-        if callee.contains("uniform_field_u32") {
+        if symbol::imported(callee) == "uniform_field_u32" {
             return self.uniform_field(out, args, ornis_gpu_abi::TYPE_TAG_U32);
         }
-        if callee.contains("uniform_read_f32") {
+        if symbol::imported(callee) == "uniform_read_f32" {
             if args.len() != 4 {
                 return Err(TranslateError::unsupported());
             }
@@ -4573,7 +4580,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let global = self.builders.uniform_global(group, binding, len);
             return load_uniform(&mut self.func, out, global, index);
         }
-        if callee.contains("storage_len_f32") {
+        if symbol::imported(callee) == "storage_len_f32" {
             if args.len() != 2 {
                 return Err(TranslateError::unsupported());
             }
@@ -4585,7 +4592,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
         }
-        if callee.contains("storage_len_u32") && !callee.contains("storage_len_u32x4") {
+        if symbol::imported(callee) == "storage_len_u32" {
             if args.len() != 2 {
                 return Err(TranslateError::unsupported());
             }
@@ -4597,7 +4604,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
         }
-        if callee.contains("storage_len_u32x4") {
+        if symbol::imported(callee) == "storage_len_u32x4" {
             if args.len() != 2 {
                 return Err(TranslateError::unsupported());
             }
@@ -4609,7 +4616,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
         }
-        if callee.contains("storage_read_u32_lane") {
+        if symbol::imported(callee) == "storage_read_u32_lane" {
             if args.len() != 4 {
                 return Err(TranslateError::unsupported());
             }
@@ -4631,21 +4638,21 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             );
             return Ok(self.expr(out, naga::Expression::Load { pointer }));
         }
-        if callee.contains("storage_read_f32") {
+        if symbol::imported(callee) == "storage_read_f32" {
             let (group, binding, index) = self.storage_args(out, args, 3)?;
             let global = self
                 .builders
                 .storage_global(group, binding, Elem::F32, false)?;
             return load_global(&mut self.func, out, global, index);
         }
-        if callee.contains("storage_read_u32") {
+        if symbol::imported(callee) == "storage_read_u32" {
             let (group, binding, index) = self.storage_args(out, args, 3)?;
             let global = self
                 .builders
                 .storage_global(group, binding, Elem::U32, false)?;
             return load_global(&mut self.func, out, global, index);
         }
-        if callee.contains("storage_atomic_add_u32") {
+        if symbol::imported(callee) == "storage_atomic_add_u32" {
             if args.len() != 4 {
                 return Err(TranslateError::unsupported());
             }
@@ -4688,13 +4695,21 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 },
             ));
         }
-        if callee.contains("cross3") {
+        // The SDK spells these `gpu_<op>_<shape>`; the hand-written IR of the
+        // tests names the operation bare, so both are accepted.
+        use ornis_gpu_abi::symbols as abi;
+        if matches!(symbol::imported(callee), "cross3" | abi::GPU_CROSS3_LANE) {
             return self.cross3_lane(out, args);
         }
-        if callee.contains("normalize3") {
+        if matches!(
+            symbol::imported(callee),
+            "normalize3" | abi::GPU_NORMALIZE3_LANE
+        ) {
             return self.normalize3_lane(out, args);
         }
-        if callee.contains("dot2") && args.len() == VEC2_LANES as usize + VEC2_LANES as usize {
+        if matches!(symbol::imported(callee), "dot2" | abi::GPU_DOT2_XY)
+            && args.len() == VEC2_LANES as usize + VEC2_LANES as usize
+        {
             let va = self.vec2_of(out, args, 0)?;
             let vb = self.vec2_of(out, args, VEC2_LANES)?;
             return Ok(self.expr(
@@ -4708,7 +4723,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 },
             ));
         }
-        if callee.contains("dot3") && args.len() == VEC3_LANES as usize + VEC3_LANES as usize {
+        if matches!(symbol::imported(callee), "dot3" | abi::GPU_DOT3_XYZ)
+            && args.len() == VEC3_LANES as usize + VEC3_LANES as usize
+        {
             let va = self.vec3_of(out, args, 0)?;
             let vb = self.vec3_of(out, args, VEC3_LANES)?;
             return Ok(self.expr(
@@ -4722,7 +4739,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 },
             ));
         }
-        if callee.contains("length3") && args.len() == VEC3_LANES as usize {
+        if matches!(symbol::imported(callee), "length3" | abi::GPU_LENGTH3_XYZ)
+            && args.len() == VEC3_LANES as usize
+        {
             let va = self.vec3_of(out, args, 0)?;
             return Ok(self.expr(
                 out,
@@ -5877,17 +5896,17 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if self.staged_void_call(out, callee, args)? {
             return Ok(());
         }
-        if callee.contains("workgroup_atomic_store_u32") {
+        if symbol::imported(callee) == "workgroup_atomic_store_u32" {
             return self.workgroup_store(out, args, true);
         }
-        if callee.contains("workgroup_store_u32") {
+        if symbol::imported(callee) == "workgroup_store_u32" {
             return self.workgroup_store(out, args, false);
         }
-        if callee.contains("fragment_discard") {
+        if symbol::imported(callee) == "fragment_discard" {
             out.push(naga::Statement::Kill, naga::Span::default());
             return Ok(());
         }
-        if callee.contains("workgroup_barrier") {
+        if symbol::imported(callee) == "workgroup_barrier" {
             // Uniformity is not proved: every invocation of a workgroup must
             // reach a barrier together, so any enclosing `if`/`loop`, or a
             // merge that a returning arm can skip, is rejected instead of
@@ -5904,24 +5923,24 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if let Some(import) = io_import(callee) {
             return self.stage_store(out, import, args);
         }
-        if callee.contains("storage_write_u32x4") {
+        if symbol::imported(callee) == "storage_write_u32x4" {
             return self.storage_write_vec4(out, args);
         }
-        if callee.contains("storage_copy_u32x4") {
+        if symbol::imported(callee) == "storage_copy_u32x4" {
             return self.storage_copy(out, args);
         }
-        if callee.contains("storage_write_f32") {
+        if symbol::imported(callee) == "storage_write_f32" {
             return self.store_void(out, args, Elem::F32);
         }
-        if callee.contains("storage_write_u32") {
+        if symbol::imported(callee) == "storage_write_u32" {
             return self.store_void(out, args, Elem::U32);
         }
         // Intrinsics that exist for the optimiser's benefit only:
         // `llvm.assume`/`lifetime` say what the code already satisfies, and
         // `llvm.experimental.noalias.scope.decl` marks a scope by metadata.
-        if callee.contains("llvm.assume")
-            || callee.contains("llvm.lifetime")
-            || callee.contains("llvm.experimental.")
+        if symbol::imported(callee).starts_with("llvm.assume")
+            || symbol::imported(callee).starts_with("llvm.lifetime")
+            || symbol::imported(callee).starts_with("llvm.experimental.")
         {
             return Ok(());
         }
@@ -6407,9 +6426,9 @@ fn image_class(kind: TextureKind, multisampled: bool) -> naga::ImageClass {
 /// passes the axis through and lets naga reject a divergent call rather than
 /// papering over it.
 fn derivative_axis(callee: &str) -> Option<naga::DerivativeAxis> {
-    if callee.contains(ornis_gpu_abi::symbols::GPU_DPDX) {
+    if symbol::imported(callee) == ornis_gpu_abi::symbols::GPU_DPDX {
         Some(naga::DerivativeAxis::X)
-    } else if callee.contains(ornis_gpu_abi::symbols::GPU_DPDY) {
+    } else if symbol::imported(callee) == ornis_gpu_abi::symbols::GPU_DPDY {
         Some(naga::DerivativeAxis::Y)
     } else {
         None
@@ -6420,9 +6439,9 @@ fn binary_math(callee: &str, argc: usize) -> Option<naga::MathFunction> {
     if argc != VEC2_LANES as usize {
         return None;
     }
-    if callee.contains(ornis_gpu_abi::symbols::GPU_POW) {
+    if symbol::imported(callee) == ornis_gpu_abi::symbols::GPU_POW {
         Some(naga::MathFunction::Pow)
-    } else if callee.contains(ornis_gpu_abi::symbols::GPU_ATAN2) {
+    } else if symbol::imported(callee) == ornis_gpu_abi::symbols::GPU_ATAN2 {
         Some(naga::MathFunction::Atan2)
     } else {
         None
@@ -6433,11 +6452,14 @@ fn ternary_math(callee: &str, argc: usize) -> Option<naga::MathFunction> {
     if argc != VEC3_LANES as usize {
         return None;
     }
-    if callee.contains("clamp") {
+    // Both spellings: the SDK imports are `gpu_*`, and the hand-written IR of
+    // the tests names the operation bare.
+    let symbol = symbol::imported(callee);
+    if symbol == "clamp" || symbol == ornis_gpu_abi::symbols::GPU_CLAMP {
         Some(naga::MathFunction::Clamp)
-    } else if callee.contains(ornis_gpu_abi::symbols::GPU_SMOOTHSTEP) {
+    } else if symbol == ornis_gpu_abi::symbols::GPU_SMOOTHSTEP {
         Some(naga::MathFunction::SmoothStep)
-    } else if callee.contains("mix") {
+    } else if symbol == "mix" || symbol == ornis_gpu_abi::symbols::GPU_MIX {
         Some(naga::MathFunction::Mix)
     } else {
         None
@@ -6445,47 +6467,60 @@ fn ternary_math(callee: &str, argc: usize) -> Option<naga::MathFunction> {
 }
 
 fn unary_math(callee: &str) -> Option<naga::MathFunction> {
-    // `acos` before `cos`, `log2` before `log`: the shorter name is a substring.
-    const FNS: &[(&str, naga::MathFunction)] = &[
-        (ornis_gpu_abi::symbols::GPU_SQRT, naga::MathFunction::Sqrt),
-        ("llvm.sqrt.f32", naga::MathFunction::Sqrt),
-        // `abs_f32` as a branch is what a shader writes; rustc folds it into the
-        // intrinsic, so the intrinsic is what the translator sees.
-        ("llvm.fabs.f32", naga::MathFunction::Abs),
-        ("fract", naga::MathFunction::Fract),
-        ("acos", naga::MathFunction::Acos),
-        ("sin", naga::MathFunction::Sin),
-        ("cos", naga::MathFunction::Cos),
-        // `gpu_exp2` starts with `gpu_exp`, so the symbol spelling goes after
-        // the generic `exp2`/`log2` below it is matched first.
-        ("exp2", naga::MathFunction::Exp2),
-        ("exp", naga::MathFunction::Exp),
-        ("log2", naga::MathFunction::Log2),
-        ("log", naga::MathFunction::Log),
-        (ornis_gpu_abi::symbols::GPU_EXP, naga::MathFunction::Exp),
-        (ornis_gpu_abi::symbols::GPU_LN, naga::MathFunction::Log),
-        (ornis_gpu_abi::symbols::GPU_TAN, naga::MathFunction::Tan),
-        (ornis_gpu_abi::symbols::GPU_FLOOR, naga::MathFunction::Floor),
-        (ornis_gpu_abi::symbols::GPU_CEIL, naga::MathFunction::Ceil),
-        ("sign", naga::MathFunction::Sign),
-        ("abs", naga::MathFunction::Abs),
+    use naga::MathFunction as F;
+    use ornis_gpu_abi::symbols as s;
+    // One entry per import the SDK declares: the names are whole, so no entry
+    // can swallow another (`gpu_exp` and `gpu_exp2` are two rows). The
+    // `llvm.*` rows match by prefix because an intrinsic carries its type in
+    // the name (`llvm.sqrt.f32`).
+    const FNS: &[(&str, F)] = &[
+        (s::GPU_SQRT, F::Sqrt),
+        (s::GPU_EXP, F::Exp),
+        (s::GPU_EXP2, F::Exp2),
+        (s::GPU_LN, F::Log),
+        (s::GPU_LOG2, F::Log2),
+        (s::GPU_TAN, F::Tan),
+        (s::GPU_SIN, F::Sin),
+        (s::GPU_COS, F::Cos),
+        (s::GPU_ACOS, F::Acos),
+        (s::GPU_ABS, F::Abs),
+        (s::GPU_SIGN, F::Sign),
+        (s::GPU_FRACT, F::Fract),
+        (s::GPU_FLOOR, F::Floor),
+        (s::GPU_CEIL, F::Ceil),
     ];
-    FNS.iter()
-        .find(|(name, _)| callee.contains(name))
-        .map(|(_, fun)| *fun)
+    let symbol = symbol::imported(callee);
+    if let Some((_, fun)) = FNS.iter().find(|(name, _)| symbol == *name) {
+        return Some(*fun);
+    }
+    // The intrinsics: `abs_f32` as a branch is what a shader writes, and rustc
+    // folds it into the intrinsic, so the intrinsic is what the translator sees.
+    let intrinsic = [
+        ("llvm.sqrt", F::Sqrt),
+        ("llvm.fabs", F::Abs),
+        ("llvm.sin", F::Sin),
+        ("llvm.cos", F::Cos),
+        ("llvm.exp2", F::Exp2),
+        ("llvm.log2", F::Log2),
+        ("llvm.floor", F::Floor),
+        ("llvm.ceil", F::Ceil),
+    ]
+    .into_iter()
+    .find(|(name, _)| symbol.starts_with(name));
+    intrinsic.map(|(_, fun)| fun)
 }
 
 fn min_max(callee: &str) -> Option<naga::MathFunction> {
-    if callee.contains("llvm.umin")
-        || callee.contains("llvm.smin")
-        || callee.contains("llvm.minimumnum")
-        || callee.contains("llvm.minnum")
+    if symbol::imported(callee).starts_with("llvm.umin")
+        || symbol::imported(callee).starts_with("llvm.smin")
+        || symbol::imported(callee).starts_with("llvm.minimumnum")
+        || symbol::imported(callee).starts_with("llvm.minnum")
     {
         Some(naga::MathFunction::Min)
-    } else if callee.contains("llvm.umax")
-        || callee.contains("llvm.smax")
-        || callee.contains("llvm.maximumnum")
-        || callee.contains("llvm.maxnum")
+    } else if symbol::imported(callee).starts_with("llvm.umax")
+        || symbol::imported(callee).starts_with("llvm.smax")
+        || symbol::imported(callee).starts_with("llvm.maximumnum")
+        || symbol::imported(callee).starts_with("llvm.maxnum")
     {
         Some(naga::MathFunction::Max)
     } else {

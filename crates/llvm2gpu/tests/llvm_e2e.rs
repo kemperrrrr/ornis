@@ -90,6 +90,49 @@ start:
     assert!(translated.wgsl.contains(".y"), "{}", translated.wgsl);
 }
 
+/// A helper whose body leaves the subset is an error at its call site, never a
+/// builtin that the helper's name happens to spell.
+///
+/// The import dispatch used to ask `callee.contains("local_invocation_index")`,
+/// so a helper that failed to lower was silently replaced by the builtin its
+/// name contained — right answer for the wrong reason, and wrong for any other
+/// helper with a similar name.
+#[test]
+fn a_helper_that_failed_to_lower_is_not_silently_a_builtin() {
+    let ir = r#"
+declare i32 @local_invocation_index()
+declare i32 @mystery_import(i32)
+declare void @storage_write_u32(i32, i32, i32, i32)
+define dso_local i32 @_RNvNtCs1a2b_6kernel28local_invocation_index_plus(i32 %x) {
+start:
+  %v = call i32 @mystery_import(i32 %x)
+  ret i32 %v
+}
+define dso_local void @cs_main(i32 %id) {
+start:
+  %c = call i32 @_RNvNtCs1a2b_6kernel28local_invocation_index_plus(i32 %id)
+  call void @storage_write_u32(i32 0, i32 0, i32 %id, i32 %c)
+  ret void
+}
+"#;
+    let error = translate(ir).expect_err("the helper cannot be lowered");
+    let message = error.to_string();
+    assert!(
+        message.contains("local_invocation_index_plus"),
+        "the rejection must name the helper it could not lower: {message}"
+    );
+    assert!(
+        !error_is_only_a_missing_builtin(&message),
+        "the helper was substituted by the builtin its name spells: {message}"
+    );
+}
+
+/// Whether the rejection is the bare "no such builtin" of a dispatch miss,
+/// which is what a silently skipped helper used to produce.
+fn error_is_only_a_missing_builtin(message: &str) -> bool {
+    message.contains("outside the supported subset") && !message.contains("cannot be lowered")
+}
+
 /// A vertex stage that writes only `@builtin(position)` — no `@location`
 /// varying — is a legal WGSL entry with a one-member output struct. The stats
 /// blit is exactly that shape: it maps framebuffer pixels to texels itself, so
@@ -1238,7 +1281,7 @@ fn dot_and_length_via_compose() {
 define dso_local noundef float @cs_main(i32 noundef %id) unnamed_addr #1 {
 start:
   %_4 = uitofp i32 %id to float
-  %d = call float @gpu_dot3(float %_4, float %_4, float %_4, float %_4, float %_4, float %_4)
+  %d = call float @gpu_dot3_xyz(float %_4, float %_4, float %_4, float %_4, float %_4, float %_4)
   %l = call float @gpu_length3_xyz(float %_4, float %_4, float %_4)
   %s = fadd float %d, %l
   ret float %s
