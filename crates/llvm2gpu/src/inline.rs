@@ -23,16 +23,20 @@
 
 use crate::error::TranslateError;
 use crate::parse::{BasicBlock, Instr, LlvmFunc, Operand, Terminator, Ty};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Bytes of one scalar word, the size of the result slot an inlined call uses.
 const WORD_BYTES: u32 = 4;
 
-/// Upper bound on the calls one function may have inlined.
+/// Backstop on the calls one function may have inlined.
 ///
-/// A recursive helper would otherwise grow the body on every round; the cap
-/// turns that into a clear error instead of a runaway translation.
-const MAX_INLINED_CALLS: usize = 256;
+/// Recursion is caught by the enclosing-prefix check in [`inline_into`], which
+/// names the helper that recursed; this cap only stops a translation that keeps
+/// growing the body for another reason (a pathological kernel would rather be
+/// reported than swapped). It used to be the recursion check, and 256 inlines
+/// in one function — which a large kernel reaches by unrolling, not by
+/// recursing — was reported as a cycle that did not exist.
+const MAX_INLINED_CALLS: usize = 4096;
 
 /// Inline every call to a helper that takes or returns a pointer.
 ///
@@ -55,15 +59,58 @@ pub(super) fn inline_pointer_calls(funcs: Vec<LlvmFunc>) -> Result<Vec<LlvmFunc>
     if bodies.is_empty() {
         return Ok(funcs);
     }
+    let recursive = recursive_helpers(&bodies);
     let mut out = Vec::with_capacity(funcs.len());
     for mut func in funcs {
         if !bodies.contains_key(&func.name) {
-            inline_into(&mut func, &bodies)?;
+            inline_into(&mut func, &bodies, &recursive)?;
         }
         out.push(func);
     }
     out.retain(|func| !bodies.contains_key(&func.name));
     Ok(out)
+}
+
+/// Helpers that can reach themselves through the inlinable call graph.
+///
+/// The inliner cannot represent a cycle — the body would grow on every round —
+/// so a call to one of these is an error naming the helper. This replaces a cap
+/// on the number of inlines, which reported a large kernel that unrolls into
+/// hundreds of calls as a recursion that does not exist.
+fn recursive_helpers(bodies: &HashMap<String, LlvmFunc>) -> HashSet<String> {
+    let mut recursive = HashSet::new();
+    for name in bodies.keys() {
+        if reaches(name, name, bodies, &mut HashSet::new()) {
+            recursive.insert(name.clone());
+        }
+    }
+    recursive
+}
+
+/// Whether `from` reaches `target` through calls to inlinable helpers.
+fn reaches(
+    from: &str,
+    target: &str,
+    bodies: &HashMap<String, LlvmFunc>,
+    seen: &mut HashSet<String>,
+) -> bool {
+    let Some(func) = bodies.get(from) else {
+        return false;
+    };
+    for block in &func.blocks {
+        for instr in &block.instrs {
+            let (Instr::Call { callee, .. } | Instr::CallVoid { callee, .. }) = instr else {
+                continue;
+            };
+            if callee == target {
+                return true;
+            }
+            if seen.insert(callee.clone()) && reaches(callee, target, bodies, seen) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl LlvmFunc {
@@ -105,13 +152,15 @@ struct CallSite {
 fn inline_into(
     func: &mut LlvmFunc,
     bodies: &HashMap<String, LlvmFunc>,
+    recursive: &HashSet<String>,
 ) -> Result<(), TranslateError> {
     let mut inlined = 0usize;
+    let mut used: HashSet<String> = HashSet::new();
     while let Some(site) = find_call(func, bodies) {
         inlined += 1;
         if inlined > MAX_INLINED_CALLS {
             return Err(TranslateError::UnsupportedType(format!(
-                "helper calls in `{}` never resolve: a shader function cannot recurse",
+                "helper calls in `{}` never resolve and the body keeps growing",
                 func.name
             )));
         }
@@ -119,9 +168,33 @@ fn inline_into(
             .get(&site.callee)
             .ok_or_else(TranslateError::unsupported)?
             .clone();
-        inline_call(func, &site, &callee)?;
+        if recursive.contains(&site.callee) {
+            return Err(TranslateError::UnsupportedType(format!(
+                "`{}` reaches itself: a shader function cannot recurse",
+                site.callee
+            )));
+        }
+        let prefix = unique_prefix(&site, &mut used);
+        inline_call(func, &site, &callee, &prefix)?;
     }
     Ok(())
+}
+
+/// Namespace prefix for one inlined call, unique inside the caller.
+///
+/// The instruction index alone is not unique: it counts inside a block, so two
+/// calls of the same helper in two blocks at the same position would produce the
+/// same labels and the caller would be rejected as having a duplicate block.
+/// The block index disambiguates, and it is only spent when the plain prefix is
+/// already taken — a shader without such a collision keeps the names it had.
+fn unique_prefix(site: &CallSite, used: &mut HashSet<String>) -> String {
+    let plain = format!("{}#{}.", site.callee, site.instr);
+    if used.insert(plain.clone()) {
+        return plain;
+    }
+    let disambiguated = format!("{}#{}.{}.", site.callee, site.block, site.instr);
+    used.insert(disambiguated.clone());
+    disambiguated
 }
 
 /// The first call in `func` that names an inlinable helper.
@@ -150,7 +223,16 @@ fn inline_call(
     caller: &mut LlvmFunc,
     site: &CallSite,
     callee: &LlvmFunc,
+    prefix: &str,
 ) -> Result<(), TranslateError> {
+    // The inliner runs before lowering, so the site would still name the last
+    // line the parser read. Point it at the call being inlined instead.
+    crate::site::enter_function(&caller.name);
+    crate::site::enter_block(&format!(
+        "{} (inlined from {})",
+        caller.blocks[site.block].label, callee.name
+    ));
+    crate::site::enter_instruction(&format!("call @{}", site.callee));
     let (dst, args) = match &caller.blocks[site.block].instrs[site.instr] {
         Instr::Call { dst, args, .. } => (Some(dst.clone()), args.clone()),
         Instr::CallVoid { args, .. } => (None, args.clone()),
@@ -170,8 +252,7 @@ fn inline_call(
         .map(|(_, name)| name.clone())
         .zip(args)
         .collect();
-    let prefix = format!("{}#{}.", callee.name, site.instr);
-    let entry = prefixed_label(&prefix, &callee.blocks[0].label);
+    let entry = prefixed_label(prefix, &callee.blocks[0].label);
     let continuation = format!("{prefix}cont");
     let slot = match &dst {
         Some(_) if matches!(callee.ret_ty, Ty::Float | Ty::I32) => Some(format!("{prefix}ret")),
@@ -189,7 +270,7 @@ fn inline_call(
             callee.name
         )));
     }
-    let blocks = renamed_blocks(callee, &prefix, &subst, &continuation, &slot)?;
+    let blocks = renamed_blocks(callee, prefix, &subst, &continuation, &slot)?;
     splice_call(
         caller,
         site,
@@ -299,7 +380,15 @@ fn splice_call(
             },
         );
     }
+    let split_label = caller.blocks[site.block].label.clone();
     caller.blocks[site.block].term = Terminator::BrUncond(entry);
+    // What followed the call now runs in the continuation, so a successor that
+    // names the split block in a `phi` has to name the continuation instead:
+    // the value it receives is defined there. Without this the merge sees a
+    // predecessor that no longer branches to it and the edge has no value.
+    for block in &mut caller.blocks {
+        rewrite_phi_predecessor(block, &split_label, &continuation);
+    }
     caller.blocks.extend(blocks);
     caller.blocks.push(BasicBlock {
         label: continuation,
@@ -307,6 +396,20 @@ fn splice_call(
         term: old_term,
     });
     Ok(())
+}
+
+/// Point `phi` incoming blocks named `old` at `new`.
+fn rewrite_phi_predecessor(block: &mut BasicBlock, old: &str, new: &str) {
+    for instr in &mut block.instrs {
+        let Instr::Phi { incoming, .. } = instr else {
+            continue;
+        };
+        for (_, predecessor) in incoming.iter_mut() {
+            if predecessor == old {
+                *predecessor = new.to_string();
+            }
+        }
+    }
 }
 
 /// What a callee terminator's rewrite needs.

@@ -139,6 +139,77 @@ start:
     );
 }
 
+/// Two calls of the same pointer helper, one per branch, at the same position
+/// in each block: the inlined namespaces must not collide.
+///
+/// The prefix used to be the instruction index alone, which counts inside a
+/// block, so both calls produced the same labels and the caller was rejected as
+/// having a duplicate block — on valid code.
+#[test]
+fn two_calls_in_different_blocks_get_distinct_namespaces() {
+    let ir = r#"
+define internal float @pick(ptr %p, i32 %offset) {
+start:
+  %at = getelementptr inbounds nuw float, ptr %p, i32 %offset
+  %value = load float, ptr %at, align 4
+  ret float %value
+}
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %buf = alloca [4 x float], align 4
+  store float 1.000000e+00, ptr %buf, align 4
+  %even = icmp eq i32 %id, 0
+  br i1 %even, label %left, label %right
+left:
+  %a = call float @pick(ptr %buf, i32 0)
+  br label %merge
+right:
+  %b = call float @pick(ptr %buf, i32 1)
+  br label %merge
+merge:
+  %r = phi float [ %a, %left ], [ %b, %right ]
+  call void @storage_write_f32(i32 0, i32 0, i32 %id, float %r)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("two calls of one pointer helper");
+    assert!(
+        !translated.wgsl.contains("fn pick"),
+        "the helper is inlined: {}",
+        translated.wgsl
+    );
+}
+
+/// Many inlines in one function are not recursion.
+///
+/// The cap used to be the recursion check, so a kernel with more than 256
+/// inlined calls was reported as a cycle that did not exist.
+#[test]
+fn many_inlines_are_not_reported_as_recursion() {
+    let calls: String = (0..300)
+        .map(|_| "  %v = call float @pick(ptr %buf, i32 0)\n  store float %v, ptr %buf, align 4\n")
+        .collect();
+    let ir = format!(
+        r#"
+define internal float @pick(ptr %p, i32 %offset) {{
+start:
+  %at = getelementptr inbounds nuw float, ptr %p, i32 %offset
+  %value = load float, ptr %at, align 4
+  ret float %value
+}}
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {{
+start:
+  %buf = alloca [4 x float], align 4
+{calls}  ret void
+}}
+"#
+    );
+    let translated = translate(&ir).expect("300 inlined calls are not a cycle");
+    assert!(!translated.wgsl.contains("fn pick"));
+}
+
 /// A helper that reaches a barrier may not be called in divergent control
 /// flow: the check has to follow the call, not only the body being lowered.
 #[test]

@@ -21,7 +21,13 @@ fn namespaced(
 ) -> Result<String, TranslateError> {
     match subst.get(name) {
         Some(Operand::Local(replacement)) => Ok(replacement.clone()),
-        Some(_) => Err(TranslateError::unsupported()),
+        // A name is required here — the caller is rewriting a `ptr` operand, or
+        // the destination of an instruction — so a constant argument has
+        // nowhere to go. `Operand` positions substitute the constant itself.
+        Some(other) => Err(TranslateError::UnsupportedType(format!(
+            "`{name}` is used as a pointer inside the inlined helper but was called with {other:?}: \
+             a pointer has to be a local or a global, and inlining cannot carry a constant address"
+        ))),
         None => Ok(format!("{prefix}{name}")),
     }
 }
@@ -1416,8 +1422,19 @@ impl Instr {
             let Operand::Local(name) = operand else {
                 return Ok(());
             };
-            *name = namespaced(name, prefix, subst)?;
-            Ok(())
+            // A parameter bound to a constant becomes that constant: the call
+            // site's `i32 0` is a value, and turning it into a name was what
+            // made a helper with a constant offset un-inlinable.
+            match subst.get(name.as_str()) {
+                Some(replacement) => {
+                    *operand = replacement.clone();
+                    Ok(())
+                }
+                None => {
+                    *name = format!("{prefix}{name}");
+                    Ok(())
+                }
+            }
         };
         let define = |dst: &mut String| *dst = format!("{prefix}{dst}");
         let pointer = |name: &mut String| -> Result<(), TranslateError> {
