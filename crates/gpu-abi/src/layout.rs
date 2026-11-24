@@ -61,16 +61,20 @@ pub const TYPE_TAG_NESTED: u8 = 16;
 
 /// Layout of `array<element, len>` in the uniform address space.
 ///
-/// WGSL gives the array the element's alignment and the element stride rounded
-/// up to the uniform alignment, so the last element contributes its own size
-/// and not a full stride.
+/// WGSL rounds a uniform array up to the 16-byte uniform alignment on both
+/// counts: `AlignOf(array<E, N>)` is `roundUp(16, AlignOf(E))` and
+/// `SizeOf(array<E, N>)` is `N * roundUp(AlignOf(array), SizeOf(E))`. Every
+/// element therefore occupies a full stride, the last one included — the
+/// storage-space rule (`(N - 1) * stride + SizeOf(E)`), which this used to
+/// apply, under-sizes an array of anything narrower than 16 bytes and lets the
+/// next field overlap it.
 #[must_use]
 pub const fn array_layout(element: FieldLayout, len: u32) -> FieldLayout {
     assert!(len > 0, "a uniform array has at least one element");
     let stride = uniform_stride(element.size, element.align);
     FieldLayout {
-        size: (len - 1) * stride + element.size,
-        align: element.align,
+        size: len * stride,
+        align: round_up(element.align, UNIFORM_STRUCT_ALIGN),
     }
 }
 
@@ -450,13 +454,19 @@ mod tests {
     }
 
     #[test]
-    fn a_uniform_array_rounds_its_stride_up_to_16() {
-        // A `vec2` element is 8 bytes: the stride is 16, so four of them span
-        // `3 * 16 + 8`.
+    fn a_uniform_array_rounds_its_stride_and_its_size_up_to_16() {
+        // A `vec2` element is 8 bytes: the stride is 16, and every element
+        // occupies a full stride, so four of them span 64 bytes and align to 16.
         let pair = FieldLayout { size: 8, align: 8 };
         let array = array_layout(pair, 4);
-        assert_eq!(array.size, 3 * 16 + 8);
-        assert_eq!(array.align, 8);
+        assert_eq!(array.size, 4 * 16);
+        assert_eq!(array.align, 16);
+        // A `vec4` element already fills its stride, so the two rules agree.
+        let quad = FieldLayout {
+            size: 16,
+            align: 16,
+        };
+        assert_eq!(array_layout(quad, 3).size, 3 * 16);
     }
 
     #[test]
@@ -468,10 +478,10 @@ mod tests {
         ];
         let mut offsets = [0u32; 3];
         let span = place_fields(&fields, true, &mut offsets);
-        // The `f32` sits at 0, the array aligns to 8, the trailing `f32`
-        // follows the array's own size: `8 + (16 + 8) = 32`.
-        assert_eq!(offsets, [0, 8, 32]);
-        assert_eq!(span, 48);
+        // The `f32` sits at 0, the array aligns to 16 and spans two full
+        // strides, so the trailing `f32` lands at 32 and the struct ends at 48.
+        assert_eq!(offsets, [0, 16, 48]);
+        assert_eq!(span, 64);
     }
 
     /// `vec2<f32>`: eight bytes, aligned to eight.

@@ -251,22 +251,20 @@ fn parse_uniforms(value: &str, structs: &mut BTreeMap<u32, Vec<u8>>) -> Result<(
         let mut tags = Vec::new();
         let mut index = 0;
         while index < bytes.len() {
-            let tag = bytes[index];
-            index += 1;
-            if !tag.is_ascii_digit() {
+            let Some(tag) = digit(bytes[index]) else {
                 return Err(TranslateError::UnsupportedType(format!(
                     "uniform field tag `{}` is not a digit",
-                    char::from(tag)
+                    char::from(bytes[index])
                 )));
-            }
-            let tag = tag - b'0';
+            };
+            index += 1;
             if tag == ornis_gpu_abi::TYPE_TAG_STRUCT {
                 tags.push(nested_tag(bytes, &mut index)?);
             } else if tag == ornis_gpu_abi::TYPE_TAG_ARRAY {
                 // `8`, the element's tag (itself `7` plus an id for an array of
                 // structs) and the length. The parsed form keeps the three
                 // bytes, so every later walk over the list needs a cursor.
-                let element = match bytes.get(index).copied().map(|b| b - b'0') {
+                let element = match bytes.get(index).copied().and_then(digit) {
                     Some(ornis_gpu_abi::TYPE_TAG_STRUCT) => {
                         index += 1;
                         nested_tag(bytes, &mut index)?
@@ -281,7 +279,7 @@ fn parse_uniforms(value: &str, structs: &mut BTreeMap<u32, Vec<u8>>) -> Result<(
                         ));
                     }
                 };
-                let Some(length) = bytes.get(index).copied().map(|b| b - b'0') else {
+                let Some(length) = bytes.get(index).copied().and_then(digit) else {
                     return Err(TranslateError::UnsupportedType(
                         "array field needs a length".to_string(),
                     ));
@@ -307,6 +305,15 @@ fn parse_uniforms(value: &str, structs: &mut BTreeMap<u32, Vec<u8>>) -> Result<(
     Ok(())
 }
 
+/// Value of one base-10 digit byte, or `None` for anything else.
+///
+/// The wire format is one byte per tag, so every field of the encoding is a
+/// digit. Subtracting `b'0'` without checking underflowed on a stray byte —
+/// panicking in a debug build and wrapping in a release one.
+fn digit(byte: u8) -> Option<u8> {
+    byte.is_ascii_digit().then(|| byte - b'0')
+}
+
 /// Parse the struct id that follows a nested-struct tag at `index`.
 fn nested_tag(bytes: &[u8], index: &mut usize) -> Result<u8, TranslateError> {
     let Some(id_byte) = bytes.get(*index).copied() else {
@@ -315,11 +322,39 @@ fn nested_tag(bytes: &[u8], index: &mut usize) -> Result<u8, TranslateError> {
         ));
     };
     *index += 1;
-    if !id_byte.is_ascii_digit() {
-        return Err(TranslateError::UnsupportedType(format!(
+    let id = digit(id_byte).ok_or_else(|| {
+        TranslateError::UnsupportedType(format!(
             "uniform field tag `{}` is not a digit",
             char::from(id_byte)
-        )));
+        ))
+    })?;
+    Ok(ornis_gpu_abi::TYPE_TAG_NESTED + id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_uniforms;
+    use std::collections::BTreeMap;
+
+    /// A byte that is not a digit is a malformed record, not a wrap-around.
+    ///
+    /// The parser subtracted `b'0'` from every tag byte, so `'a'` underflowed —
+    /// a panic in a debug build and a nonsense tag in a release one.
+    #[test]
+    fn a_non_digit_tag_is_an_error() {
+        let mut structs = BTreeMap::new();
+        let error = parse_uniforms("0:1a", &mut structs).expect_err("not a digit");
+        assert!(
+            error.to_string().contains("not a digit"),
+            "the rejection must name the byte: {error}"
+        );
     }
-    Ok(ornis_gpu_abi::TYPE_TAG_NESTED + (id_byte - b'0'))
+
+    /// A `vec4` followed by a `u32` is two scalar tags, in order.
+    #[test]
+    fn scalar_tags_keep_their_order() {
+        let mut structs = BTreeMap::new();
+        parse_uniforms("0:62", &mut structs).expect("two scalar tags");
+        assert_eq!(structs.get(&0), Some(&vec![6, 2]));
+    }
 }

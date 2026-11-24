@@ -35,11 +35,11 @@ fn capabilities(module: &naga::Module) -> naga::valid::Capabilities {
     capabilities
 }
 
-/// Validate `module`, print WGSL, and emit compute SPIR-V.
+/// Validate `module`, print WGSL, and emit the SPIR-V for it.
 ///
-/// Vertex and fragment SPIR-V are not emitted by this translator; it
-/// produces compute-only modules because the LLVM IR subset it supports
-/// describes a single scalar compute function.
+/// The SPIR-V is the same module the WGSL is printed from, so it covers every
+/// stage the module declares — compute, vertex and fragment alike. It used to
+/// be compute-only, back when the subset was one scalar kernel.
 pub(super) fn emit(module: &naga::Module) -> Result<Translated, TranslateError> {
     let info =
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities(module))

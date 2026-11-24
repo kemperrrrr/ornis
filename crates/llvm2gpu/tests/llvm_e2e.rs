@@ -139,6 +139,67 @@ start:
     );
 }
 
+/// The result type of a call comes from the IR, not from the callee's name.
+///
+/// It used to be guessed from substrings (`umin`, `_u32`, `fptoui`, …), so an
+/// intrinsic the list did not know — `llvm.fptosi.sat` — was taken for `f32` and
+/// a value carried out of a loop failed to spill with "type doesn't match".
+#[test]
+fn a_call_result_type_comes_from_the_ir() {
+    let ir = r#"
+declare i32 @llvm.fptosi.sat.i32.f32(float)
+declare void @storage_write_u32(i32, i32, i32, i32)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %f = uitofp i32 %id to float
+  %i = call noundef i32 @llvm.fptosi.sat.i32.f32(float %f)
+  call void @storage_write_u32(i32 0, i32 0, i32 %id, i32 %i)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("a saturating float-to-int intrinsic");
+    assert!(
+        translated.wgsl.contains("i32") || translated.wgsl.contains("u32"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+/// `select` carries the type of the values it chooses between, so a selected
+/// value can be spilled out of a loop.
+#[test]
+fn a_selected_value_spills_out_of_a_loop() {
+    let ir = r#"
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %zero = uitofp i32 %id to float
+  br label %header
+header:
+  %i = phi i32 [ 0, %start ], [ %next, %latch ]
+  %acc = phi float [ %zero, %start ], [ %picked, %latch ]
+  %next = add i32 %i, 1
+  %done = icmp ugt i32 %next, 3
+  br i1 %done, label %exit, label %latch
+latch:
+  %large = fcmp ogt float %acc, 1.000000e+00
+  %picked = select i1 %large, float %acc, float 2.000000e+00
+  br label %header
+exit:
+  call void @storage_write_f32(i32 0, i32 0, i32 %id, float %acc)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("a selected accumulator");
+    // The selected value leaves the loop through its own slot instead of being
+    // rejected as a value of unknown type.
+    assert!(
+        translated.wgsl.contains("out_u002e_acc"),
+        "the selected accumulator is not spilled: {}",
+        translated.wgsl
+    );
+}
+
 /// Two calls of the same pointer helper, one per branch, at the same position
 /// in each block: the inlined namespaces must not collide.
 ///

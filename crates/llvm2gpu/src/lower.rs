@@ -4007,7 +4007,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 let v = self.compare_int(out, pred, a, b)?;
                 self.bind(dst, v, out);
             }
-            Instr::Select { dst, c, a, b } => {
+            Instr::Select {
+                dst,
+                ty: _,
+                c,
+                a,
+                b,
+            } => {
                 if let Some(pointer) = self.pointer_select(dst, c, a, b, out)? {
                     let _ = pointer;
                     return Ok(());
@@ -4065,7 +4071,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                     self.bind(dst, value, out);
                 }
             }
-            Instr::Call { dst, callee, args } => {
+            Instr::Call {
+                dst,
+                ty: _,
+                callee,
+                args,
+            } => {
                 let v = self.call_value(out, callee, args)?;
                 self.bind(dst, v, out);
             }

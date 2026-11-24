@@ -16,8 +16,6 @@ pub enum TranslateError {
     Unsupported(String),
     /// A storage element the lowerer will not emit, or a layout mismatch.
     UnsupportedType(String),
-    /// `vs_main` or `fs_main` was not emitted.
-    MissingEntry(&'static str),
     /// Naga rejected the lowered module or a round-trip.
     Naga(String),
 }
@@ -41,7 +39,6 @@ impl fmt::Display for TranslateError {
                 write!(f, "llvm ir is outside the supported subset {site}")
             }
             Self::UnsupportedType(msg) => f.write_str(msg),
-            Self::MissingEntry(name) => write!(f, "missing entry {name}"),
             Self::Naga(msg) => f.write_str(msg),
         }
     }

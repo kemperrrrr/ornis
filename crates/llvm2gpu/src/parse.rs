@@ -139,6 +139,9 @@ pub(super) enum Instr {
     /// `select i1 %c, float %a, float %b`
     Select {
         dst: Name,
+        /// Type of the selected values: the IR spells it on the operands, and
+        /// it is what a value spilled out of a loop needs.
+        ty: Ty,
         c: Operand,
         a: Operand,
         b: Operand,
@@ -161,6 +164,10 @@ pub(super) enum Instr {
     /// `call float @name(...)`
     Call {
         dst: Name,
+        /// Result type the IR spells on the call (`call float @x`,
+        /// `call noundef i32 @y`). It used to be guessed from the callee's
+        /// name, so an intrinsic the list did not know was taken for `f32`.
+        ty: Ty,
         callee: String,
         args: Vec<Operand>,
     },
@@ -858,7 +865,9 @@ fn parse_void_line(line: &str) -> Result<Option<Instr>, TranslateError> {
         return Ok(Some(parse_store(rest)?));
     }
     if line.starts_with("call ") {
-        let (callee, args) = parse_call(line)?;
+        // `call void @name(...)` — the type is `void`, so the result type the
+        // value form parses carries nothing here.
+        let (_, callee, args) = parse_call(line)?;
         return Ok(Some(Instr::CallVoid { callee, args }));
     }
     if line.starts_with("load ") || line.contains("getelementptr") || line.contains("call") {
@@ -1006,7 +1015,7 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
     // `call void @name(...)` without assignment.
     let stripped = line.strip_prefix("tail ").unwrap_or(line).trim();
     if stripped.starts_with("call ") {
-        let (callee, args) = parse_call(stripped)?;
+        let (_, callee, args) = parse_call(stripped)?;
         return Ok(Some(Instr::CallVoid { callee, args }));
     }
     // `%dst = ...`
@@ -1018,8 +1027,14 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
     // Strip `tail` marker.
     let rhs = rhs.strip_prefix("tail ").unwrap_or(rhs).trim();
     if rhs.starts_with("call ") {
-        let (callee, args) = parse_call(rhs)?;
-        return Ok(Some(Instr::Call { dst, callee, args }));
+        let (ty, callee, args) = parse_call(rhs)?;
+        let ty = ty.ok_or_else(|| TranslateError::Parse("void call with a result".to_string()))?;
+        return Ok(Some(Instr::Call {
+            dst,
+            ty,
+            callee,
+            args,
+        }));
     }
     let tokens: Vec<String> = rhs.split_whitespace().map(String::from).collect();
     if tokens.is_empty() {
@@ -1152,7 +1167,13 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
             let c = parse_operand(tokens[2].trim_end_matches(','))?;
             let a = parse_typed_operand(tokens[4].trim_end_matches(','), value_ty)?;
             let b = parse_typed_operand(tokens[6].trim_end_matches(','), value_ty)?;
-            Ok(Some(Instr::Select { dst, c, a, b }))
+            Ok(Some(Instr::Select {
+                dst,
+                ty: value_ty,
+                c,
+                a,
+                b,
+            }))
         }
         "uitofp" | "sitofp" => {
             // `uitofp nneg i32 %a to float` — rustc marks unsigned casts `nneg`.
@@ -1275,10 +1296,22 @@ fn parse_compare(tokens: &[String]) -> Result<(String, Operand, Operand), Transl
 }
 
 /// Parse `call float @name(float %a, float %b)`.
-fn parse_call(rhs: &str) -> Result<(String, Vec<Operand>), TranslateError> {
+///
+/// The result type comes from the IR: `call` is followed by attributes and the
+/// type (`call noundef i32 @x`). Reading it here is what lets an intrinsic the
+/// translator does not know still have the right type.
+fn parse_call(rhs: &str) -> Result<(Option<Ty>, String, Vec<Operand>), TranslateError> {
     let at = rhs
         .find('@')
         .ok_or(TranslateError::Parse("call without @".to_string()))?;
+    let ty = rhs[..at]
+        .split_whitespace()
+        .filter(|token| !matches!(*token, "call" | "tail" | "musttail" | "notail"))
+        // Attributes rustc prints before the type: `noundef`, `zeroext`,
+        // `signext`, `range(...)`, calling conventions.
+        .rfind(|token| !is_call_attribute(token))
+        .ok_or_else(|| TranslateError::Parse("call without a result type".to_string()))?;
+    let ty = parse_ty(ty.trim())?;
     let after = &rhs[at + 1..];
     let open = after
         .find('(')
@@ -1288,9 +1321,10 @@ fn parse_call(rhs: &str) -> Result<(String, Vec<Operand>), TranslateError> {
         .rfind(')')
         .ok_or(TranslateError::Parse("call without )".to_string()))?;
     let inner = &after[open + 1..close];
+    let result = (ty != Ty::Void).then_some(ty);
     let mut args = Vec::new();
     if inner.trim().is_empty() {
-        return Ok((callee, args));
+        return Ok((result, callee, args));
     }
     for arg in split_top(inner) {
         // `i32 noundef %id` and `float 1.0`: the value is the last token.
@@ -1304,7 +1338,35 @@ fn parse_call(rhs: &str) -> Result<(String, Vec<Operand>), TranslateError> {
             args.push(parse_operand(value)?);
         }
     }
-    Ok((callee, args))
+    Ok((result, callee, args))
+}
+
+/// Whether `token` is a call attribute rather than the result type.
+fn is_call_attribute(token: &str) -> bool {
+    token.starts_with("range(")
+        || token.starts_with("ptr")
+        || matches!(
+            token,
+            "noundef"
+                | "zeroext"
+                | "signext"
+                | "nonnull"
+                | "noalias"
+                | "nosync"
+                | "inreg"
+                | "fastcc"
+                | "ccc"
+                | "coldcc"
+                | "mustprogress"
+                | "nofree"
+                | "nomerge"
+                | "nounwind"
+                | "willreturn"
+                | "speculatable"
+                | "noinline"
+                | "alwaysinline"
+                | "optnone"
+        )
 }
 
 /// An operand whose `poison`/`undef` becomes a zero of the expected type.
@@ -1382,6 +1444,7 @@ fn parse_zext(dst: &str, tokens: &[String]) -> Result<Option<Instr>, TranslateEr
     }
     Ok(Some(Instr::Select {
         dst: dst.to_string(),
+        ty: Ty::I32,
         c: value,
         a: Operand::U32(1),
         b: Operand::U32(0),
@@ -1474,7 +1537,13 @@ impl Instr {
                 define(dst);
                 apply(a)?;
             }
-            Self::Select { dst, c, a, b } => {
+            Self::Select {
+                dst,
+                ty: _,
+                c,
+                a,
+                b,
+            } => {
                 define(dst);
                 apply(c)?;
                 apply(a)?;
@@ -1664,8 +1733,8 @@ impl Instr {
             Self::Fcmp { .. } | Self::Icmp { .. } => Some(Ty::I1),
             Self::Phi { ty, .. } => Some(*ty),
             Self::Bitcast { to, .. } => Some(*to),
-            Self::Select { .. } => None,
-            Self::Call { callee, .. } => call_value_ty(callee),
+            Self::Select { ty, .. } => Some(*ty),
+            Self::Call { ty, .. } => Some(*ty),
             Self::Load { ty, .. } => Some(*ty),
             Self::Alloca { .. } | Self::GetElementPtr { .. } | Self::Store { .. } => None,
             Self::CallVoid { .. } | Self::Ret { .. } | Self::RetVoid => None,
@@ -1687,28 +1756,6 @@ fn visit_triple<'a>(
     visit(a);
     visit(b);
     visit(c);
-}
-
-fn call_value_ty(callee: &str) -> Option<Ty> {
-    if int_call(callee) {
-        Some(Ty::I32)
-    } else {
-        // Every other value call in this subset returns `f32`, including
-        // `llvm.maximumnum` and `gpu_clamp`, which the older name list missed.
-        Some(Ty::Float)
-    }
-}
-
-fn int_call(callee: &str) -> bool {
-    callee.contains("umin")
-        || callee.contains("umax")
-        || callee.contains("smin")
-        || callee.contains("smax")
-        || callee.contains("atomic")
-        || callee.contains("_u32")
-        || callee.contains("fptoui")
-        || callee.contains("texture_width_2d")
-        || callee.contains("texture_height_2d")
 }
 
 /// Split on `,` ignoring parentheses depth.

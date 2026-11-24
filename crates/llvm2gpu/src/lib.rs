@@ -121,7 +121,13 @@ pub fn translate_with_meta_and_sampling(
     llvm_ir: &str,
     sampling: TextureSampling,
 ) -> Result<Translated, TranslateError> {
-    translate_entries(llvm_ir, None, sampling)
+    translate_module(
+        llvm_ir,
+        None,
+        sampling,
+        Workgroup::PerEntry,
+        Tables::FromMeta,
+    )
 }
 
 /// Translate one named entry: the single-entry form `xtask build-shaders
@@ -136,14 +142,26 @@ pub fn translate_entry_with_sampling(
     entry: &str,
     sampling: TextureSampling,
 ) -> Result<Translated, TranslateError> {
-    translate_entries(llvm_ir, Some(entry), sampling)
+    translate_module(
+        llvm_ir,
+        Some(entry),
+        sampling,
+        Workgroup::PerEntry,
+        Tables::FromMeta,
+    )
 }
 
 /// Translate every entry, or only `entry` when one is named.
-fn translate_entries(
+///
+/// `workgroup` is [`Workgroup::PerEntry`] for a kernel built with
+/// `#[gpu_entry]`, whose metadata carries the size, and a fixed size for the
+/// hand-written IR of the tests, which has no metadata to read it from.
+fn translate_module(
     llvm_ir: &str,
     only: Option<&str>,
     sampling: TextureSampling,
+    workgroup: Workgroup,
+    tables: Tables<'_>,
 ) -> Result<Translated, TranslateError> {
     // Every define is parsed: a kernel may call a function of its own crate,
     // and those helpers are lowered into the same module. A helper whose
@@ -168,9 +186,18 @@ fn translate_entries(
     if funcs.is_empty() {
         return Err(TranslateError::unsupported());
     }
-    let metas = meta::extract(llvm_ir)?;
-    let structs = merge_tables(&metas)?;
-    let refs: Vec<&[u8]> = structs.iter().map(Vec::as_slice).collect();
+    let metas = match workgroup {
+        Workgroup::PerEntry => meta::extract(llvm_ir)?,
+        Workgroup::Fixed(_) => Vec::new(),
+    };
+    let merged;
+    let refs: Vec<&[u8]> = match tables {
+        Tables::FromMeta => {
+            merged = merge_tables(&metas)?;
+            merged.iter().map(Vec::as_slice).collect()
+        }
+        Tables::Explicit(structs) => structs.to_vec(),
+    };
     let mut lowering = lower::Lowering::new(&refs, sampling);
     lowering.reserve_skipped(skipped);
     lowering.reserve_noreturn(noreturn);
@@ -179,13 +206,34 @@ fn translate_entries(
     lowering.reserve_barriers(&module);
     lowering.add_helpers(&module)?;
     for func in &funcs {
-        let workgroup = metas
-            .iter()
-            .find(|meta| meta.entry == func.name)
-            .map_or(ornis_gpu_abi::symbols::CS_WORKGROUP, |meta| meta.workgroup);
-        lowering.push(func, workgroup)?;
+        let size = match workgroup {
+            Workgroup::PerEntry => metas
+                .iter()
+                .find(|meta| meta.entry == func.name)
+                .map_or(ornis_gpu_abi::symbols::CS_WORKGROUP, |meta| meta.workgroup),
+            Workgroup::Fixed(size) => size,
+        };
+        lowering.push(func, size)?;
     }
     emit::emit(&lowering.finish())
+}
+
+/// Where the uniform-struct table comes from.
+#[derive(Clone, Copy)]
+enum Tables<'a> {
+    /// The `ornis_gpu.types` records of the module, one table per crate.
+    FromMeta,
+    /// A table the caller passes, as the hand-written IR of the tests does.
+    Explicit(&'a [&'a [u8]]),
+}
+
+/// Where an entry's `@workgroup_size` comes from.
+#[derive(Clone, Copy)]
+enum Workgroup {
+    /// From the `#[gpu_entry]` metadata of each entry.
+    PerEntry,
+    /// One size for every entry: hand-written IR declares none.
+    Fixed([u32; 3]),
 }
 
 /// Merge the uniform-struct tables of every entry record.
@@ -267,19 +315,11 @@ pub fn translate_with_types_and_workgroup(
     structs: &[&[u8]],
     workgroup: [u32; 3],
 ) -> Result<Translated, TranslateError> {
-    let parsed = parse::parse_module(llvm_ir)?;
-    let skipped = parsed.skipped;
-    let noreturn = parsed.noreturn;
-    let module = inline::inline_pointer_calls(parsed.funcs)?;
-    let mut lowering = lower::Lowering::new(structs, TextureSampling::SingleSample);
-    lowering.reserve_skipped(skipped);
-    lowering.reserve_noreturn(noreturn);
-    lowering.reserve_diverging(&module);
-    lowering.reserve_definitions(&module);
-    lowering.reserve_barriers(&module);
-    lowering.add_helpers(&module)?;
-    for func in module.iter().filter(|func| parse::is_entry(&func.name)) {
-        lowering.push(func, workgroup)?;
-    }
-    emit::emit(&lowering.finish())
+    translate_module(
+        llvm_ir,
+        None,
+        TextureSampling::SingleSample,
+        Workgroup::Fixed(workgroup),
+        Tables::Explicit(structs),
+    )
 }
