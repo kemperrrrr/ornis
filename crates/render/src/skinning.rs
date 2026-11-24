@@ -4,8 +4,8 @@
 //! rows ([`crate::extraction`] skin entries). This module stages the
 //! same final joint matrices (`model * inverse_bind`) as a storage palette
 //! ([`JointPalette`]) and blends them in the vertex stage
-//! (`vs_main_skinned`, DSL-only — no handwritten WGSL outside generated
-//! sources). Bind-pose vertices ride `SkinnedVertexInput` (joints as
+//! (`vs_main_skinned`, an llvm2gpu artifact — no hand-written WGSL outside
+//! generated sources). Bind-pose vertices ride `SkinnedVertexInput` (joints as
 //! `vec4<u32>`, weights as `vec4<f32>`); the varying is the shared
 //! `GbufferVertexOutput` (private shader-interface struct),
 //! so the fragment stage is untouched.
@@ -36,7 +36,7 @@ use crate::shaders::{Resource, ResourceKind};
 
 /// GPU parity and A/B harness for the experimental wasm2gpu compute
 /// skinning guest (issue #228): a Rust→Wasm→WGSL pre-pass next to the
-/// DSL vertex-stage path above, which it does not touch.
+/// translated vertex-stage path above, which it does not touch.
 #[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
 pub mod wasm2gpu;

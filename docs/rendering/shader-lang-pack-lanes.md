@@ -1,5 +1,11 @@
 # Pack-лейны: `#[pack(gpu)]` + `#[gpu_pipeline(pack(T))]` (RAT-50, feature 2)
 
+> **Статус (исторический документ).** Описывает механизм DSL (`shader-lang`,
+> `#[kernel]`/`#[gpu_pipeline]`), удалённый на этапе 5 миграции на llvm2gpu
+> (#263). Оставлен как запись решения: ограничения, из-за которых механизм
+> такой, и как они решались. Актуальный путь «Rust → WGSL» —
+> [rust-to-wgsl-architecture.md](rust-to-wgsl-architecture.md).
+
 Задача: https://github.com/kemperrrrr/ornis/issues/110 (часть 2 из 3).
 
 ## Проблема
