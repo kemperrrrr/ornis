@@ -107,6 +107,36 @@ impl Lowering {
         }
     }
 
+    /// Remember the helpers that reach a workgroup barrier, transitively.
+    ///
+    /// The divergence check in the lowering only sees the function it is
+    /// lowering, so a helper that calls `workgroup_barrier` and is itself
+    /// called under an `if` would emit a barrier half the workgroup reaches.
+    /// Naga does not reject that and native drivers make it undefined
+    /// behaviour, so the call site has to know.
+    pub(super) fn reserve_barriers(&mut self, funcs: &[LlvmFunc]) {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for func in funcs {
+                if self.builders.barriered.contains(&func.name) {
+                    continue;
+                }
+                let reaches = func.blocks.iter().any(|block| {
+                    block.instrs.iter().any(|instr| match instr {
+                        Instr::Call { callee, .. } | Instr::CallVoid { callee, .. } => {
+                            is_barrier(callee) || self.builders.barriered.contains(callee)
+                        }
+                        _ => false,
+                    })
+                });
+                if reaches {
+                    changed |= self.builders.barriered.insert(func.name.clone());
+                }
+            }
+        }
+    }
+
     /// Remember the functions that never return, so their call sites can be
     /// dropped instead of translated.
     pub(super) fn reserve_diverging(&mut self, funcs: &[LlvmFunc]) {
@@ -493,6 +523,14 @@ const IO_IMPORTS: [(&str, IoImport); 18] = [
 ];
 
 /// Import one callee names, if it is a stage-interface import at all.
+/// Whether `callee` is a workgroup barrier import.
+fn is_barrier(callee: &str) -> bool {
+    matches!(
+        symbol::imported(callee),
+        "workgroup_barrier" | "storage_barrier"
+    )
+}
+
 fn io_import(callee: &str) -> Option<IoImport> {
     IO_IMPORTS
         .iter()
@@ -1394,6 +1432,9 @@ struct Builders {
     /// Names the module defines: a call to one is a helper call, and every other
     /// callee is an import or an intrinsic.
     defined: HashSet<String>,
+    /// Helpers that reach a workgroup barrier, directly or through another
+    /// helper. A call to one is only uniform when its call site is.
+    barriered: HashSet<String>,
     /// Functions whose every path ends in `unreachable` (the panic shims).
     ///
     /// A call to one never returns, so the translator drops it and lets the
@@ -1424,6 +1465,7 @@ impl Builders {
             helpers: HashMap::new(),
             skipped_helpers: HashMap::new(),
             defined: HashSet::new(),
+            barriered: HashSet::new(),
             diverging: HashSet::new(),
             structs: structs.iter().map(|tags| tags.to_vec()).collect(),
             sampling,
@@ -4308,6 +4350,14 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             )));
         }
         if let Some(helper) = self.builders.helpers.get(callee).copied() {
+            if self.builders.barriered.contains(callee)
+                && (self.divergent_depth > 0 || self.diverged)
+            {
+                return Err(TranslateError::UnsupportedType(format!(
+                    "`{callee}` reaches workgroup_barrier and is called in divergent control flow: \
+                     every invocation of a workgroup must reach a barrier together"
+                )));
+            }
             self.call_helper_void(out, helper, args)?;
             return Ok(true);
         }

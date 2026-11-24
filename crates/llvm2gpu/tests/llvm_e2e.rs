@@ -90,6 +90,147 @@ start:
     assert!(translated.wgsl.contains(".y"), "{}", translated.wgsl);
 }
 
+/// The tail of a panic path inside an inlined pointer helper ends the
+/// invocation, exactly as it does in the entry's own body.
+///
+/// The inliner used to rewrite `unreachable` into a branch to the continuation,
+/// so a failed bounds check in a helper let the caller continue with the zero it
+/// had reserved for the result — writing a wrong value where the kernel meant to
+/// stop.
+#[test]
+fn unreachable_in_an_inlined_helper_ends_the_invocation() {
+    let ir = r#"
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local float @_RNvNtCs1a2b_6kernel16load_checked(ptr %p, i32 %i) {
+start:
+  %too_big = icmp ugt i32 %i, 3
+  br i1 %too_big, label %panic, label %read
+panic:
+  unreachable
+read:
+  %q = getelementptr i32, ptr %p, i32 %i
+  %v = load float, ptr %q
+  ret float %v
+}
+define dso_local void @cs_main(i32 %id) {
+start:
+  %a = alloca [4 x i32]
+  %v = call float @_RNvNtCs1a2b_6kernel16load_checked(ptr %a, i32 %id)
+  call void @storage_write_f32(i32 0, i32 0, i32 %id, float %v)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("a bounds-checked helper");
+    let body = translated.wgsl.as_str();
+    // The failing arm leaves the invocation; the write sits in the other arm.
+    let (before, after) = body.split_once("} else {").expect("two arms");
+    let panic_arm = before.rsplit('{').next().unwrap_or(before);
+    assert!(
+        panic_arm.contains("return;"),
+        "the panic arm must leave the invocation: {body}"
+    );
+    assert!(
+        !panic_arm.contains("storage_"),
+        "the panic arm must not write anything: {body}"
+    );
+    assert!(
+        after.contains("storage_0_0_"),
+        "the read arm still writes the value it loaded: {body}"
+    );
+}
+
+/// A helper that reaches a barrier may not be called in divergent control
+/// flow: the check has to follow the call, not only the body being lowered.
+#[test]
+fn a_barrier_reached_through_a_helper_is_rejected_under_a_branch() {
+    let ir = r#"
+declare void @workgroup_barrier()
+declare void @workgroup_store_u32(i32, i32)
+define void @_RNvNtCs1a2b_6kernel10sync_group(i32 %slot) {
+start:
+  call void @workgroup_barrier()
+  tail call void @workgroup_store_u32(i32 %slot, i32 1)
+  ret void
+}
+define void @cs_main(i32 %id) {
+start:
+  %lt = icmp ult i32 %id, 2
+  br i1 %lt, label %inside, label %merge
+inside:
+  tail call void @_RNvNtCs1a2b_6kernel10sync_group(i32 %id)
+  br label %merge
+merge:
+  ret void
+}
+"#;
+    let error = translate(ir).expect_err("the barrier is reached by one arm only");
+    let message = error.to_string();
+    assert!(
+        message.contains("divergent"),
+        "the rejection must say the call is divergent: {message}"
+    );
+
+    // The same helper called from straight-line code is fine: uniformity is a
+    // property of the call site, not of the helper.
+    let straight = r#"
+declare void @workgroup_barrier()
+declare void @workgroup_store_u32(i32, i32)
+define void @_RNvNtCs1a2b_6kernel10sync_group(i32 %slot) {
+start:
+  call void @workgroup_barrier()
+  tail call void @workgroup_store_u32(i32 %slot, i32 1)
+  ret void
+}
+define void @cs_main(i32 %id) {
+start:
+  tail call void @_RNvNtCs1a2b_6kernel10sync_group(i32 %id)
+  ret void
+}
+"#;
+    translate(straight).expect("a barrier every invocation reaches is uniform");
+}
+
+/// A second `getelementptr` index selects inside the element, and the
+/// instruction carries one stride and one index: dropping the index would
+/// address `buf[2j]` where the IR said `buf[2j + 1]`.
+#[test]
+fn a_gep_with_two_indices_is_rejected_not_truncated() {
+    let ir = r#"
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %p = getelementptr [2 x float], ptr null, i32 %id, i32 1
+  %v = load float, ptr %p
+  call void @storage_write_f32(i32 0, i32 0, i32 %id, float %v)
+  ret void
+}
+"#;
+    let error = translate(ir).expect_err("two GEP indices are outside the subset");
+    let message = error.to_string();
+    assert!(
+        message.contains("2 indices"),
+        "the rejection must say how many indices it refused: {message}"
+    );
+}
+
+/// The single-index form the translated kernels actually use still parses.
+#[test]
+fn a_gep_with_one_index_still_walks_the_element_stride() {
+    let ir = r#"
+declare i32 @global_invocation_lane(i32)
+declare void @storage_write_u32(i32, i32, i32, i32)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %a = alloca [4 x i32]
+  %p = getelementptr i32, ptr %a, i32 %id
+  %v = load i32, ptr %p
+  call void @storage_write_u32(i32 0, i32 0, i32 %id, i32 %v)
+  ret void
+}
+"#;
+    translate(ir).expect("a single-index getelementptr");
+}
+
 /// A helper whose body leaves the subset is an error at its call site, never a
 /// builtin that the helper's name happens to spell.
 ///

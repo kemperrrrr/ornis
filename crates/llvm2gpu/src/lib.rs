@@ -176,6 +176,7 @@ fn translate_entries(
     lowering.reserve_noreturn(noreturn);
     lowering.reserve_diverging(&module);
     lowering.reserve_definitions(&module);
+    lowering.reserve_barriers(&module);
     lowering.add_helpers(&module)?;
     for func in &funcs {
         let workgroup = metas
@@ -275,6 +276,7 @@ pub fn translate_with_types_and_workgroup(
     lowering.reserve_noreturn(noreturn);
     lowering.reserve_diverging(&module);
     lowering.reserve_definitions(&module);
+    lowering.reserve_barriers(&module);
     lowering.add_helpers(&module)?;
     for func in module.iter().filter(|func| parse::is_entry(&func.name)) {
         lowering.push(func, workgroup)?;

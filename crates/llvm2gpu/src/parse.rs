@@ -771,17 +771,33 @@ fn parse_alloca(dst: &str, rhs: &str) -> Result<Instr, TranslateError> {
 
 /// `getelementptr inbounds nuw [4 x float], ptr @G, i32 %i`.
 fn parse_gep(dst: &str, rhs: &str) -> Result<Instr, TranslateError> {
-    let (ty, base, index) = split_gep(rhs)?;
+    let (ty, base, indices) = split_gep(rhs)?;
+    // A GEP with one index walks whole elements; a second index selects inside
+    // the element (`buf[j].field`). The instruction carries one stride and one
+    // index, so a second one is a subset limit and not silently dropped: the
+    // element offset it names would disappear from the address.
+    if indices.len() != 1 {
+        return Err(TranslateError::UnsupportedType(format!(
+            "{}: a getelementptr with {} indices is outside the subset — the translator walks \
+             one element stride at a time; index the buffer to the element you need instead of \
+             reading a field through a second index",
+            crate::site::describe(),
+            indices.len()
+        )));
+    }
+    let index = indices
+        .first()
+        .ok_or_else(|| TranslateError::Parse("getelementptr without an index".to_string()))?;
     Ok(Instr::GetElementPtr {
         dst: dst.to_string(),
         base: pointer_base(&base)?,
         stride: type_bytes(&ty)?,
-        index: parse_operand(&index)?,
+        index: parse_operand(index)?,
     })
 }
 
-/// `(source type, base, index)` of a `getelementptr`.
-fn split_gep(rhs: &str) -> Result<(String, String, String), TranslateError> {
+/// `(source type, base, indices)` of a `getelementptr`.
+fn split_gep(rhs: &str) -> Result<(String, String, Vec<String>), TranslateError> {
     let rest = rhs
         .strip_prefix("getelementptr")
         .ok_or_else(|| TranslateError::Parse("getelementptr".to_string()))?;
@@ -800,18 +816,21 @@ fn split_gep(rhs: &str) -> Result<(String, String, String), TranslateError> {
     let tail = tail
         .strip_prefix("ptr ")
         .ok_or_else(|| TranslateError::Parse("getelementptr base is not a pointer".to_string()))?;
-    let (base, index) = tail
+    let (base, indices) = tail
         .split_once(',')
         .ok_or_else(|| TranslateError::Parse("getelementptr without an index".to_string()))?;
-    let index = index
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| TranslateError::Parse("getelementptr index".to_string()))?;
-    Ok((
-        ty.trim().to_string(),
-        base.trim().to_string(),
-        index.to_string(),
-    ))
+    let indices = split_top(indices)
+        .iter()
+        .map(|index| {
+            // `i32 %j` and `i32 1`: the value is the last token.
+            index
+                .split_whitespace()
+                .next_back()
+                .map(str::to_string)
+                .ok_or_else(|| TranslateError::Parse("getelementptr index".to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((ty.trim().to_string(), base.trim().to_string(), indices))
 }
 
 /// `@name` / `%name` of a `getelementptr` base.

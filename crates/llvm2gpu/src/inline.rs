@@ -348,9 +348,13 @@ fn rewrite_term(
             });
             Terminator::BrUncond(continuation.to_string())
         }
-        Terminator::Ret(None) | Terminator::Unreachable => {
-            Terminator::BrUncond(continuation.to_string())
-        }
+        // A void `ret` falls through to the continuation; `unreachable` does
+        // not. It is the tail of a panic path (a bounds check that failed), and
+        // the main lowering ends the invocation there. Rewriting it into a
+        // branch would let the caller read a result slot that was never
+        // written — a zero where the kernel meant to stop.
+        Terminator::Ret(None) => Terminator::BrUncond(continuation.to_string()),
+        Terminator::Unreachable => Terminator::Unreachable,
         Terminator::BrUncond(label) => Terminator::BrUncond(prefixed_label(prefix, &label)),
         Terminator::BrCond {
             cond,
