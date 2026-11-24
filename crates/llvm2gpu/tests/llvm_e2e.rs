@@ -2528,9 +2528,17 @@ fn gpu_outputs(translated: &ornis_llvm2gpu::Translated) -> Option<Vec<f32>> {
     Some(run_compute(&device, &queue, &translated.wgsl))
 }
 
+/// Backends the GPU gates run on.
+///
+/// Vulkan and Metal only: the integer division gates below compare against the
+/// CPU, and the GL polyfill for division by zero is not implemented by every
+/// backend behind `Backends::all()` — on llvmpipe they failed for a reason that
+/// has nothing to do with the translation.
+const GATE_BACKENDS: wgpu::Backends = wgpu::Backends::VULKAN.union(wgpu::Backends::METAL);
+
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
+        backends: GATE_BACKENDS,
         flags: wgpu::InstanceFlags::empty(),
         memory_budget_thresholds: Default::default(),
         backend_options: Default::default(),
