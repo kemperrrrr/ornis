@@ -1367,10 +1367,9 @@ fn depth_ramp(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
     });
     let texture = depth_texture(device, "lighting depth", extent(SIZE.0, SIZE.1, 1), 1);
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("lighting depth ramp"),
-        });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("lighting depth ramp"),
+    });
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lighting depth ramp"),
