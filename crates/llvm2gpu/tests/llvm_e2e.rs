@@ -345,6 +345,71 @@ start:
     );
 }
 
+/// `gep [N x T], ptr, i32 0, i32 %i` is `gep T, ptr, i32 %i`: the leading
+/// constant zero dereferences the array itself.
+///
+/// rustc emits this form for `a[i]` and leaves it to instcombine to flatten,
+/// so a kernel that reads an array anywhere outside an optimized block reached
+/// the translator in it. The stride has to be the element's, and a stride of
+/// the whole array reads a different element — which is why the check fills a
+/// four-element array and reads it back on the GPU instead of looking at the
+/// printed index.
+#[test]
+fn a_gep_with_a_leading_zero_walks_the_element_stride() {
+    let ir = r#"
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %a = alloca [4 x float]
+  %p0 = getelementptr [4 x float], ptr %a, i32 0, i32 0
+  store float 1.0, ptr %p0
+  %p1 = getelementptr [4 x float], ptr %a, i32 0, i32 1
+  store float 2.0, ptr %p1
+  %p2 = getelementptr [4 x float], ptr %a, i32 0, i32 2
+  store float 3.0, ptr %p2
+  %p3 = getelementptr [4 x float], ptr %a, i32 0, i32 3
+  store float 4.0, ptr %p3
+  %p = getelementptr [4 x float], ptr %a, i32 0, i32 %id
+  %v = load float, ptr %p
+  call void @storage_write_f32(i32 0, i32 0, i32 %id, float %v)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("a leading-zero getelementptr");
+    let Some(outputs) = gpu_outputs(&translated) else {
+        return;
+    };
+    assert_eq!(
+        outputs,
+        vec![1.0, 2.0, 3.0, 4.0],
+        "each lane must read the element the index names: {}
+{}",
+        translated.wgsl,
+        translated.wgsl
+    );
+}
+
+/// A second index that is not a leading `0` still names a field offset the
+/// instruction cannot carry, and a third index is still two levels too deep.
+#[test]
+fn a_gep_with_a_non_zero_second_index_stays_rejected() {
+    let ir = r#"
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %p = getelementptr [2 x float], ptr null, i32 %id, i32 1
+  %v = load float, ptr %p
+  call void @storage_write_f32(i32 0, i32 0, i32 %id, float %v)
+  ret void
+}
+"#;
+    let error = translate(ir).expect_err("a field offset is outside the subset");
+    assert!(
+        error.to_string().contains("one index"),
+        "the rejection must name the form it folds: {error}"
+    );
+}
+
 /// The single-index form the translated kernels actually use still parses.
 #[test]
 fn a_gep_with_one_index_still_walks_the_element_stride() {

@@ -246,6 +246,15 @@ fn parse_uniforms(value: &str, structs: &mut BTreeMap<u32, Vec<u8>>) -> Result<(
         let id = id.parse::<u32>().map_err(|_| {
             TranslateError::UnsupportedType(format!("uniform struct id `{id}` is not a number"))
         })?;
+        // One decimal digit by construction: the writer refuses anything wider
+        // (the record is one byte per tag, so `10` would read as struct `1`
+        // followed by a stray tag). A record that carries a wider id did not
+        // come from the current SDK.
+        if id > u32::from(ornis_gpu_shader::meta::MAX_DIGIT) {
+            return Err(TranslateError::UnsupportedType(format!(
+                "uniform struct id {id} does not fit the one-digit metadata encoding"
+            )));
+        }
         // A `7` consumes the next digit as the nested struct id.
         let bytes = digits.as_bytes();
         let mut tags = Vec::new();
@@ -347,6 +356,19 @@ mod tests {
         assert!(
             error.to_string().contains("not a digit"),
             "the rejection must name the byte: {error}"
+        );
+    }
+
+    /// A struct id wider than one digit did not come from the current SDK's
+    /// writer, and reading it would be reading a different record: the id part
+    /// is one byte, so `uniform=12:` means struct `1` and a stray `2:`.
+    #[test]
+    fn a_two_digit_struct_id_is_rejected() {
+        let mut structs = BTreeMap::new();
+        let error = parse_uniforms("12:62", &mut structs).expect_err("two-digit id");
+        assert!(
+            error.to_string().contains("one-digit"),
+            "the rejection must name the encoding: {error}"
         );
     }
 

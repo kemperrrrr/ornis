@@ -785,28 +785,72 @@ fn parse_alloca(dst: &str, rhs: &str) -> Result<Instr, TranslateError> {
 /// `getelementptr inbounds nuw [4 x float], ptr @G, i32 %i`.
 fn parse_gep(dst: &str, rhs: &str) -> Result<Instr, TranslateError> {
     let (ty, base, indices) = split_gep(rhs)?;
-    // A GEP with one index walks whole elements; a second index selects inside
-    // the element (`buf[j].field`). The instruction carries one stride and one
-    // index, so a second one is a subset limit and not silently dropped: the
-    // element offset it names would disappear from the address.
-    if indices.len() != 1 {
-        return Err(TranslateError::UnsupportedType(format!(
-            "{}: a getelementptr with {} indices is outside the subset — the translator walks \
-             one element stride at a time; index the buffer to the element you need instead of \
-             reading a field through a second index",
-            crate::site::describe(),
-            indices.len()
-        )));
-    }
-    let index = indices
-        .first()
-        .ok_or_else(|| TranslateError::Parse("getelementptr without an index".to_string()))?;
+    // The instruction carries one stride and one index, so what it accepts is
+    // exactly one dynamic index into the memory the base points at.
+    //
+    // `gep [N x T], ptr %a, i32 0, i32 %i` is the same address as
+    // `gep T, ptr %a, i32 %i` — the leading constant `0` dereferences the
+    // aggregate itself — and it is the form rustc emits for `a[i]` before
+    // instcombine flattens it. Rejecting it refused the first index-into-array
+    // a kernel happened to write, so the leading zero is folded here. Any
+    // other second index selects a field inside the element, whose offset this
+    // instruction has no place to carry: that stays a rejection, and so does a
+    // third index.
+    let (stride, index) = match indices.as_slice() {
+        [only] => (type_bytes(&ty)?, only),
+        [zero, only] if index_is_zero(zero) => (element_stride(&ty)?, only),
+        _ => {
+            return Err(TranslateError::UnsupportedType(format!(
+                "{}: a getelementptr with {} indices is outside the subset — the translator \
+                 walks one element stride at a time, so the only form it folds is a leading \
+                 constant `0` followed by one index; index the buffer to the element you need \
+                 instead of reading a field through a second index",
+                crate::site::describe(),
+                indices.len()
+            )));
+        }
+    };
     Ok(Instr::GetElementPtr {
         dst: dst.to_string(),
         base: pointer_base(&base)?,
-        stride: type_bytes(&ty)?,
+        stride,
         index: parse_operand(index)?,
     })
+}
+
+/// Whether a GEP index is the literal constant `0`.
+fn index_is_zero(index: &str) -> bool {
+    index
+        .split_whitespace()
+        .next_back()
+        .is_some_and(|value| value == "0")
+}
+
+/// Bytes one element of the aggregate type `ty` occupies.
+///
+/// Only the array form is answered: a struct `{ … }` would need the field
+/// table, which is what the second-index rejection above is about.
+fn element_stride(ty: &str) -> Result<u32, TranslateError> {
+    let trimmed = ty.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('<')
+                .and_then(|rest| rest.strip_suffix('>'))
+        })
+        .ok_or_else(|| {
+            TranslateError::UnsupportedType(format!(
+                "{}: a getelementptr with a leading zero index needs an array source type, not \
+                 `{trimmed}`",
+                crate::site::describe()
+            ))
+        })?;
+    let (_, element) = inner.split_once(" x ").ok_or_else(|| {
+        TranslateError::Parse(format!("aggregate type `{trimmed}` has no element count"))
+    })?;
+    type_bytes(element)
 }
 
 /// `(source type, base, indices)` of a `getelementptr`.

@@ -48,8 +48,35 @@ const COLON_AFTER_ID: usize = 2;
 /// ASCII zero, the base of every decimal digit the record carries.
 const DIGIT_ZERO: u8 = b'0';
 
-/// Decimal base of the one-digit ids and tags.
-const DIGIT_BASE: u32 = 10;
+/// Largest value a one-byte number in the record can carry.
+///
+/// The record is one byte per tag, and a struct id, an array length and a
+/// field tag are all digits of it, so each is `0..=9`. A bigger value used to
+/// be written as `value % 10`, which turned struct id `10` into `0` and
+/// `array<T, 12>` into `array<T, 2>` — a record that still *parsed*, and a
+/// translator that laid out a different struct than the kernel read. The
+/// `digit` const below is where that turned into a compile error instead.
+pub const MAX_DIGIT: u32 = 9;
+
+/// One decimal digit byte for `value`.
+///
+/// # Panics
+///
+/// At compile time, when the value does not fit in one digit: see
+/// [`MAX_DIGIT`] for why wrapping is not an option.
+///
+/// ```compile_fail
+/// // A tenth struct id, or `array<Light, 12>`, cannot be encoded.
+/// const _: u8 = ornis_gpu_shader::meta::digit(10);
+/// ```
+#[must_use]
+pub const fn digit(value: u32) -> u8 {
+    assert!(
+        value <= MAX_DIGIT,
+        "shader metadata encodes struct ids, field tags and array lengths as one decimal digit (0..=9), so this value cannot be published"
+    );
+    DIGIT_ZERO + value as u8
+}
 
 /// Bytes an entry at position `index` adds before its tags.
 const fn overhead(index: usize) -> usize {
@@ -124,9 +151,8 @@ pub const fn entry<const N: usize>(prefix: &[u8]) -> [u8; N] {
 /// Append `,<id>:<tags>` — or `;uniform=<id>:<tags>` when `first` — at `at`.
 ///
 /// `id` and every tag are one decimal digit, which is what the
-/// `ornis_gpu.types` table allows. A longer id or tag is truncated rather than
-/// wrapped, so the translator rejects the record instead of reading a
-/// different struct.
+/// `ornis_gpu.types` table allows; [`digit`] fails the build for anything
+/// wider rather than publishing a record that reads as a different struct.
 // qual:allow(srp, max_parameters=6) reason: "the record, where to write, the entry separators, the struct id, its tags and the structs it reaches"
 #[must_use]
 pub const fn with_uniforms<const N: usize>(
@@ -152,12 +178,12 @@ pub const fn with_uniforms<const N: usize>(
         out[cursor] = b'=';
         cursor += 1;
     }
-    out[cursor] = DIGIT_ZERO + (id % DIGIT_BASE) as u8;
+    out[cursor] = digit(id);
     out[cursor + 1] = b':';
     cursor += 2;
     let mut index = 0;
     while index < tags.len() {
-        out[cursor] = DIGIT_ZERO + (tags[index] % DIGIT_BASE as u8);
+        out[cursor] = digit(tags[index] as u32);
         cursor += 1;
         index += 1;
     }
@@ -174,13 +200,13 @@ const fn write_nested<const N: usize>(
     let mut index = 0;
     while index < nested.len() {
         out[cursor] = b',';
-        out[cursor + ID_AFTER_SEPARATOR] = DIGIT_ZERO + (nested[index].0 % DIGIT_BASE) as u8;
+        out[cursor + ID_AFTER_SEPARATOR] = digit(nested[index].0);
         out[cursor + COLON_AFTER_ID] = b':';
         cursor += UNIFORM_SEPARATOR;
         let tags = nested[index].1;
         let mut inner = 0;
         while inner < tags.len() {
-            out[cursor] = DIGIT_ZERO + (tags[inner] % DIGIT_BASE as u8);
+            out[cursor] = digit(tags[inner] as u32);
             cursor += 1;
             inner += 1;
         }
@@ -225,6 +251,34 @@ mod tests {
         const NESTED: [&[(u32, &[u8])]; 2] = [&[], &[]];
         assert_eq!(cursor(10, &TAGS, &NESTED, 0), 10);
         assert_eq!(cursor(10, &TAGS, &NESTED, 1), 10 + UNIFORM_OVERHEAD + 7);
+    }
+
+    /// The last encodable struct id is published as its own digit, and the one
+    /// past it fails the build instead of wrapping to `0`.
+    ///
+    /// This is the regression the reviewer found: `id % 10` turned the tenth
+    /// struct into struct `0`, and the record still parsed — so the translated
+    /// kernel laid out a different struct than the one it read. A unit test
+    /// cannot observe the failure (it is a compile error), so the encoder is
+    /// checked at the boundary that is still legal and `digit`'s own doc test
+    /// carries the `compile_fail` case.
+    #[test]
+    fn the_ninth_struct_id_round_trips_and_the_tenth_cannot_be_written() {
+        const TAGS: [&[u8]; 1] = [&[6]];
+        const NESTED: [&[(u32, &[u8])]; 1] = [&[]];
+        const LEN: usize = len(PREFIX, &TAGS, &NESTED);
+        let at = cursor(PREFIX.len(), &TAGS, &NESTED, 0);
+        let record = with_uniforms(
+            entry::<LEN>(PREFIX),
+            at,
+            true,
+            MAX_DIGIT,
+            TAGS[0],
+            NESTED[0],
+        );
+        assert_eq!(&record[..], b"entry=cs_main;workgroup=64,1,1;uniform=9:6");
+        assert_eq!(digit(0), b'0');
+        assert_eq!(digit(MAX_DIGIT), b'9');
     }
 
     /// A nested struct's own fields travel in the record: the translator needs
