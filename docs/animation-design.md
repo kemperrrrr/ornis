@@ -1,7 +1,10 @@
 # Дизайн системы анимации (объектная + скелетная)
 
 > Статус: фазы A–E в коде (`crates/animation`): веса, кроссфейд и маски слоёв
-> — для скелета и для объектных треков (см. §5).
+> — для скелета и для объектных треков (см. §5). `CUBICSPLINE` (Hermite по
+> glTF 2.0) тоже в коде, не в будущих фазах. Дерево (`SkelTree`), motion
+> matching, distance matching/warping и ragdoll (срезы 1–6) — сделаны,
+> сверка §5 (2026-11-26, `2894db0`).
 > Стык с glTF-лоадером описан в §4; соседние треки работают параллельно.
 > Стиль ссылок — `файл:строка` от корня репозитория.
 
@@ -122,8 +125,8 @@ writes_lane: TransformDesc, Position (условный mirror — деклари
   Лимит — 4 влияния (glTF-стандарт `JOINTS_0/WEIGHTS_0`).
 - `SkelClip` (cold): `{ duration, tracks: Vec<JointTrack> }`,
   `JointTrack { joint: u32, t: KeyTrack<Vec3>, r: KeyTrack<Quat>, s: KeyTrack<Vec3> }`.
-- `SkelPlayer` (hot): как `AnimPlayer` + `clip: ClipId`; бленд двух клипов — фаза 3,
-  не фаза 1 (поле `weight` зарезервировать сразу).
+- `SkelPlayer` (hot): как `AnimPlayer` + `clip: ClipId`; бленд двух клипов — фаза E
+  (сделано, поле `weight`).
 
 Отдельный `joints-лейн` на каждый сустав-сущность — **отклонено**: суставы как сущности
 раздувают аллокатор и экстракцию (каждый сустав — не рендеримая сущность, но попадает
@@ -218,7 +221,11 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
    не per-frame).
 4. **Клипы:** `animations[]` → `SkelClip` каждый: `input` (times) + `output`
    (translation/quaternion/scale) по `channel.target.path`; интерполяция:
-   фаза 1 — `LINEAR` (+ `STEP` как вырожденный lerp), `CUBICSPLINE` — фаза 3.
+   `LINEAR`, `STEP` и `CUBICSPLINE` (Hermite по glTF 2.0). Импорт —
+   `crates/gltf/src/anim.rs` (`LoadedKeyTrack::cubic`; битые каналы —
+   `skipped_cubicspline`); сэмплер — `crates/animation/src/lib.rs:154-162`
+   (`Interpolation::Cubic`, базис `hermite_*` в `:292-322`); стык —
+   `crates/app/src/anim_wiring.rs:203-219` (`with_interpolation`).
    Объектные треки (анимация `node` без `skin`) → `AnimClip`/`AnimTrack`
    с привязкой к сущности лоадера; `AnimTrack::rest` ← TRS узла (RESET, фаза E).
 5. **Сущности:** лоадер создаёт: корень (`TransformDesc` из node-TRS + `Skeleton` +
@@ -249,8 +256,9 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
   (tolerance как `docs/WASM_PIXEL_E2E.md:44-48`: mean ≤ 2/255), upload/кадр → 0
   при статичной позе (`Both`).
 - **Фаза E (M, опционально): бленд/маски.** `weight` в плеерах, кроссфейд N→M кадров,
-  верх/низ маски; `CUBICSPLINE`; иерархия `Parent` + `GlobalTransform` для
-  не-скелетных ригов. Только после D.
+  верх/низ маски; иерархия `Parent` + `GlobalTransform` для
+  не-скелетных ригов. Только после D. `CUBICSPLINE` в эту фазу не входит:
+  уже реализован (контракт §4; импорт, сэмплер, wiring).
 
   **Статус (скелет, сделано):** модель детерминированная, как в Godot: отсутствующий
   канал читается как покой кости — её локальный TRS из узла скина (как
@@ -274,7 +282,7 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
   типизированно через фасад `anim_wiring` (`set_skel_layers` ставит весь стек
   `SkelLayerStack` сразу — замена, не добавление; `fade_to_clip`).
 
-  **Дальше (сверено по коду 2026-10-19 на `55f1b0a`):**
+  **Дальше (сверено по коду 2026-11-26 на `2894db0`):**
 
   1. **Прод-доступность фазы E.** У `Animator::play_crossfade`, `SkelLayer`,
      `JointMask` и `AnimFade` нет ни одного нетестового вызывателя — только
@@ -285,12 +293,14 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
      `anim_wiring::play_crossfade`), `qual:api` с `Animator::play_crossfade`
      снят; `SkelLayer`/`JointMask` прод-вызывателя пока не имеют (ждут шага 3).
      **Шаг 3 (2026-10-22, #180):** стек `SkelLayerStack` сделан (п. 3),
-     `set_skel_layers` ставит весь стек через типизированный вход фасада;
-     прод-вызыватель у слоёв по-прежнему не появился — `set_skel_layers`
-     остаётся хост-API с `qual:api`.
-  2. **Общий `Animator`-фасад.** `Animator` (`crates/animation/src/animator.rs:105-223`)
-     ведёт только скелетный плейлист (`play`/`play_crossfade`/`pause`/`stop`/`set_looping`);
-     у объектов — лишь `set_playing`/`rewind_player` (`crates/app/src/anim_wiring.rs:325,343`).
+     `set_skel_layers` ставит весь стек через типизированный вход фасада
+     (`crates/app/src/anim_wiring.rs:581`). **Прод-вызыватель есть:**
+     `examples/anim.rs:257` (`world.entity_mut(skel_root).set_skel_layers(...)`
+     ставит upper-body слой жеста на манекен).
+  2. **Общий `Animator`-фасад.** `Animator` (`crates/animation/src/animator.rs:26`,
+     методы воспроизведения `:93-139`) ведёт только скелетный плейлист
+     (`play`/`play_crossfade`/`pause`/`stop`/`set_looping`);
+     у объектов — лишь `set_playing`/`rewind_player` (`crates/app/src/anim_wiring.rs:334,352`).
      Нужен `play_crossfade` для `AnimPlayer` и типизированный вход для `SkelLayer`/`AnimFade`,
      чтобы §5 не требовал прямой вставки в лейн. Решение (2026-10-19): фасад в
      `crates/app/src/anim_wiring.rs`, а не расширение `Animator` — см. п. 10.
@@ -321,46 +331,45 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
      Аудит горячего пути с границами сложности, принятыми событийными
      аллокациями и точками замера —
      `docs/quality/anim-core-perf-audit-2026-10-28.md`.
-  6. **Ragdoll — не начато** (в основном физический трек, но шов нужен и со
-     стороны анимации; упоминаний в `PLAN.md`/`IDEAS.md`/`docs/` нет). База в
-     физике уже есть: `crates/physics/src/articulated.rs` — Featherstone ABA
-     (R6, reduced coordinates; `FeatherstoneEngine`, `BaseJoint`,
-     `set_joint_motor`/`set_joint_damping`/`set_joint_friction`) и
-     maximal-coordinate constraints `crates/physics/src/joint.rs` (G5) для
-     сцен с контактами. Чего нет — шва «физика ↔ скелет»: физика не знает
-     `Skeleton`/`JointPose`, анимация про физику знает только пропуск
-     `RigidBody`-сущностей в `anim_sample` (`crates/app/src/lib.rs:104`).
-     Ragdoll = скин + суставы физики + blending «физика ↔ анимация», по
-     образцу `SkinningMode::Cpu/Gpu` (см. §2.3).
-  7. **Animation tree (бленд-дерево / граф переходов) — отложено осознанно**
-     (§6). Реализации нет; как отдельный пункт в планах он не стоял — есть
-     только строка «не делаем в фазах A–D». Текущая модель закрывает простые
-     случаи: база + стек слоёв (`SkelLayerStack`) + один кроссфейд на корень
-     (`SkelFade`). Дерево — произвольный граф нод (blend1d/2d, state machine с
-     переходами по условию, синхронизация по меткам). Гейт — фоллоу-апы 1–3
-     (прод-доступность, общий `Animator`-фасад, стек слоёв).
-  8. **Motion matching — не начато.** Упоминаний в коде, `PLAN.md`, `IDEAS.md`
-     и `docs/` нет. Состав: база движений (клипы + метки контактов),
-     feature-выборка позы/скоростей, детерминированный выбор кадра по
-     дистанции, инерциализация переходов. Опора у фазы E уже есть —
-     `SkelClip`/`KeyTrack` как источник поз, а детерминированная модель бленда
-     (без состояния между кадрами, §5) как раз нужна для повторяемого выбора.
-  9. **Distance matching / motion warping — не начато.** Упоминаний нет.
-     Distance matching — привязка фазы цикла не только ко времени, но и к
-     пройденной дистанции/моменту контакта (лечит «скольжение ног» при разной
-     скорости); motion warping — деформация позы под целевую точку или
-     траекторию (шаг на платформу, прыжок). Оба ложатся поверх сэмплера
-     (доступ к позам по времени плюс коррекция), то есть — после слоёв и
-     общего API, а warping ещё и после IK (§6).
+  6. **Ragdoll — срезы 1–6 ✅.** Дизайн: `docs/ragdoll-design.md`. Модель
+     `RagdollDesc`/`RagdollBone`/`RagdollMode` живёт в `ornis-animation`
+     (`crates/animation/src/ragdoll.rs`), шов — `ragdoll_wiring` в
+     `ornis-app`. Срез 1 — модель и привязка; срез 2 — физика → анимация
+     (`sample_local`, бленд в `finish_pose` по `RagdollBlend`); срез 3 —
+     анимация → физика (фикс-тик ABA, приводы `w < 1`); срез 4 — контракт
+     фасада и детерминизм-тесты; срез 5 — контакты (связка ABA с SI-миром,
+     `ragdoll_proxy_sync` → `ragdoll_sync`); срез 6 — G5-путь
+     (`set_ragdoll_g5`, `RagdollChain::G5`, ragdoll-design §11). База в
+     физике: `crates/physics/src/articulated.rs` (Featherstone ABA) и
+     `crates/physics/src/joint.rs` (G5).
+  7. **Animation tree (бленд-дерево / граф переходов) ✅.** `SkelTree` /
+     `SkelTreePlayer` (`crates/animation/src/tree.rs`): `TreeNodeDef` —
+     `Clip`, `Blend1d`, `Blend2d`, `Freeform2d`, `Machine`, `Switch`
+     (`tree.rs:111` и далее; модель — §7, freeform — §7.1 и
+     `crates/animation/src/freeform.rs`). Управление — фасад
+     `set_skel_tree`/`set_tree_param`. #191 закрыт (работа ушла в #180).
+  8. **Motion matching ✅** (§8.5). `match_motion`
+     (`crates/animation/src/motion_match.rs:115`) — детерминированный выбор
+     кадра по квадрату ошибки модельных позиций feature-суставов и скорости
+     корня; переход на выбранный кадр — `SkelInertia`
+     (`crates/animation/src/blend.rs:101`): снапшот уходящего курсора гаснет
+     за `duration`, слои поверх живьём, дерево-корни игнорируют.
+  9. **Distance matching / motion warping ✅** (§8.5). `time_at_distance`
+     (`crates/animation/src/motion_match.rs:161`) — фаза по пройденной
+     дистанции корневого трека (ломаная ключей). `warp_weight`
+     (`motion_match.rs:195`) — сила two-bone IK в окне контакта
+     (`start`/`contact`/`end`); деформация позы — солвер §8.2, не второй.
+     `warp_root_delta` (`crates/animation/src/motion_warp.rs:60`) доворачивает
+     дельту корня к цели окна за `start..contact`.
   10. **Шаги разблокировки гейта (порядок; решение 2026-10-19).**
      - **Шаг 1 — фасад в `crates/app/src/anim_wiring.rs`** ✅ (2026-10-21,
        #179), рядом с
-       `set_playing`/`rewind_player` (`:325,343`): `play_crossfade(store,
+       `set_playing`/`rewind_player` (`:334,352`): `play_crossfade(store,
        entity, name, duration)` плюс типизированный вход для `SkelLayer`/`AnimFade`.
        Скелетная ветка делегирует в `AnimatorMut::play_crossfade` через
        `try_animator` (одна реализация фейда), объектная пишет `AnimFade`
        (и `AnimPlayer`) прямо на сущности. Топологии разные: каталог на корне
-       с `targets: Vec<Entity>` (`crates/animation/src/animator.rs:26-30`)
+       с `targets: Vec<Entity>` (`crates/animation/src/animator.rs:26-31`)
        против плеера на самой анимируемой сущности, — поэтому один тип не
        объединяем, а ставим драйвер поверх каталога, как Godot `AnimationTree`
        над `AnimationPlayer` (общий базовый `AnimationMixer`) или Bevy
@@ -369,17 +378,22 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
        уже там (`set_playing` пробует `SkelPlayer`, затем `AnimPlayer`).
      - **Шаг 2 — первый прод-вызывающий:** ✅ (2026-10-21, #179)
        `GameWorld::play_animation`
-       (`crates/app/src/game_world.rs:131`) сейчас зовёт только `set_playing`
-       (без имени и без фейда); после шага 1 он же снимает `qual:api`
-       с `Animator::play_crossfade` (`crates/animation/src/animator.rs:119`).
-       Точка входа `EntityMut::animator()` уже есть
-       (`crates/app/src/game_world.rs:831`).
+       (`crates/app/src/game_world.rs:149`) зовёт фасад `play_crossfade`.
+       `EntityMut::animator()` — через `impl AnimatorAccess for EntityMut`
+       (`game_world.rs:974`; метод по умолчанию —
+       `crates/animation/src/animator.rs:363`).
      - **Шаг 3 — стек слоёв** (п. 3) тем же типизированным входом фасада.
-       ✅ Сделано (2026-10-22, #180): `SkelLayerStack` (`crates/animation/src/blend.rs`)
+       ✅ Сделано (2026-10-22, #180): `SkelLayerStack` (`crates/animation/src/blend.rs:63`)
        — стек `SkelLayer` на корень, снизу вверх, `set_skel_layers` заменяет
-       стек целиком. Слои остаются только скелетными: `SkelLayer` —
-       единственный тип слоя, объектного в модели нет. Пересмотр — когда появится анимационный граф
-       (п. 7): вход может уйти в него.
+       стек целиком (`examples/anim.rs:257` — прод-вызыватель). Слои остаются
+       только скелетными: `SkelLayer` — единственный тип слоя, объектного в
+       модели нет.
+
+  **Открытые пробелы и осознанные отказы (2026-11-26).** Морфы (blend
+  shapes) — #153 (открыт). Импорт FBX — #269 (открыт). Culling анимации
+  (не скиннить и не анимировать невидимые объекты) — #236 (открыт).
+  Слои остаются только скелетными: `SkelLayer` — единственный тип слоя,
+  объектного в модели нет. FABRIK не нужен: CCD закрывает хвостовые цепи.
 
 ## 6. Осознанно НЕ делаем
 
@@ -391,11 +405,13 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
 - Свой `Transform` (`render/src/transform.rs:7-14`) как лейн: рендер читает
   `TransformDesc`, второй placement-источник = рассинхрон.
 - IK/ретаргет в фазах A–D; бленд-дерево/state machine — §7 (поверх E;
-  сделаны); морфы (blend shapes) — только после E (#153, отложены).
-  Дерево анимаций поверх стека слоёв начинаем после E — модель в §7.
-  IK/ретаргет и события по ключам — кампания §8 (в работе, #180);
-  motion matching, distance matching и warp-вес — первый срез §8.5
-  (запрос хоста, не стадия сэмплера); язык эффекторов look-at — §8.6.
+  сделаны); морфы (blend shapes) — только после E (#153, отложены);
+  импорт FBX — #269; culling анимации — #236.
+  Дерево анимаций поверх стека слоёв — §7 (сделано).
+  IK/ретаргет, события по ключам, motion matching, distance matching и
+  warp — кампания §8 (сделана, #180); язык эффекторов look-at — §8.6.
+  Слои остаются только скелетными: `SkelLayer` — единственный тип слоя,
+  объектного в модели нет. FABRIK не нужен: CCD закрывает хвостовые цепи.
 - Изменение `InstanceData`/шейдеров ради фаз A–C (объектная ложится в `model_matrix`,
   скиннинг — в `custom_meshes`).
 - Тихие фолбэки: незагрузившийся скелет/вес/клип = скип + счётчик, никогда сфера-заглушка
@@ -674,7 +690,7 @@ Full-body IK и control rig в этот слой не входят. Каждый
   кадрами (детерминизм = детерминизм входа). Солверы и стек берут
   переиспользуемый `FkScratch` (как буферы фейдов и веса дерева):
   сцена с IK тоже не аллоцирует на кадр. CCD — отдельным эффектором
-  под хвосты (§8.6); FABRIK — только если CCD не закроет сценарий.
+  под хвосты (§8.6). FABRIK не нужен: CCD закрывает хвостовые цепи.
 - **Модель.** Общий язык — `Effector` в hot-лейне `IkStack` на корне
   (`effectors: Vec<Effector>`, применяются в порядке записи).
   `Effector::TwoBone(TwoBoneIk { root, mid, end, target, weight })` —
@@ -786,8 +802,8 @@ Full-body IK и control rig в этот слой не входят. Каждый
 
 Общий язык поверх текущего IK, не Unreal-style control rig и не
 full-body. `IkStack.effectors` — упорядоченный список
-`Effector::TwoBone | Effector::LookAt | Effector::Ccd`. FABRIK и риг
-правил — только если три эффектора не закроют сценарий.
+`Effector::TwoBone | Effector::LookAt | Effector::Ccd`. FABRIK не нужен:
+CCD закрывает хвостовые цепи. Control rig — §8.8.
 
 - **Модель.** `LookAt { joint, target, aim, weight }`: довернуть
   локальную ось `aim` сустава на `target − позиция` в модельном
