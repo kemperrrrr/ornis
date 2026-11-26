@@ -2006,6 +2006,20 @@ impl Builders {
         })?);
         let (element, size, align) = self.tag_type(element_tag)?;
         let stride = ornis_gpu_abi::uniform_stride(size, align);
+        // WGSL requires a uniform array's stride to be a multiple of 16, so an
+        // element narrower than that (`array<f32, N>`, `array<u32, N>`) would
+        // only surface as naga's own "array stride must be a multiple of 16"
+        // — raw, and without naming the struct. The layout here rounds the
+        // stride up, but the *type* it emits cannot be padded, so this stays a
+        // rejection with the fix spelled out: wrap the element in a padded
+        // struct, which is what `CsmVp` and `Light` do.
+        if stride < ornis_gpu_abi::UNIFORM_STRUCT_ALIGN {
+            return Err(TranslateError::UnsupportedType(format!(
+                "a uniform array of {size}-byte elements has stride {stride}, but WGSL requires a \
+                 multiple of {} — wrap the element in a padded struct instead of a plain array",
+                ornis_gpu_abi::UNIFORM_STRUCT_ALIGN
+            )));
+        }
         let ty = self.module.types.insert(
             naga::Type {
                 name: None,
@@ -2314,22 +2328,86 @@ fn instruction_is_uniform(instr: &Instr, uniform: &HashSet<String>) -> bool {
     }
 }
 
+/// The imports that return the same value in every invocation, spelled out.
+///
+/// Uniform struct reads (the whole `uniform_*` family), the dimension queries,
+/// the length queries and the pure scalar math. Everything else the SDK
+/// exports is per-invocation by construction — invocation ids, workgroup
+/// memory, storage reads, texture fetches — so it is absent here, and a name
+/// that only *sounds* uniform (`uniform_helper` in a future helper crate) is
+/// not granted uniformity by its prefix. The `llvm.*` intrinsics are pure
+/// functions of their operands, so they stay uniform whenever their operands
+/// are; the type suffix is why they match by prefix rather than by name.
+const UNIFORM_IMPORTS: &[&str] = &[
+    // Uniform block reads. Field access with a runtime index is uniform
+    // because WGSL allows it on a fixed-size uniform array and the block
+    // cannot change mid-pass.
+    ornis_gpu_abi::symbols::UNIFORM_READ_STRUCT,
+    ornis_gpu_abi::symbols::UNIFORM_INDEX_STRUCT,
+    ornis_gpu_abi::symbols::UNIFORM_FIELD_F32,
+    ornis_gpu_abi::symbols::UNIFORM_FIELD_U32,
+    ornis_gpu_abi::symbols::UNIFORM_FIELD_I32,
+    ornis_gpu_abi::symbols::UNIFORM_FIELD_VEC2,
+    ornis_gpu_abi::symbols::UNIFORM_FIELD_VEC3,
+    ornis_gpu_abi::symbols::UNIFORM_FIELD_VEC4,
+    ornis_gpu_abi::symbols::UNIFORM_ARRAY_VEC4_LANE,
+    ornis_gpu_abi::symbols::UNIFORM_NESTED_ARRAY_VEC4_LANE,
+    ornis_gpu_abi::symbols::UNIFORM_NESTED_VEC4_LANE,
+    ornis_gpu_abi::symbols::UNIFORM_READ_F32,
+    ornis_gpu_abi::symbols::UNIFORM_READ_U32,
+    ornis_gpu_abi::symbols::UNIFORM_READ_I32,
+    ornis_gpu_abi::symbols::UNIFORM_READ_VEC2,
+    ornis_gpu_abi::symbols::UNIFORM_READ_VEC3,
+    ornis_gpu_abi::symbols::UNIFORM_READ_VEC4,
+    // The derived uniform accesses the SDK spells on top of the reads above.
+    "uniform_field_vec4_component_f32",
+    "uniform_field_vec4_plane_dot",
+    "uniform_nested_field_f32",
+    "uniform_nested_field_u32",
+    // Dimension and length queries: the binding is fixed for the pass.
+    ornis_gpu_abi::symbols::TEXTURE_WIDTH_2D,
+    ornis_gpu_abi::symbols::TEXTURE_HEIGHT_2D,
+    "texture_width_2d_f32x4",
+    "texture_height_2d_f32x4",
+    "storage_len_f32",
+    "storage_len_u32",
+    "storage_len_u32x4",
+    // The pure scalar math: every `gpu_*` import the SDK declares.
+    ornis_gpu_abi::symbols::GPU_SQRT,
+    ornis_gpu_abi::symbols::GPU_POW,
+    ornis_gpu_abi::symbols::GPU_ATAN2,
+    ornis_gpu_abi::symbols::GPU_SMOOTHSTEP,
+    ornis_gpu_abi::symbols::GPU_DPDX,
+    ornis_gpu_abi::symbols::GPU_DPDY,
+    ornis_gpu_abi::symbols::GPU_TAN,
+    ornis_gpu_abi::symbols::GPU_FLOOR,
+    ornis_gpu_abi::symbols::GPU_CEIL,
+    ornis_gpu_abi::symbols::GPU_LN,
+    ornis_gpu_abi::symbols::GPU_EXP,
+    ornis_gpu_abi::symbols::GPU_EXP2,
+    ornis_gpu_abi::symbols::GPU_LOG2,
+    ornis_gpu_abi::symbols::GPU_ABS,
+    ornis_gpu_abi::symbols::GPU_SIGN,
+    ornis_gpu_abi::symbols::GPU_FRACT,
+    ornis_gpu_abi::symbols::GPU_COS,
+    ornis_gpu_abi::symbols::GPU_SIN,
+    ornis_gpu_abi::symbols::GPU_ACOS,
+    ornis_gpu_abi::symbols::GPU_CLAMP,
+    ornis_gpu_abi::symbols::GPU_MIX,
+    ornis_gpu_abi::symbols::GPU_DOT2_XY,
+    ornis_gpu_abi::symbols::GPU_DOT3_XYZ,
+    ornis_gpu_abi::symbols::GPU_LENGTH3_XYZ,
+    ornis_gpu_abi::symbols::GPU_CROSS3_LANE,
+    ornis_gpu_abi::symbols::GPU_NORMALIZE3_LANE,
+];
+
 /// Whether an import returns the same value in every invocation.
 ///
-/// Uniform struct fields, array lengths, texture dimensions, and the scalar
-/// math builtins do; the invocation id, workgroup memory, storage reads, and
-/// texture fetches do not.
+/// [`UNIFORM_IMPORTS`] is the whole answer; anything not in it is
+/// per-invocation, and a name is never granted uniformity by a prefix.
 fn uniform_callee(callee: &str) -> bool {
     let symbol = symbol::imported(callee);
-    // The `llvm.*` intrinsics are pure functions of their operands, so they are
-    // uniform whenever the operands are; the type suffix is why they match by
-    // prefix rather than by name.
-    symbol.starts_with("llvm.")
-        || symbol.starts_with("uniform_")
-        || symbol.starts_with("texture_width")
-        || symbol.starts_with("texture_height")
-        || symbol.starts_with("storage_len")
-        || symbol.starts_with("gpu_")
+    UNIFORM_IMPORTS.contains(&symbol) || symbol.starts_with("llvm.")
 }
 
 /// Blocks control can leave `term` for, in the order the IR names them.
@@ -6866,6 +6944,39 @@ fn operand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The uniform list answers per symbol, never by prefix.
+    #[test]
+    fn uniformity_is_decided_per_symbol_not_by_prefix() {
+        // Every entry is reachable both ways: bare test-IR name and SDK
+        // spelling (`import_uniform_read_f32` from a mangled call).
+        assert!(uniform_callee(ornis_gpu_abi::symbols::UNIFORM_READ_F32));
+        // `imported()` strips the shim's own `import_` prefix, so the SDK
+        // spelling reaches the list as the ABI symbol.
+        assert!(uniform_callee(
+            "_RNvNtCs7qzl3DdH8fB_16ornis_gpu_shader3abi23import_uniform_read_f32"
+        ));
+        // A helper whose name only *sounds* uniform is per-invocation: the
+        // prefix granted it before, which was the finding.
+        assert!(!uniform_callee("uniform_helper"));
+        // The per-invocation surface is absent from the list.
+        for name in [
+            "global_invocation_lane",
+            "local_invocation_index",
+            "storage_read_f32",
+            "texture_load_2d_f32",
+            "texture_sample_2d_f32x4",
+            "workgroup_load_u32",
+            "vertex_index",
+            "instance_index",
+            "fragment_position_lane",
+        ] {
+            assert!(!uniform_callee(name), "{name} must not be uniform");
+        }
+        // Dimension queries are.
+        assert!(uniform_callee("texture_width_2d"));
+        assert!(uniform_callee("storage_len_f32"));
+    }
 
     /// Lower a fragment entry written as LLVM IR and return the module.
     ///

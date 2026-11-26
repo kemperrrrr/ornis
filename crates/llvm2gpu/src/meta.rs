@@ -250,7 +250,7 @@ fn parse_uniforms(value: &str, structs: &mut BTreeMap<u32, Vec<u8>>) -> Result<(
         // (the record is one byte per tag, so `10` would read as struct `1`
         // followed by a stray tag). A record that carries a wider id did not
         // come from the current SDK.
-        if id > u32::from(ornis_gpu_shader::meta::MAX_DIGIT) {
+        if id > ornis_gpu_shader::meta::MAX_DIGIT {
             return Err(TranslateError::UnsupportedType(format!(
                 "uniform struct id {id} does not fit the one-digit metadata encoding"
             )));
