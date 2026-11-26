@@ -33,6 +33,7 @@
 //! layout: the pass's own tests pin the resource table against the artifacts.
 
 // qual:allow(srp, file_length=1319) reason: "one parity harness: the inputs, the pipeline and the comparison read as one document"
+#[allow(dead_code)]
 mod common;
 
 use common::parity::device_pair;
@@ -810,42 +811,8 @@ fn camera_bytes() -> Vec<u8> {
     bytes
 }
 
-/// Lighting-block patch that keeps every light out of every shadow selector.
-///
-/// `params.x` below the cascaded edge and `params.w` negative are how the pass
-/// says "this light casts nothing", so the direct term is what the beauty
-/// comparison then measures.
-fn with_shadows_off(_lighting: &mut Vec<u8>, clustered: &mut Vec<u8>) {
-    for index in 0..3 {
-        let at = index * LIGHT_BYTES + FIELD_PARAMS;
-        put(clustered, at, 0, 0.0);
-        put(clustered, at, 3, -1.0);
-    }
-}
-
 /// Lighting patch that changes nothing: the reference input set.
 fn keep_lights(_lighting: &mut Vec<u8>, _clustered: &mut Vec<u8>) {}
-
-/// Only the directional light: probes whether the punctual ones are what makes
-/// the frame non-finite.
-fn only_directional(_lighting: &mut Vec<u8>, clustered: &mut Vec<u8>) {
-    for index in [1usize, 2] {
-        for lane in 0..4 {
-            bytes_word(clustered, index * LIGHT_BYTES + FIELD_COLOR + lane * 4, 0.0);
-        }
-    }
-}
-
-/// Write one little-endian `f32` word at `at`.
-fn bytes_word(bytes: &mut [u8], at: usize, value: f32) {
-    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-/// Lighting patch that empties the walk: no prefix lights and no clustered
-/// cell, so the loop body never runs.
-fn without_lights(lighting: &mut Vec<u8>, _clustered: &mut Vec<u8>) {
-    lighting[LIGHT_COUNT_AT..LIGHT_COUNT_AT + 4].copy_from_slice(&0u32.to_le_bytes());
-}
 
 /// Byte writer used by the hand-built uniform blocks.
 fn put(bytes: &mut [u8], at: usize, lane: usize, value: f32) {
@@ -914,6 +881,7 @@ fn lighting_bytes() -> Vec<u8> {
         let at = light(index) + FIELD_SHADOW_VP;
         bytes[at..at + 64].copy_from_slice(bytemuck::bytes_of(&columns));
     }
+    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
     bytes[LIGHT_COUNT_AT..LIGHT_COUNT_AT + 4].copy_from_slice(&3u32.to_le_bytes());
     put(&mut bytes, LIGHT_COUNT_AT + 4, 0, 0.4);
     put(&mut bytes, LIGHT_COUNT_AT + 8, 0, 4.0);
@@ -922,6 +890,7 @@ fn lighting_bytes() -> Vec<u8> {
         let at = csm + cascade * CASCADE_BYTES;
         bytes[at..at + CASCADE_BYTES].copy_from_slice(bytemuck::bytes_of(&columns));
     }
+    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
     let tail = csm + CASCADES * CASCADE_BYTES;
     put(&mut bytes, tail, 2, 1.0);
     for (lane, value) in [4.0f32, 8.0, 16.0, 32.0].into_iter().enumerate() {
@@ -1370,6 +1339,7 @@ fn depth_ramp(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("lighting depth ramp"),
     });
+    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lighting depth ramp"),
@@ -1511,6 +1481,7 @@ fn solid_cube(
     label: &str,
     color: [f32; 4],
 ) -> wgpu::TextureView {
+    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
     let size: u32 = 8;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
@@ -1522,6 +1493,7 @@ fn solid_cube(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
     let mut texels = Vec::with_capacity((size * size) as usize * 8);
     for _ in 0..size * size {
         for lane in color {
@@ -1562,6 +1534,7 @@ fn solid_texture(
     label: &str,
     color: [f32; 4],
 ) -> wgpu::TextureView {
+    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
     let size = 4u32;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
@@ -1573,6 +1546,7 @@ fn solid_texture(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
     let mut texels = Vec::with_capacity((size * size) as usize * 8);
     for _ in 0..size * size {
         for lane in color {

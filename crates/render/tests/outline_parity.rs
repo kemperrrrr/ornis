@@ -65,14 +65,58 @@ fn triangle() -> Vec<f32> {
 struct Inputs {
     /// Vertex buffer, three vertices per triangle.
     vertices: wgpu::Buffer,
-    /// View-projection (identity) plus the twelve unused camera slots.
+    /// View-projection plus the twelve unused camera slots.
     camera: wgpu::Buffer,
-    /// One per-object record with an identity model matrix.
+    /// One per-object record per drawn instance.
     objects: wgpu::Buffer,
-    /// Compact scene-index list with a single entry.
+    /// Compact scene-index list, one entry per instance.
     indices: wgpu::Buffer,
     /// Flags parallel to the index list.
     flags: wgpu::Buffer,
+    /// Instances drawn (`draw(0..6, 0..instances)`).
+    instances: u32,
+}
+
+/// How many objects the gate stages.
+///
+/// One instance cannot catch a wrong record stride: instance `0` starts at
+/// offset `0` for `52u` and `53u` alike. Three do — a stride step error moves
+/// instance `1` and `2` to garbage words and the pixels move with them. The
+/// three flags cover every picker branch across the frame at once.
+const INSTANCES: u32 = 3;
+
+/// A model matrix that is not symmetric, so a transposed upload lands
+/// somewhere else on the screen: with identity the two spellings agree, and a
+/// transpose bug would pass. Column `0` scales and shears, column `3`
+/// translates; the draw fills the frame.
+fn model(index: u32) -> [[f32; 4]; 4] {
+    let shear = match index {
+        0 => 0.1,
+        1 => -0.2,
+        _ => 0.15,
+    };
+    let (tx, ty) = match index {
+        0 => (-0.35, 0.3),
+        1 => (0.35, 0.25),
+        _ => (0.0, -0.4),
+    };
+    [
+        [0.45, 0.0, 0.0, 0.0],
+        [shear, 0.45, 0.0, 0.0],
+        [0.0, 0.0, 0.45, 0.0],
+        [tx, ty, 0.0, 1.0],
+    ]
+}
+
+/// The view-projection: non-identity in every lane and not symmetric, so a
+/// transposed camera is visible and the vertex stage cannot pass by accident.
+fn view_proj() -> [[f32; 4]; 4] {
+    [
+        [0.9, 0.0, 0.0, 0.0],
+        [0.0, -0.8, 0.0, 0.0],
+        [0.0, 0.0, 0.5, 0.0],
+        [0.05, 0.05, 0.0, 1.0],
+    ]
 }
 
 /// Build the buffers for one flag value (`0` none, `1` hover, `2` selected).
@@ -89,17 +133,24 @@ fn inputs(device: &wgpu::Device, queue: &wgpu::Queue, flag: u32) -> Inputs {
     };
     let vertices = triangle();
     let vertex_bytes: Vec<u8> = vertices.iter().flat_map(|f| f.to_le_bytes()).collect();
-    // Thirteen `vec4` slots; slot 0..4 is `view_proj`, and an identity there
-    // makes the clip position the expanded object-space position.
+    // Thirteen `vec4` slots; slot 0..4 is `view_proj`, and a non-identity,
+    // non-symmetric matrix there means a transposed upload or a swapped lane
+    // changes the clip position instead of passing through untouched.
     let mut camera = [0u8; 13 * 16];
-    for (slot, lane) in [(0usize, 0usize), (1, 1), (2, 2), (3, 3)] {
-        let offset = slot * 16 + lane * 4;
-        camera[offset..offset + 4].copy_from_slice(&1.0f32.to_le_bytes());
+    for (row, columns) in view_proj().iter().enumerate() {
+        for (column, value) in columns.iter().enumerate() {
+            let offset = row * 16 + column * 4;
+            camera[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
     }
-    // `PerObject`: model (16 words, identity), the rest zero.
-    let mut objects = [0u8; 52 * 4];
-    for (word, lane) in [(0usize, 0usize), (4, 1), (8, 2), (12, 3)] {
-        objects[(word + lane) * 4..(word + lane + 1) * 4].copy_from_slice(&1.0f32.to_le_bytes());
+    // `PerObject`: model (16 words per instance, non-symmetric), the rest zero.
+    let mut objects = [0u8; 52 * 4 * INSTANCES as usize];
+    for index in 0..INSTANCES {
+        let base = (index * 52) as usize;
+        for (word, value) in model(index).iter().flat_map(|row| row.iter()).enumerate() {
+            let offset = (base + word) * 4;
+            objects[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
     }
     Inputs {
         vertices: create(
@@ -111,14 +162,35 @@ fn inputs(device: &wgpu::Device, queue: &wgpu::Queue, flag: u32) -> Inputs {
         objects: create("outline objects", &objects, wgpu::BufferUsages::STORAGE),
         indices: create(
             "outline indices",
-            &0u32.to_le_bytes(),
+            &Vec::from_iter(0..INSTANCES).to_bytes(),
             wgpu::BufferUsages::STORAGE,
         ),
         flags: create(
             "outline flags",
-            &flag.to_le_bytes(),
+            &flags_bytes(flag),
             wgpu::BufferUsages::STORAGE,
         ),
+        instances: INSTANCES,
+    }
+}
+
+/// The flag list, one entry per instance.
+fn flags_bytes(flag: u32) -> Vec<u8> {
+    (0..INSTANCES)
+        .map(|_| flag)
+        .collect::<Vec<u32>>()
+        .to_bytes()
+}
+
+/// Little-endian bytes of a `u32` list.
+trait ToBytes {
+    /// The words, little-endian.
+    fn to_bytes(&self) -> Vec<u8>;
+}
+
+impl ToBytes for Vec<u32> {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.iter().flat_map(|word| word.to_le_bytes()).collect()
     }
 }
 
@@ -236,7 +308,7 @@ fn render(
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_vertex_buffer(0, inputs.vertices.slice(..));
-            pass.draw(0..6, 0..1);
+            pass.draw(0..6, 0..inputs.instances);
         },
     )
 }
