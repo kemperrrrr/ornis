@@ -1,29 +1,27 @@
 //! Sequential-impulse isotropic contact row: one source of truth for CPU and GPU.
 //!
-//! The single-point contact row — a projected Gauss-Seidel normal update
-//! plus the circular Coulomb-cone friction clamp — lives here as plain Rust.
-//! The CPU wide path ([`crate::wide`]) and the scalar island velocity solve
-//! ([`crate::engine`]) call these functions directly; the GPU contact kernel
-//! (`crates/gpu-si`, translated to WGSL through LLVM IR) carries the same
-//! arithmetic word-addressed, and the device parity gates compare the two.
+//! The single-point contact row — a projected Gauss-Seidel normal update plus
+//! the circular Coulomb-cone friction clamp — lives here as plain, host-runnable
+//! Rust. The CPU wide path (`ornis-physics` wide/scalar islands) calls these
+//! functions directly, and the GPU contact kernel (`cs_main_contact`, this
+//! crate's entry) calls the same functions through the same names, so the
+//! device parity gates compare the kernel against the exact arithmetic it was
+//! translated from — no hand-copied second spelling that could drift on a NaN
+//! or a ±0.
 //!
 //! # Pilot boundary (deliberate)
 //!
-//! Only the isotropic row is shared. Anisotropic (elliptical-cone)
-//! friction, rolling/torsional resistance and the multi-point block LCP
-//! stay CPU-only: they need per-point `Vec3` frames and small dense solves
-//! with no lane-parallel GPU counterpart on this rung. The GPU shader keeps
-//! those coefficients CPU-side, as before.
+//! Only the isotropic row is shared. Anisotropic (elliptical-cone) friction,
+//! rolling/torsional resistance and the multi-point block LCP stay CPU-only:
+//! they need per-point `Vec3` frames and small dense solves with no
+//! lane-parallel GPU counterpart on this rung. The GPU shader keeps those
+//! coefficients CPU-side, as before.
 //!
-//! # Packaging note
-//!
-//! `wgpu` is an unconditional dependency of this crate while the `gpu` Cargo
-//! feature keeps gating device execution (the `gpu` module, solver attach, GPU
-//! branches). The workspace already builds `wgpu` unconditionally via
-//! `ornis-render`, so this adds no new build cost there.
-//!
-//! CPU/GPU agreement is by tolerance, never bit-identical: the GPU pass is
-//! a Jacobi/GS hybrid over wide batches (see `gpu.rs`).
+//! CPU/GPU agreement is by tolerance, never bit-identical: the GPU pass is a
+//! Jacobi/GS hybrid over wide batches (see `ornis-physics`'s `gpu` module).
+
+use ornis_gpu_abi::thresholds::DEGENERATE;
+use ornis_gpu_shader::sqrt;
 
 /// Projected Gauss-Seidel normal update for one isotropic contact.
 ///
@@ -36,9 +34,20 @@
 /// `spec_target` the speculative approach-speed limit (`0` when touching;
 /// named to avoid the reserved WGSL word `target`),
 /// `inv_k` the precomputed inverse effective mass (`0` for inert lanes).
-pub(crate) fn contact_normal_step(vn: f32, spec_target: f32, inv_k: f32, acc: f32) -> f32 {
+///
+/// # Errors
+///
+/// None — a pure float function.
+#[must_use]
+#[inline(always)]
+pub fn contact_normal_step(vn: f32, spec_target: f32, inv_k: f32, acc: f32) -> f32 {
     let lambda = (spec_target - vn) * inv_k;
-    (acc + lambda).max(0.0)
+    let candidate = acc + lambda;
+    let mut new_acc = 0.0;
+    if candidate > 0.0 {
+        new_acc = candidate;
+    }
+    new_acc
 }
 
 /// Circular Coulomb-cone clamp for one isotropic friction axis.
@@ -49,12 +58,19 @@ pub(crate) fn contact_normal_step(vn: f32, spec_target: f32, inv_k: f32, acc: f3
 /// (`mu * normal_impulse`). Returns the candidate projected onto the
 /// disc: untouched inside, scaled onto the circle outside. A degenerate
 /// (zero-length) pair passes through untouched — no division happens.
-pub(crate) fn contact_friction_clamp(new_t: f32, other: f32, max_friction: f32) -> f32 {
-    let len = (new_t * new_t + other * other).sqrt();
-    if len > max_friction && len > 1e-12 {
-        return new_t * (max_friction / len);
+///
+/// # Errors
+///
+/// None — a pure float function.
+#[must_use]
+#[inline(always)]
+pub fn contact_friction_clamp(new_t: f32, other: f32, max_friction: f32) -> f32 {
+    let len = sqrt(new_t * new_t + other * other);
+    let mut clamped = new_t;
+    if len > max_friction && len > DEGENERATE {
+        clamped = new_t * (max_friction / len);
     }
-    new_t
+    clamped
 }
 
 #[cfg(test)]

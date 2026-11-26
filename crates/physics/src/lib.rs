@@ -41,7 +41,6 @@ pub mod colliders;
 pub mod collision;
 /// Shared solver thresholds (effective-mass floor, degenerate length, …).
 pub(crate) mod constants;
-mod contact_math;
 /// Typed physics failures (point 5: thiserror hierarchies).
 pub mod errors;
 /// Typed replacements for legacy `bool` flags (point 3: bool -> enum).

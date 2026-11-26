@@ -40,6 +40,20 @@ pub mod shader {
 /// Import names the offline translator recognizes.
 pub mod symbols;
 
+/// Numerical floors the CPU references and the translated kernels share.
+///
+/// A gate below which a magnitude is f32 rounding dust. Both sides spell it
+/// once here: the kernel crate keeps the literal it lowers (a `const` the
+/// translator folds), and the CPU reference reads the same value, so a change
+/// on one side cannot leave the other behind.
+pub mod thresholds {
+    /// Length, length-squared, impulse and `dt²` floor shared by the contact
+    /// friction clamp and the AVBD degenerate-timestep gate.
+    pub const DEGENERATE: f32 = 1e-12;
+    /// Squared friction impulse treated as dust (the angular terms skip it).
+    pub const FRICTION_DUST: f32 = 1e-24;
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use gpu_abi::{HostMemory, with_host};
 pub use gpu_ref::{GpuRef, Storage, StorageSpace, Uniform, UniformSpace};

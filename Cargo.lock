@@ -2858,6 +2858,7 @@ dependencies = [
 name = "ornis-gpu-avbd"
 version = "0.1.0"
 dependencies = [
+ "ornis-gpu-abi",
  "ornis-gpu-shader",
 ]
 
@@ -3002,6 +3003,7 @@ dependencies = [
 name = "ornis-gpu-si"
 version = "0.1.0"
 dependencies = [
+ "ornis-gpu-abi",
  "ornis-gpu-shader",
 ]
 
@@ -3083,6 +3085,7 @@ dependencies = [
  "naga",
  "ornis-assets",
  "ornis-core",
+ "ornis-gpu-abi",
  "ornis-gpu-si",
  "ornis-macros",
  "ornis-schedule",

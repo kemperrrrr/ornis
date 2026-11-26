@@ -8,6 +8,7 @@ repository.workspace = true
 description = "AVBD inertial Hessian and dense LDL solve for the llvm2gpu path"
 
 [dependencies]
+ornis-gpu-abi = { path = "../gpu-abi", version = "0.1.0" }
 ornis-gpu-shader = { path = "../gpu-shader", version = "0.1.0" }
 
 [lib]

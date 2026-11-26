@@ -322,7 +322,7 @@ fn gpu_upload_reports_staged_and_dropped() {
 
 /// DSL-pilot agreement: one frictional contact solved on the GPU must
 /// match the CPU wide batch — both sides now run the shared
-/// `contact_math` row — within tolerance. Never bit-identical by
+/// `ornis_gpu_si::row` — within tolerance. Never bit-identical by
 /// promise (device float contraction may differ ±1 ulp per op), but
 /// the same row math on both sides.
 #[test]
@@ -371,7 +371,7 @@ fn gpu_contact_row_matches_cpu_kernels() {
     solver.download_acc(&mut gpu_batches);
 
     // CPU side: the same contact as a one-lane wide batch (the batch
-    // path calls `contact_math::...::eval` per lane).
+    // path calls `ornis_gpu_si::row` per lane).
     let manifolds = [Manifold {
         body_a: BodyHandle::from_raw(0),
         body_b: BodyHandle::from_raw(1),
@@ -1015,4 +1015,214 @@ fn avbd_row_solve_device_round_trip() {
         );
     }
     assert_eq!(deltas[1].to_residual(), [0.0; 6]);
+}
+
+/// Rung-1 device dispatch: `cs_main` against the CPU reference.
+///
+/// The stub used to have no device pipeline at all — the artifact existed and
+/// nothing ran it. This dispatches it over a mixed roster (one dynamic body,
+/// one static) and compares the solved deltas per member against
+/// [`GpuAvbdStub::stage_diag_solve`], with the same tolerance rule as the
+/// rung-2 gate: never bit-identical by promise.
+#[test]
+fn avbd_diag_solve_device_round_trip() {
+    let Some((device, queue)) = create_test_device() else {
+        eprintln!("avbd_diag_solve_device_round_trip: no wgpu adapter — skipped");
+        return;
+    };
+    let dt = 1.0 / 60.0;
+    let dynamic = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 2.0);
+    let static_body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 0.0);
+    let bodies = [dynamic, static_body];
+    let stub = GpuAvbdStub::new(8);
+    let masses = stub.mass_roster(&bodies);
+    // O(1e2) residuals against O(1e3) Hessian entries: solved deltas land
+    // O(0.01–0.1), above f32 device-vs-CPU contraction noise.
+    let rhs: Vec<[f32; 6]> = vec![[360.0, -720.0, 180.0, 90.0, -45.0, 720.0], [0.0; 6]];
+    let expected = stub
+        .stage_diag_solve(&bodies, &rhs, dt)
+        .expect("matching lengths");
+    assert!(
+        expected[0].iter().any(|value| *value != 0.0),
+        "the dynamic body must solve on CPU"
+    );
+
+    // Buffers in the kernel's word layout: a mass roster of 4 words per body,
+    // a rhs and a delta of 8 words per body (velocity, pad, angular, pad).
+    let mut mass_words = Vec::new();
+    for mass in &masses {
+        mass_words.extend_from_slice(bytemuck::cast_slice(&mass.inertia));
+        mass_words.extend_from_slice(bytemuck::bytes_of(&mass.inv_mass));
+    }
+    let to_words = |residual: &[f32; 6]| -> Vec<u8> {
+        let mut words = [0.0f32; 8];
+        words[0..3].copy_from_slice(&residual[0..3]);
+        words[4..7].copy_from_slice(&residual[3..6]);
+        bytemuck::cast_slice(&words).to_vec()
+    };
+    let rhs_words: Vec<u8> = rhs.iter().flat_map(to_words).collect();
+    let zeros = vec![0u8; 8 * 4 * bodies.len()];
+
+    let buffer = |label: &str, bytes: &[u8], read: bool| {
+        let mut usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::COPY_DST;
+        if read {
+            usage |= wgpu::BufferUsages::COPY_SRC;
+        }
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: bytes.len() as u64,
+            usage,
+            mapped_at_creation: false,
+        })
+    };
+    let mass_buf = buffer("avbd diag mass", &mass_words, false);
+    let rhs_buf = buffer("avbd diag rhs", &rhs_words, false);
+    let delta_buf = buffer("avbd diag delta", &zeros, true);
+    // 16 bytes each: a uniform block is one `UniformStruct` record, so the
+    // bind group has to cover the whole block, not just the value word.
+    queue.write_buffer(&mass_buf, 0, &mass_words);
+    queue.write_buffer(&rhs_buf, 0, &rhs_words);
+    let count_buf = buffer("avbd diag count", &[0u8; 16], false);
+    let dt_buf = buffer("avbd diag dt", &[0u8; 16], false);
+    queue.write_buffer(&count_buf, 0, &bodies.len().to_le_bytes());
+    queue.write_buffer(&dt_buf, 0, &dt.to_le_bytes());
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("physics_avbd_diag"),
+        source: wgpu::ShaderSource::Wgsl(avbd_stub_wgsl().into()),
+    });
+    // Bindings 0 and 1 are read-only in the artifact; only the delta is
+    // read-write.
+    let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let uniform = |binding: u32| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("physics_avbd_diag"),
+        entries: &[
+            storage(0, true),
+            storage(1, true),
+            storage(2, false),
+            uniform(3),
+            uniform(4),
+        ],
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("physics_avbd_diag"),
+        layout: &layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: mass_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: rhs_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: delta_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: count_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: dt_buf.as_entire_binding(),
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("physics_avbd_diag"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("physics_avbd_diag"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some(AVBD_STUB_ENTRY),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    // Read-back buffer, 256-byte row rules do not apply to a flat copy.
+    let delta_bytes = vec![0u8; 8 * 4 * bodies.len()];
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("avbd diag readback"),
+        size: delta_bytes.len() as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("physics_avbd_diag"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("physics_avbd_diag"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        // One workgroup of 64 covers the two-body roster.
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&delta_buf, 0, &readback, 0, delta_bytes.len() as u64);
+    queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll avbd readback");
+    let words: Vec<f32> = {
+        let mapped = slice.get_mapped_range().expect("mapped range");
+        let words: Vec<f32> = mapped
+            .chunks_exact(4)
+            .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect();
+        words
+    };
+
+    let from_words = |words: &[f32]| -> [f32; 6] {
+        [words[0], words[1], words[2], words[4], words[5], words[6]]
+    };
+    for (body, expected) in expected.iter().enumerate() {
+        let got = from_words(&words[body * 8..(body + 1) * 8]);
+        for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
+            let tol = 1e-3 + 1e-4 * e.abs().max(g.abs());
+            assert!(
+                (g - e).abs() <= tol,
+                "body {body} member {i}: device {g} vs CPU {e} (tol {tol})"
+            );
+        }
+    }
+    // The kernel never writes the two pad words per record, and the static
+    // body solves to zero everywhere: pads are words 3 and 7 of each record,
+    // so body 1's whole record and body 0's pads are the zero lanes.
+    for word in [3usize, 7, 11, 15] {
+        assert_eq!(words[word], 0.0, "pad word {word} must stay unwritten");
+    }
+    assert_eq!(
+        &words[8..16],
+        &[0.0; 8],
+        "the static body's record solves to zero"
+    );
 }

@@ -65,7 +65,7 @@ const INV_MASS_WORD: u32 = 3;
 /// First word of the angular half of a body-state record.
 const ANGULAR_WORD: u32 = 4;
 /// Timesteps at or below this magnitude are degenerate.
-const DEGENERATE_DT2: f32 = 1e-12;
+const DEGENERATE_DT2: f32 = ornis_gpu_abi::thresholds::DEGENERATE;
 
 /// Linear Hessian entry `m/dt²`, or `0.0` for statics and a degenerate `dt`.
 #[inline(always)]

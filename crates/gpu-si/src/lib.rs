@@ -3,9 +3,10 @@
 //!
 //! The kernel solves a batch of up to four single-point contacts per dispatch:
 //! the projected Gauss-Seidel normal row, the circular Coulomb clamp on two
-//! friction axes, and the one-shot restitution pass on the last iteration. Its
-//! CPU references live in `ornis-physics` — `contact_normal_step`,
-//! `contact_friction_clamp` and the wide/scalar islands that call them.
+//! friction axes, and the one-shot restitution pass on the last iteration. The
+//! row itself lives in [`row`] — the same functions `ornis-physics`'s wide and
+//! scalar islands call — so the kernel is a translation of the one
+//! arithmetic, not a hand-copied second spelling.
 //!
 //! Buffers are word-addressed — [`Storage`] of `f32` — because the host uploads
 //! `#[repr(C)]` records and the same buffers are read back by the CPU side:
@@ -40,9 +41,11 @@ use ornis_gpu_shader::dot3;
 use ornis_gpu_shader::global_invocation_lane;
 use ornis_gpu_shader::gpu_entry;
 use ornis_gpu_shader::local_invocation_index;
-use ornis_gpu_shader::sqrt;
 
 pub mod layout;
+
+/// The isotropic contact row both the CPU solvers and this kernel run.
+pub mod row;
 
 use layout::{
     ACC, ACC_F1, ACC_F2, APPLY_N_AX, APPLY_N_AY, APPLY_N_AZ, APPLY_N_BX, APPLY_N_BY, APPLY_N_BZ,
@@ -57,11 +60,13 @@ const BODY_WORDS: u32 = 8;
 /// First word of the angular half of a body-state record.
 const ANGULAR_WORD: u32 = 4;
 /// Impulse magnitudes below this are treated as no correction at all.
-const IMPULSE_EPS: f32 = 1e-12;
-/// Lengths below this are degenerate for the friction clamp (no division).
-const LENGTH_EPS: f32 = 1e-12;
+///
+/// The friction-clamp length floor is the same gate and lives with the row
+/// ([`row::contact_friction_clamp`]); the squared-friction dust threshold is
+/// [`FRICTION_EPS`].
+const IMPULSE_EPS: f32 = ornis_gpu_abi::thresholds::DEGENERATE;
 /// Squared friction impulses below this leave the angular terms untouched.
-const FRICTION_EPS: f32 = 1e-24;
+const FRICTION_EPS: f32 = ornis_gpu_abi::thresholds::FRICTION_DUST;
 /// Lanes per contact batch: one contact per lane, disjoint bodies per batch.
 const BATCH_LANES: u32 = 4;
 /// The `count` word: the last word before the record's padding.
@@ -75,37 +80,6 @@ impl GpuStruct for Params {
     const ID: u32 = 0;
     /// Three `u32` values and the padding the 16-byte block needs.
     const FIELD_TAGS: &'static [u8] = &[TYPE_TAG_U32; 4];
-}
-
-/// Projected Gauss-Seidel normal update for one isotropic contact.
-///
-/// Returns the caller's accumulation plus `(spec_target - vn) * inv_k`,
-/// projected onto the push-only half-line. Mirrors
-/// `ornis_physics::contact_math::contact_normal_step` exactly.
-#[inline(always)]
-fn normal_step(vn: f32, spec_target: f32, inv_k: f32, acc: f32) -> f32 {
-    let candidate = acc + (spec_target - vn) * inv_k;
-    let mut new_acc = 0.0;
-    if candidate > 0.0 {
-        new_acc = candidate;
-    }
-    new_acc
-}
-
-/// Circular Coulomb-cone clamp for one friction axis.
-///
-/// `new_t` is the candidate on this axis and `other` the accumulation on the
-/// perpendicular one; outside the cone of radius `max_friction` the candidate
-/// is scaled onto the circle. A degenerate pair passes through untouched.
-/// Mirrors `ornis_physics::contact_math::contact_friction_clamp` exactly.
-#[inline(always)]
-fn friction_clamp(new_t: f32, other: f32, max_friction: f32) -> f32 {
-    let len = sqrt(new_t * new_t + other * other);
-    let mut clamped = new_t;
-    if len > max_friction && len > LENGTH_EPS {
-        clamped = new_t * (max_friction / len);
-    }
-    clamped
 }
 
 /// One solver iteration for one contact lane.
@@ -176,7 +150,7 @@ pub fn cs_main_contact(
     let rel_z = (vb_z + cross_lane::<2>(wb_x, wb_y, wb_z, rb_x, rb_y, rb_z))
         - (va_z + cross_lane::<2>(wa_x, wa_y, wa_z, ra_x, ra_y, ra_z));
     let vn = dot3(rel_x, rel_y, rel_z, n_x, n_y, n_z);
-    let new_acc = normal_step(vn, spec_target, inv_k, acc);
+    let new_acc = row::contact_normal_step(vn, spec_target, inv_k, acc);
     let delta = new_acc - acc;
     acc = new_acc;
     if abs(delta) > IMPULSE_EPS {
@@ -219,7 +193,7 @@ pub fn cs_main_contact(
     if batch_buf.load(base + INV_K_T1 + lane) > 0.0 {
         let vt1 = dot3(rel2_x, rel2_y, rel2_z, t1_x, t1_y, t1_z);
         let raw = f1 - vt1 * batch_buf.load(base + INV_K_T1 + lane);
-        let new_t = friction_clamp(raw, f2, max_f);
+        let new_t = row::contact_friction_clamp(raw, f2, max_f);
         f_x += t1_x * (new_t - f1);
         f_y += t1_y * (new_t - f1);
         f_z += t1_z * (new_t - f1);
@@ -229,7 +203,7 @@ pub fn cs_main_contact(
     if batch_buf.load(base + INV_K_T2 + lane) > 0.0 {
         let vt2 = dot3(rel2_x, rel2_y, rel2_z, t2_x, t2_y, t2_z);
         let raw = f2 - vt2 * batch_buf.load(base + INV_K_T2 + lane);
-        let new_t = friction_clamp(raw, f1, max_f);
+        let new_t = row::contact_friction_clamp(raw, f1, max_f);
         f_x += t2_x * (new_t - f2);
         f_y += t2_y * (new_t - f2);
         f_z += t2_z * (new_t - f2);
@@ -352,33 +326,4 @@ pub fn cs_main_contact(
     batch_buf.store(base + ACC + lane, acc);
     batch_buf.store(base + ACC_F1 + lane, f1);
     batch_buf.store(base + ACC_F2 + lane, f2);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{friction_clamp, normal_step};
-
-    fn assert_close(got: f32, want: f32) {
-        assert!((got - want).abs() < 1e-6, "got {got}, want {want}");
-    }
-
-    /// The normal row accumulates on approach and never pulls: the projection
-    /// onto the push-only half-line is what makes the row stable.
-    #[test]
-    fn normal_step_accumulates_and_projects() {
-        assert_close(normal_step(-2.0, 0.0, 0.5, 0.0), 1.0);
-        assert_close(normal_step(1.0, 0.0, 0.5, 0.0), 0.0);
-        assert_close(normal_step(-1.0, 0.0, 1.0, 2.0), 3.0);
-        assert_close(normal_step(-2.0, 0.0, 0.0, 1.5), 1.5);
-    }
-
-    /// The cone clamp is the identity inside the disc, scales onto the circle
-    /// outside it, and never divides by a zero length.
-    #[test]
-    fn friction_clamp_projects_the_cone() {
-        assert_close(friction_clamp(1.0, 1.0, 5.0), 1.0);
-        assert_close(friction_clamp(3.0, 4.0, 2.5), 1.5);
-        assert_close(friction_clamp(0.0, 0.0, 1.0), 0.0);
-        assert_close(friction_clamp(2.0, 0.0, 0.0), 0.0);
-    }
 }

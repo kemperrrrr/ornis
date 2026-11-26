@@ -42,7 +42,7 @@
 //! one submit + blocking wait per iteration. Passes on a single queue keep
 //! dispatch-boundary memory visibility, so the Jacobi consistency model is
 //! unchanged — only the N−1 CPU round-trips are gone. The shader row calls
-//! the shared `contact_math` kernels (normal + friction clamp) stitched via
+//! the shared `ornis_gpu_si::row` kernels (normal + friction clamp) translated
 //! `helpers(...)` — one source of truth with the CPU wide/scalar paths;
 //! anisotropic and rolling coefficients stay CPU-only.
 //!

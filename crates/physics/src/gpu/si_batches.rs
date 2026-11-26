@@ -372,7 +372,7 @@ fn matvec(m: &[Vec3; 3], v: Vec3) -> Vec3 {
 /// The kernel is authored in [`ornis_gpu_si`] and translated to WGSL through
 /// LLVM IR; [`contact_solver_wgsl`] returns that artifact. The isotropic
 /// contact row (normal update, friction clamp) is the same Rust as
-/// [`crate::contact_math`] — the shader crate carries a word-addressed copy of
+/// [`ornis_gpu_si::row`] — the kernel calls the same functions, translated:
 /// it, and the parity gates compare the two on the device.
 ///
 /// The host's binding order is the kernel's: body state (read-write), contact

@@ -28,7 +28,7 @@ use bytemuck::Zeroable as _;
 ///
 /// The kernels carry the same threshold as their own literal: `crates/gpu-avbd`
 /// spells it in Rust, and the translator emits the constant where it is used.
-const DEGENERATE_EPS: f32 = 1e-12;
+const DEGENERATE_EPS: f32 = ornis_gpu_abi::thresholds::DEGENERATE;
 /// Minimum power-of-two body capacity for AVBD GPU buffers.
 const MIN_BUFFER_CAP: usize = 64;
 /// Bytes per `f32` / WGSL `f32` storage element.
