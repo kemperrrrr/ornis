@@ -22,13 +22,11 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
     var fragment_out: vec4<f32>;
 
     let _e8 = textureSampleLevel(tex_0_0_, sampler_0_1_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e14 = textureSampleLevel(tex_0_0_, sampler_0_1_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e20 = textureSampleLevel(tex_0_0_, sampler_0_1_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e32 = uniform_struct_0_2_.f0_;
-    let _e35 = smoothstep(_e32, (_e32 + 0.05f), (((_e8.x * 0.2126f) + (_e14.y * 0.7152f)) + (_e20.z * 0.0722f)));
-    fragment_out = vec4<f32>((_e8.x * _e35), (_e14.y * _e35), (_e20.z * _e35), 1f);
-    let _e43 = fragment_out;
-    return _e43;
+    let _e24 = uniform_struct_0_2_.f0_;
+    let _e27 = smoothstep(_e24, (_e24 + 0.05f), (((_e8.x * 0.2126f) + (_e8.y * 0.7152f)) + (_e8.z * 0.0722f)));
+    fragment_out = vec4<f32>((_e8.x * _e27), (_e8.y * _e27), (_e8.z * _e27), 1f);
+    let _e35 = fragment_out;
+    return _e35;
 }
 
 @vertex 

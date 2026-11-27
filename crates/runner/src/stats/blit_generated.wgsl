@@ -11,15 +11,14 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 
     let _e3 = textureDimensions(tex_0_0_);
     let _e17 = bitcast<u32>(max(bitcast<i32>(bitcast<u32>(min(bitcast<i32>(bitcast<u32>(i32(position.x))), bitcast<i32>((_e3.x + 4294967295u))))), bitcast<i32>(0u)));
-    let _e20 = textureDimensions(tex_0_0_);
-    let _e34 = bitcast<u32>(max(bitcast<i32>(bitcast<u32>(min(bitcast<i32>(bitcast<u32>(i32(position.y))), bitcast<i32>((_e20.y + 4294967295u))))), bitcast<i32>(0u)));
-    let _e40 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(_e17), bitcast<i32>(_e34)), 0i);
-    let _e47 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(_e17), bitcast<i32>(_e34)), 0i);
-    let _e54 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(_e17), bitcast<i32>(_e34)), 0i);
-    let _e61 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(_e17), bitcast<i32>(_e34)), 0i);
-    fragment_out = vec4<f32>(_e40.x, _e47.y, _e54.z, _e61.w);
-    let _e66 = fragment_out;
-    return _e66;
+    let _e32 = bitcast<u32>(max(bitcast<i32>(bitcast<u32>(min(bitcast<i32>(bitcast<u32>(i32(position.y))), bitcast<i32>((_e3.y + 4294967295u))))), bitcast<i32>(0u)));
+    let _e37 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(_e17), bitcast<i32>(_e32)), 0i);
+    let _e43 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(_e17), bitcast<i32>(_e32)), 0i);
+    let _e49 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(_e17), bitcast<i32>(_e32)), 0i);
+    let _e55 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(_e17), bitcast<i32>(_e32)), 0i);
+    fragment_out = vec4<f32>(_e37.x, _e43.y, _e49.z, _e55.w);
+    let _e60 = fragment_out;
+    return _e60;
 }
 
 @vertex 

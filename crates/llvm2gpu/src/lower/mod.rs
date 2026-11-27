@@ -280,6 +280,7 @@ mod flow;
 mod helper_calls;
 mod helpers;
 mod image;
+mod image_cache;
 mod instructions;
 mod io;
 mod loop_spill;

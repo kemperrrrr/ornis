@@ -4,12 +4,29 @@ use super::SCALAR_WIDTH;
 use super::VEC4_LANES;
 use super::emit::const_u32;
 use super::helpers::{UNIFORM_PREFIX, texture_xy};
+use super::image_cache::ImageRequest;
 use super::lowerer::Lowerer;
 use super::texture::TextureKind;
 use crate::error::TranslateError;
 use crate::parse::Operand;
 
 impl<'a, 'b> Lowerer<'a, 'b> {
+    /// The expression `request` already emitted in this function, else `expr`
+    /// appended now and remembered for the next lane that asks for it.
+    pub(crate) fn image_expr(
+        &mut self,
+        out: &mut naga::Block,
+        request: ImageRequest,
+        expr: naga::Expression,
+    ) -> naga::Handle<naga::Expression> {
+        if let Some(handle) = self.images.get(&request) {
+            return *handle;
+        }
+        let handle = self.expr(out, expr);
+        self.images.insert(request, handle);
+        handle
+    }
+
     /// `texture_load_2d_f32x4(group, binding, x, y, lane)` at mip 0.
     /// One lane of the `vec4<f32>` a sampled `texture_2d<f32>` returns.
     pub(crate) fn texture_load_lane(
@@ -83,9 +100,20 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let level = self.expr(out, naga::Expression::Literal(naga::Literal::I32(0)));
             (None, Some(level))
         };
-        let handle = self.expr(out, naga::Expression::GlobalVariable(image));
-        Ok(self.expr(
+        let handle = self.image_expr(
             out,
+            ImageRequest::Global(image),
+            naga::Expression::GlobalVariable(image),
+        );
+        Ok(self.image_expr(
+            out,
+            ImageRequest::Load {
+                image: handle,
+                coordinate,
+                array_index: None,
+                sample,
+                level,
+            },
             naga::Expression::ImageLoad {
                 image: handle,
                 coordinate,
@@ -110,9 +138,17 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let group = const_u32(&args[0])?;
         let binding = const_u32(&args[1])?;
         let image = self.builders.texture(group, binding, kind)?;
-        let handle = self.expr(out, naga::Expression::GlobalVariable(image));
-        let size = self.expr(
+        let handle = self.image_expr(
             out,
+            ImageRequest::Global(image),
+            naga::Expression::GlobalVariable(image),
+        );
+        let size = self.image_expr(
+            out,
+            ImageRequest::Size {
+                image: handle,
+                level: None,
+            },
             naga::Expression::ImageQuery {
                 image: handle,
                 query: naga::ImageQuery::Size { level: None },

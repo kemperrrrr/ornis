@@ -53,24 +53,18 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
     }
     let _e20 = forward_weight_u002e_sroa_u002e_0_u002e_0_;
     let _e22 = deferred_weight_u002e_sroa_u002e_0_u002e_0_;
-    let _e27 = textureSampleLevel(tex_0_1_, sampler_0_2_, vec2<f32>(uv.x, uv.y), 0f);
+    let _e23 = vec2<f32>(uv.x, uv.y);
+    let _e27 = textureSampleLevel(tex_0_1_, sampler_0_2_, _e23, 0f);
     let _e31 = uniform_struct_0_4_.f1_;
     let _e34 = uniform_struct_0_5_.f0_;
-    let _e39 = textureSampleLevel(tex_0_0_, sampler_0_2_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e45 = textureSampleLevel(tex_0_1_, sampler_0_2_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e55 = textureSampleLevel(tex_0_0_, sampler_0_2_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e61 = textureSampleLevel(tex_0_1_, sampler_0_2_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e71 = textureSampleLevel(tex_0_0_, sampler_0_2_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e77 = textureSampleLevel(tex_0_1_, sampler_0_2_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e87 = textureSampleLevel(tex_0_3_, sampler_0_2_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e91 = (_e34 * (((_e22 * _e39.x) + (_e20 * (_e27.w * _e45.x))) + (_e31 * _e87.x)));
-    let _e109 = textureSampleLevel(tex_0_3_, sampler_0_2_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e113 = (_e34 * (((_e22 * _e55.y) + (_e20 * (_e27.w * _e61.y))) + (_e31 * _e109.y)));
-    let _e131 = textureSampleLevel(tex_0_3_, sampler_0_2_, vec2<f32>(uv.x, uv.y), 0f);
-    let _e135 = (_e34 * (((_e22 * _e71.z) + (_e20 * (_e27.w * _e77.z))) + (_e31 * _e131.z)));
-    fragment_out = vec4<f32>(((_e91 * ((_e91 * 2.51f) + 0.03f)) / ((_e91 * ((_e91 * 2.43f) + 0.59f)) + 0.14f)), ((_e113 * ((_e113 * 2.51f) + 0.03f)) / ((_e113 * ((_e113 * 2.43f) + 0.59f)) + 0.14f)), ((_e135 * ((_e135 * 2.51f) + 0.03f)) / ((_e135 * ((_e135 * 2.43f) + 0.59f)) + 0.14f)), 1f);
-    let _e153 = fragment_out;
-    return _e153;
+    let _e37 = textureSampleLevel(tex_0_0_, sampler_0_2_, _e23, 0f);
+    let _e63 = textureSampleLevel(tex_0_3_, sampler_0_2_, _e23, 0f);
+    let _e67 = (_e34 * (((_e22 * _e37.x) + (_e20 * (_e27.w * _e27.x))) + (_e31 * _e63.x)));
+    let _e85 = (_e34 * (((_e22 * _e37.y) + (_e20 * (_e27.w * _e27.y))) + (_e31 * _e63.y)));
+    let _e103 = (_e34 * (((_e22 * _e37.z) + (_e20 * (_e27.w * _e27.z))) + (_e31 * _e63.z)));
+    fragment_out = vec4<f32>(((_e67 * ((_e67 * 2.51f) + 0.03f)) / ((_e67 * ((_e67 * 2.43f) + 0.59f)) + 0.14f)), ((_e85 * ((_e85 * 2.51f) + 0.03f)) / ((_e85 * ((_e85 * 2.43f) + 0.59f)) + 0.14f)), ((_e103 * ((_e103 * 2.51f) + 0.03f)) / ((_e103 * ((_e103 * 2.43f) + 0.59f)) + 0.14f)), 1f);
+    let _e121 = fragment_out;
+    return _e121;
 }
 
 @vertex 

@@ -755,60 +755,51 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) in0_: vec3<f32>,
     let _e2468 = ((_e163 + -1f) / (_e163 + 1f));
     let _e2469 = (_e2468 * _e2468);
     let _e2477 = (dot(vec3<f32>(_e15, _e16, _e17), vec3<f32>(_e37, _e38, _e39)) * 2f);
-    let _e2481 = ((_e15 * _e2477) - _e37);
-    let _e2482 = ((_e16 * _e2477) - _e38);
-    let _e2483 = ((_e17 * _e2477) - _e39);
     let _e2486 = uniform_struct_0_3_.f4_;
-    let _e2487 = (_e154 * _e2486);
-    let _e2491 = textureSampleLevel(tex_0_7_, sampler_0_10_, vec3<f32>(_e2481, _e2482, _e2483), _e2487);
-    let _e2496 = textureSampleLevel(tex_0_7_, sampler_0_10_, vec3<f32>(_e2481, _e2482, _e2483), _e2487);
-    let _e2501 = textureSampleLevel(tex_0_7_, sampler_0_10_, vec3<f32>(_e2481, _e2482, _e2483), _e2487);
-    let _e2506 = textureSample(tex_0_8_, sampler_0_10_, vec3<f32>(_e15, _e16, _e17));
-    let _e2511 = textureSample(tex_0_8_, sampler_0_10_, vec3<f32>(_e15, _e16, _e17));
-    let _e2516 = textureSample(tex_0_8_, sampler_0_10_, vec3<f32>(_e15, _e16, _e17));
-    let _e2521 = textureSample(tex_0_9_, sampler_0_10_, vec2<f32>(_e46, _e154));
-    let _e2526 = textureSample(tex_0_9_, sampler_0_10_, vec2<f32>(_e46, _e154));
-    let _e2529 = (1f - _e86);
-    let _e2535 = uniform_struct_0_3_.f3_;
-    let _e2548 = max((1f - _e2526.y), 0f);
-    let _e2572 = !((bitcast<f32>(_e435) >= 0.5f));
-    let _e2573 = select(_e2459, (((_e2392 + (mix(_e92, (_e92 * _e110), _e86) * _e2406)) + _e2459) + (_e2535 * ((_e2491.x * ((mix(_e2469, _e641, _e86) * _e2521.x) + _e2526.y)) + (((_e2529 * _e92) * _e2506.x) * _e2548)))), _e2572);
-    let _e2574 = select(_e2461, (((_e2394 + (mix(_e98, (_e98 * _e110), _e86) * _e2410)) + _e2461) + (_e2535 * ((_e2496.y * ((mix(_e2469, _e642, _e86) * _e2521.x) + _e2526.y)) + (((_e2529 * _e98) * _e2511.y) * _e2548)))), _e2572);
-    let _e2575 = select(_e2463, (((_e2396 + (mix(_e104, (_e104 * _e110), _e86) * _e2414)) + _e2463) + (_e2535 * ((_e2501.z * ((mix(_e2469, _e643, _e86) * _e2521.x) + _e2526.y)) + (((_e2529 * _e104) * _e2516.z) * _e2548)))), _e2572);
-    if ((_e2573 <= _e2573) && (0f <= 0f)) {
-        if (abs(_e2573) < 100000000000000000000f) {
-            _2_u002e_sroa_u002e_0_u002e_0_ = _e2573;
+    let _e2491 = textureSampleLevel(tex_0_7_, sampler_0_10_, vec3<f32>(((_e15 * _e2477) - _e37), ((_e16 * _e2477) - _e38), ((_e17 * _e2477) - _e39)), (_e154 * _e2486));
+    let _e2497 = textureSample(tex_0_8_, sampler_0_10_, vec3<f32>(_e15, _e16, _e17));
+    let _e2503 = textureSample(tex_0_9_, sampler_0_10_, vec2<f32>(_e46, _e154));
+    let _e2507 = (1f - _e86);
+    let _e2513 = uniform_struct_0_3_.f3_;
+    let _e2526 = max((1f - _e2503.y), 0f);
+    let _e2550 = !((bitcast<f32>(_e435) >= 0.5f));
+    let _e2551 = select(_e2459, (((_e2392 + (mix(_e92, (_e92 * _e110), _e86) * _e2406)) + _e2459) + (_e2513 * ((_e2491.x * ((mix(_e2469, _e641, _e86) * _e2503.x) + _e2503.y)) + (((_e2507 * _e92) * _e2497.x) * _e2526)))), _e2550);
+    let _e2552 = select(_e2461, (((_e2394 + (mix(_e98, (_e98 * _e110), _e86) * _e2410)) + _e2461) + (_e2513 * ((_e2491.y * ((mix(_e2469, _e642, _e86) * _e2503.x) + _e2503.y)) + (((_e2507 * _e98) * _e2497.y) * _e2526)))), _e2550);
+    let _e2553 = select(_e2463, (((_e2396 + (mix(_e104, (_e104 * _e110), _e86) * _e2414)) + _e2463) + (_e2513 * ((_e2491.z * ((mix(_e2469, _e643, _e86) * _e2503.x) + _e2503.y)) + (((_e2507 * _e104) * _e2497.z) * _e2526)))), _e2550);
+    if ((_e2551 <= _e2551) && (0f <= 0f)) {
+        if (abs(_e2551) < 100000000000000000000f) {
+            _2_u002e_sroa_u002e_0_u002e_0_ = _e2551;
         } else {
             _2_u002e_sroa_u002e_0_u002e_0_ = 0f;
         }
     } else {
         _2_u002e_sroa_u002e_0_u002e_0_ = 0f;
     }
-    let _e2589 = _2_u002e_sroa_u002e_0_u002e_0_;
-    if ((_e2574 <= _e2574) && (0f <= 0f)) {
-        if (abs(_e2574) < 100000000000000000000f) {
-            _3_u002e_sroa_u002e_0_u002e_0_ = _e2574;
+    let _e2567 = _2_u002e_sroa_u002e_0_u002e_0_;
+    if ((_e2552 <= _e2552) && (0f <= 0f)) {
+        if (abs(_e2552) < 100000000000000000000f) {
+            _3_u002e_sroa_u002e_0_u002e_0_ = _e2552;
         } else {
             _3_u002e_sroa_u002e_0_u002e_0_ = 0f;
         }
     } else {
         _3_u002e_sroa_u002e_0_u002e_0_ = 0f;
     }
-    let _e2603 = _3_u002e_sroa_u002e_0_u002e_0_;
-    if ((_e2575 <= _e2575) && (0f <= 0f)) {
-        if (abs(_e2575) < 100000000000000000000f) {
-            _4_u002e_sroa_u002e_0_u002e_0_ = _e2575;
-            let _e2613 = _4_u002e_sroa_u002e_0_u002e_0_;
-            fragment_out = vec4<f32>(_e2589, _e2603, _e2613, bitcast<f32>(_e425));
-            let _e2618 = fragment_out;
-            return _e2618;
+    let _e2581 = _3_u002e_sroa_u002e_0_u002e_0_;
+    if ((_e2553 <= _e2553) && (0f <= 0f)) {
+        if (abs(_e2553) < 100000000000000000000f) {
+            _4_u002e_sroa_u002e_0_u002e_0_ = _e2553;
+            let _e2591 = _4_u002e_sroa_u002e_0_u002e_0_;
+            fragment_out = vec4<f32>(_e2567, _e2581, _e2591, bitcast<f32>(_e425));
+            let _e2596 = fragment_out;
+            return _e2596;
         }
         _4_u002e_sroa_u002e_0_u002e_0_ = 0f;
     } else {
         _4_u002e_sroa_u002e_0_u002e_0_ = 0f;
     }
-    let _e2624 = _4_u002e_sroa_u002e_0_u002e_0_;
-    fragment_out = vec4<f32>(_e2589, _e2603, _e2624, bitcast<f32>(_e425));
-    let _e2629 = fragment_out;
-    return _e2629;
+    let _e2602 = _4_u002e_sroa_u002e_0_u002e_0_;
+    fragment_out = vec4<f32>(_e2567, _e2581, _e2602, bitcast<f32>(_e425));
+    let _e2607 = fragment_out;
+    return _e2607;
 }

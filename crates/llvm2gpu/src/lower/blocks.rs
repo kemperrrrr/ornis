@@ -15,6 +15,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         out: &mut naga::Block,
     ) -> Result<(), TranslateError> {
         crate::site::enter_block(&block.label);
+        // Image queries are shared within one straight-line region only: the
+        // expressions a block emits are scoped to it, so a handle from one
+        // block may not be reused in a sibling.
+        self.images.clear();
         for instr in &block.instrs {
             match instr {
                 Instr::Phi { dst, ty, .. } => {

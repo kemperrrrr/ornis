@@ -4,6 +4,7 @@ use super::builders::Builders;
 use super::cfg::Cfg;
 use super::emit::{append, push_emit, scalar};
 use super::flow::uniform_values;
+use super::image_cache::ImageCache;
 use super::lowerer::Lowerer;
 use super::memory::scalar_of;
 use super::stage::{Stage, StageIo, scan_io};
@@ -59,6 +60,7 @@ impl Builders {
             constants: HashMap::new(),
             diverged: false,
             returns_value: false,
+            images: ImageCache::default(),
         };
         if let Some((id_x, (_, name))) = args.id_x.zip(func.params.first()) {
             lowerer.env.insert(name.clone(), id_x);
@@ -141,6 +143,7 @@ impl Builders {
             constants: HashMap::new(),
             diverged: false,
             returns_value: true,
+            images: ImageCache::default(),
         };
         for (name, arg) in args {
             lowerer.env.insert(name, arg);

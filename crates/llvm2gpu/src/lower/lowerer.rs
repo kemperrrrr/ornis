@@ -3,6 +3,7 @@
 use super::builders::Builders;
 use super::cfg::{Cfg, Ctx, Env, Flow};
 use super::emit::scalar;
+use super::image_cache::ImageCache;
 use super::memory::{MemoryBase, MemoryPointer, StageOut, local_label};
 use super::stage::StageIo;
 use crate::error::TranslateError;
@@ -61,6 +62,9 @@ pub(crate) struct Lowerer<'a, 'b> {
     /// Whether `ret` returns a value (a helper) instead of storing it (the
     /// `cs_main(i32) -> f32` toy shape).
     pub(crate) returns_value: bool,
+    /// Image queries already emitted, so a second lane of the same texel
+    /// reads a component instead of sampling again.
+    pub(crate) images: ImageCache,
 }
 
 impl<'a, 'b> Lowerer<'a, 'b> {

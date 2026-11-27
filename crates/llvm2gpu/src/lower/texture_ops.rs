@@ -4,6 +4,7 @@ use super::VEC4_LANES;
 use super::emit::const_u32;
 use super::flow::vec_f32_type;
 use super::helpers::UNIFORM_PREFIX;
+use super::image_cache::{ImageRequest, SampleLevelKey};
 use super::lowerer::Lowerer;
 use super::texture::{
     COMPARE_VALUE_ARGS, OWNED_SAMPLE_ARGS, SampleMip, SampleShape, SampleTarget, TextureKind,
@@ -61,8 +62,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         let coord_ty = vec_f32_type(&mut self.builders.module, coordinate_lanes as u32)
             .ok_or_else(TranslateError::unsupported)?;
-        let coordinate = self.expr(
+        let coordinate = self.image_expr(
             out,
+            ImageRequest::Compose {
+                ty: coord_ty,
+                components: components.clone(),
+            },
             naga::Expression::Compose {
                 ty: coord_ty,
                 components,
@@ -71,11 +76,19 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let image = self
             .builders
             .texture_of(group, binding, kind, shape.dimension(), arrayed)?;
-        let image = self.expr(out, naga::Expression::GlobalVariable(image));
+        let image = self.image_expr(
+            out,
+            ImageRequest::Global(image),
+            naga::Expression::GlobalVariable(image),
+        );
         let sampler = self
             .builders
             .sampler_of(sampler_group, sampler_binding, comparison);
-        let sampler = self.expr(out, naga::Expression::GlobalVariable(sampler));
+        let sampler = self.image_expr(
+            out,
+            ImageRequest::Global(sampler),
+            naga::Expression::GlobalVariable(sampler),
+        );
         Ok(SampleTarget {
             coordinate,
             image,
@@ -110,30 +123,43 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             return Err(TranslateError::unsupported());
         }
         let target = self.sample_target(out, args, TextureKind::Sampled, shape, false, false)?;
-        let level = match level {
-            SampleMip::Auto => naga::SampleLevel::Auto,
+        let (level, level_key) = match level {
+            SampleMip::Auto => (naga::SampleLevel::Auto, SampleLevelKey::Auto),
             SampleMip::Zero => {
                 let zero = self.expr(out, naga::Expression::Literal(naga::Literal::F32(0.0)));
-                naga::SampleLevel::Exact(zero)
+                (naga::SampleLevel::Exact(zero), SampleLevelKey::Zero)
             }
             SampleMip::Operand => {
                 let lod = self.operand(out, &args[args.len() - 2])?;
-                naga::SampleLevel::Exact(lod)
+                (naga::SampleLevel::Exact(lod), SampleLevelKey::Exact(lod))
             }
         };
-        let texel = self.expr(
+        // `textureSample` without a level derives its mip from the
+        // derivatives at the call, so it is shared only within the block
+        // that emits it — which is where the per-lane imports sit.
+        let sample = naga::Expression::ImageSample {
+            image: target.image,
+            sampler: target.sampler,
+            gather: None,
+            coordinate: target.coordinate,
+            array_index: None,
+            offset: None,
+            level,
+            depth_ref: None,
+            clamp_to_edge: false,
+        };
+        let texel = self.image_expr(
             out,
-            naga::Expression::ImageSample {
+            ImageRequest::Sample {
                 image: target.image,
                 sampler: target.sampler,
-                gather: None,
                 coordinate: target.coordinate,
                 array_index: None,
-                offset: None,
-                level,
                 depth_ref: None,
+                level: level_key,
                 clamp_to_edge: false,
             },
+            sample,
         );
         Ok(self.expr(
             out,
@@ -171,8 +197,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         let coord_ty = vec_f32_type(&mut self.builders.module, coordinate_lanes as u32)
             .ok_or_else(TranslateError::unsupported)?;
-        let coordinate = self.expr(
+        let coordinate = self.image_expr(
             out,
+            ImageRequest::Compose {
+                ty: coord_ty,
+                components: components.clone(),
+            },
             naga::Expression::Compose {
                 ty: coord_ty,
                 components,
@@ -187,13 +217,30 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             shape.dimension(),
             true,
         )?;
-        let image = self.expr(out, naga::Expression::GlobalVariable(image));
+        let image = self.image_expr(
+            out,
+            ImageRequest::Global(image),
+            naga::Expression::GlobalVariable(image),
+        );
         let sampler = self
             .builders
             .sampler_of(sampler_group, sampler_binding, true);
-        let sampler = self.expr(out, naga::Expression::GlobalVariable(sampler));
-        Ok(self.expr(
+        let sampler = self.image_expr(
             out,
+            ImageRequest::Global(sampler),
+            naga::Expression::GlobalVariable(sampler),
+        );
+        Ok(self.image_expr(
+            out,
+            ImageRequest::Sample {
+                image,
+                sampler,
+                coordinate,
+                array_index: Some(layer),
+                depth_ref: Some(reference),
+                level: SampleLevelKey::Zero,
+                clamp_to_edge: false,
+            },
             naga::Expression::ImageSample {
                 image,
                 sampler,
