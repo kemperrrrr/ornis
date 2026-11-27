@@ -503,3 +503,45 @@ start:
     .validate(&module)
     .expect("a uniform struct with an array validates");
 }
+
+/// A uniform `array<u32, N>` (any element narrower than 16 bytes) cannot keep
+/// its padded stride in the WGSL text: the writer emits `array<u32, N>` and
+/// re-parsing recomputes a 4-byte stride, which naga rejects in the uniform
+/// address space. The rejection names the fix, so a shader author is not left
+/// with naga's raw "array stride 4" message.
+#[test]
+pub(crate) fn a_uniform_array_of_narrow_elements_is_rejected_with_the_fix() {
+    use ornis_gpu_abi::{TYPE_TAG_ARRAY, TYPE_TAG_F32, TYPE_TAG_U32};
+    let ir = r#"
+declare float @uniform_field_f32(i32, i32, i32, i32)
+declare void @storage_write_f32(i32, i32, i32, float)
+define void @cs_main(i32 %id) {
+start:
+  %v = call float @uniform_field_f32(i32 0, i32 0, i32 0, i32 1)
+  call void @storage_write_f32(i32 0, i32 2, i32 %id, float %v)
+  ret void
+}
+"#;
+    // Struct 0 is `{ values: array<u32, 3>, tail: f32 }`: laying it out is
+    // what walks the array tag.
+    let structs: &[&[u8]] = &[&[TYPE_TAG_ARRAY, TYPE_TAG_U32, 3, TYPE_TAG_F32]];
+    let func = crate::parse::parse_module(ir)
+        .expect("parse")
+        .funcs
+        .into_iter()
+        .find(|func| func.name == ornis_gpu_abi::symbols::CS_MAIN)
+        .expect("entry");
+    let mut lowering = Lowering::new(structs, crate::TextureSampling::SingleSample);
+    let error = lowering
+        .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
+        .expect_err("a uniform array of 4-byte elements");
+    let text = error.to_string();
+    assert!(
+        text.contains("wrap the element in a padded struct"),
+        "the rejection names the fix: {text}"
+    );
+    assert!(
+        text.contains("4-byte stride"),
+        "the rejection names the element stride: {text}"
+    );
+}

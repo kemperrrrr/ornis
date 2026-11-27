@@ -215,21 +215,24 @@ impl Builders {
             TranslateError::UnsupportedType("array field has no length".to_string())
         })?);
         let (element, size, align) = self.tag_type(element_tag)?;
-        let stride = ornis_gpu_abi::uniform_stride(size, align);
-        // WGSL requires a uniform array's stride to be a multiple of 16, so an
-        // element narrower than that (`array<f32, N>`, `array<u32, N>`) would
-        // only surface as naga's own "array stride must be a multiple of 16"
-        // — raw, and without naming the struct. The layout here rounds the
-        // stride up, but the *type* it emits cannot be padded, so this stays a
-        // rejection with the fix spelled out: wrap the element in a padded
-        // struct, which is what `CsmVp` and `Light` do.
-        if stride < ornis_gpu_abi::UNIFORM_STRUCT_ALIGN {
+        // WGSL cannot spell a uniform array's padded stride: the writer emits
+        // `array<E, N>` and re-parsing it recomputes the stride from `E`
+        // alone, so an element narrower than the 16-byte uniform alignment
+        // (`array<f32, N>`, `array<vec2<f32>, N>`) would only surface as
+        // naga's own "array stride 4 is not a multiple of the required
+        // alignment 16" — raw, and without naming the struct. The element
+        // stride, not the rounded uniform stride, decides: `vec3` is 12 bytes
+        // but rounds to 16 and is legal.
+        let element_stride = ornis_gpu_abi::storage_stride(size, align);
+        if !element_stride.is_multiple_of(ornis_gpu_abi::UNIFORM_STRUCT_ALIGN) {
             return Err(TranslateError::UnsupportedType(format!(
-                "a uniform array of {size}-byte elements has stride {stride}, but WGSL requires a \
-                 multiple of {} — wrap the element in a padded struct instead of a plain array",
+                "a uniform array of {size}-byte elements has an {element_stride}-byte stride, but \
+                 WGSL requires a multiple of {} — wrap the element in a padded struct instead of a \
+                 plain array",
                 ornis_gpu_abi::UNIFORM_STRUCT_ALIGN
             )));
         }
+        let stride = ornis_gpu_abi::uniform_stride(size, align);
         let ty = self.module.types.insert(
             naga::Type {
                 name: None,
