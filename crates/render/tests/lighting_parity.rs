@@ -9,9 +9,10 @@
 //! material id, depth), the material lookup across four records — dielectric,
 //! metal, coated fuzz and transmissive with a subsurface term — the ambient,
 //! emission and image-based terms, the direct light sum with one real light of
-//! each kind (a cascaded directional, a point with a cube shadow and a spot
-//! with an atlas shadow — the walk reads them from the clustered storage, and
-//! each one must move pixels on its own), the `debug_view` dispatch (beauty and
+//! each kind (a cascaded directional, a point with a cube shadow, a spot with
+//! an atlas shadow and a grid point the cluster span adds beyond the prefix —
+//! the walk reads them from the clustered storage, and each one must move
+//! pixels on its own), the `debug_view` dispatch (beauty and
 //! the diffuse view, which isolates the direct term) and, at 4x, the
 //! Karis-weighted resolve over partially covered samples. The shadow view runs
 //! the cascaded, atlas and cube lookups over shadow maps painted with a lit
@@ -117,7 +118,7 @@ fn translated_lighting_matches_the_dsl_pixels() {
 }
 
 /// The shadow visibility view, with every shadow path enabled: the cascaded
-/// directional, the atlas and both cube lights.
+/// directional, the atlas and the cube light.
 ///
 /// This is the one view that runs the lookups and reports them, so comparing
 /// it is what keeps the shadow selectors inside the gate.
@@ -158,7 +159,7 @@ fn each_light_moves_pixels_on_its_own() {
         return;
     };
     let lit = Inputs::new(&device, &queue, false, &keep_lights);
-    for kind in 0..3u32 {
+    for kind in 0..LIGHT_RECORDS as u32 {
         for view in [0u32, 3] {
             let dark = Inputs::new(&device, &queue, false, &light_off(kind as usize));
             let on = render(&device, &queue, &lit, DSL_1X, "fs_main", view);
@@ -458,13 +459,13 @@ impl Inputs {
             lighting_sampler: linear_sampler(device),
             shadow_tex: shadow_atlas(device, queue),
             shadow_sampler: comparison_sampler(device),
-            shadow_cube_tex: cleared_cube(device, queue, "lighting shadow cube"),
+            shadow_cube_tex: shadow_cube(device, queue),
             prefilter_cube: solid_cube(device, queue, "lighting prefiltered", [0.3, 0.4, 0.5, 1.0]),
             irradiance_cube: solid_cube(device, queue, "lighting irradiance", [0.6, 0.5, 0.4, 1.0]),
             brdf_lut: solid_texture(device, queue, "lighting brdf lut", [1.0, 0.5, 0.0, 1.0]),
             ibl_sampler: linear_sampler(device),
             ao_tex: ao_view(device, queue),
-            csm_tex: cleared_depth(device, queue, "lighting cascade atlas", CASCADES as u32),
+            csm_tex: shadow_cascades(device, queue),
             cluster_params: storage(
                 device,
                 queue,
@@ -958,8 +959,10 @@ fn put(bytes: &mut [u8], at: usize, lane: usize, value: f32) {
 ///
 /// Light `0` is directional with `params.x = 1.0`, above `CSM_ACTIVE_EDGE`, so
 /// it takes the cascaded path and has no atlas layer (`params.w < 0`); light
-/// `1` is a point light with a cube layer; light `2` is a spot light with a
-/// cube layer as well, so the cone term and the cube selector both run.
+/// `1` is a point light with cube layer `0`; light `2` is a spot light with
+/// atlas layer `1`, so the cone term and the atlas selector both run. The
+/// fourth light sits behind the prefix and reaches the walk only through the
+/// cluster span (see [`cluster_grid_bytes`]).
 // qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
 fn lighting_bytes() -> Vec<u8> {
     let mut bytes = vec![0u8; CSM_AT + CASCADES * CASCADE_BYTES + 64];
@@ -997,21 +1000,22 @@ fn lighting_bytes() -> Vec<u8> {
     bytes
 }
 
-/// The three real lights, in the record layout both the uniform block and the
+/// The four real lights, in the record layout both the uniform block and the
 /// clustered storage spell (`Light`: kind, direction, position, colour with an
 /// intensity lane, params, shadow view-projection).
 ///
 /// Light `0` is directional with `params.x = 1.0`, above `CSM_ACTIVE_EDGE`, so
 /// it takes the cascaded path and has no atlas layer (`params.w < 0`); light
-/// `1` is a point light with a cube layer; light `2` is a spot light with a
-/// cube-side layer `1`, so the cone term and the atlas selector both run.
+/// `1` is a point light with cube layer `0`; light `2` is a spot light with
+/// atlas layer `1`, so the cone term and the atlas selector both run; light
+/// `3` is the point the cluster grid adds beyond the prefix.
 ///
 /// Both shadowed lights get a finite view-projection: a zero matrix would
 /// divide by a zero `w`, and the compare that follows would be a NaN
 /// lookup — the shaders could then differ over how a driver answers it,
 /// which is not what this gate is about.
 fn light_records() -> Vec<u8> {
-    let mut records = vec![0u8; GRID_LIGHT_COUNT * LIGHT_BYTES];
+    let mut records = vec![0u8; LIGHT_RECORDS * LIGHT_BYTES];
     let at = |record: usize, field: usize| record * LIGHT_BYTES + field;
     // Directional, cascaded, no atlas layer.
     put(&mut records, at(0, 0), 0, 0.0);
@@ -1057,8 +1061,12 @@ fn light_records() -> Vec<u8> {
     for (lane, value) in [6.0f32, 0.95, 0.7, 1.0].into_iter().enumerate() {
         put(&mut records, at(2, FIELD_PARAMS), lane, value);
     }
-    // Grid light: a second point off to the side, in front of the slab, so
-    // the indirect path (grid span → index → record) carries its own light.
+    // Grid light: a point in front of the slab's centre, so the indirect path
+    // (grid span → index → record) carries a light of its own. Off the view
+    // axis it is culled: the surface normals stay within 0.35 of `+z`, so a
+    // light far to the side makes `dot(n, l)` negative and the `nol > EPS`
+    // guard drops it for every texel — a record that is in the storage but
+    // cannot reach the frame.
     // The direction must not be zero: the cone term normalises it even for
     // points, and a zero vector turns the whole frame non-finite (see the
     // point light above).
@@ -1066,17 +1074,19 @@ fn light_records() -> Vec<u8> {
     for (lane, value) in [0.2f32, 0.3, 1.0].into_iter().enumerate() {
         put(&mut records, at(3, FIELD_DIRECTION), lane, value);
     }
-    for (lane, value) in [-1.6f32, -0.8, 4.2].into_iter().enumerate() {
+    for (lane, value) in [0.2f32, 0.3, 3.6].into_iter().enumerate() {
         put(&mut records, at(3, FIELD_POSITION), lane, value);
     }
-    for (lane, value) in [0.15f32, 0.4, 0.9, 1.5].into_iter().enumerate() {
+    for (lane, value) in [0.15f32, 0.4, 0.9, 3.0].into_iter().enumerate() {
         put(&mut records, at(3, FIELD_COLOR), lane, value);
     }
-    for (lane, value) in [10.0f32, 0.99, 0.9, 1.0].into_iter().enumerate() {
+    // No shadow layer: `params.w < 0` skips the lookup, and this record is
+    // here for the indirect path, not for a second cube comparison.
+    for (lane, value) in [6.0f32, 0.99, 0.9, -1.0].into_iter().enumerate() {
         put(&mut records, at(3, FIELD_PARAMS), lane, value);
     }
     let columns = view_proj().to_cols_array();
-    for record in 1..GRID_LIGHT_COUNT {
+    for record in 1..LIGHT_RECORDS {
         let vp = at(record, FIELD_SHADOW_VP);
         records[vp..vp + 64].copy_from_slice(bytemuck::bytes_of(&columns));
     }
@@ -1153,20 +1163,27 @@ fn cluster_params_bytes() -> Vec<u8> {
     bytes
 }
 
-/// Lights the walk reads through the grid span (beyond `light_count`).
-const GRID_LIGHT_COUNT: usize = 4;
+/// Records staged in the clustered storage: the three prefix lights plus the
+/// grid point, which the walk reaches only through its cluster span.
+const LIGHT_RECORDS: usize = 4;
 /// Spans the grid carries: the full `CLUSTERS_X × CLUSTERS_Y × CLUSTERS_Z`
 /// grid, because `cluster_index` addresses every cell — a short buffer sends
 /// most texels out of bounds, and an out-of-bounds storage read is undefined.
 /// 16×9×24, the `cluster_index` grid (`gpu-pbr` layout constants).
 const GRID_SPANS: u32 = 16 * 9 * 24;
 
-/// The cluster grid: cell 0 claims one light (record 3, the grid point
-/// light), every other cell has an empty span.
+/// The cluster grid: every cell claims one light (record 3, the grid point).
+///
+/// A span per cell, not one cell 0: `cluster_light_span` addresses the span by
+/// the fragment's cell, so a light only in cell 0 never reaches a fragment
+/// shaded in cell 1 — the record was in the storage but the frame was
+/// indifferent to it.
 fn cluster_grid_bytes() -> Vec<u8> {
     let mut words = vec![0u32; (GRID_SPANS * 2) as usize];
-    words[0] = 0;
-    words[1] = 1;
+    for cell in words.chunks_exact_mut(2) {
+        cell[0] = 0;
+        cell[1] = 1;
+    }
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     bytes
 }
@@ -1625,33 +1642,47 @@ fn depth_texture(
     })
 }
 
-/// A depth texture of `layers` cleared to the lit far-plane floor, so every
-/// compare is lit. The returned view is a depth-array view.
+/// The cascaded shadow atlas: every cascade cleared to the lit far-plane
+/// floor and painted with the occluder band over its lower half, so the
+/// cascade path reports both a lit and an occluded texel.
 ///
-/// On this stack the comparison sampler's `Less` reports `ref < texel` (the
-/// Metal operand order), so the lit floor is the far plane (`1.0`) and an
+/// The comparison sampler compares `ref <= texel` (`LessEqual`, like the
+/// renderer's shadow pools), so the lit floor is the far plane (`1.0`) and an
 /// occluder is any texel *below* the reference — a cleared-to-near (`0.0`)
 /// map shadows every texel, which is how an earlier revision of this stand
 /// silently zeroed the whole direct term.
-fn cleared_depth(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    label: &str,
-    layers: u32,
-) -> wgpu::TextureView {
-    let texture = depth_texture(device, label, extent(SIZE.0, SIZE.1, layers), 1);
-    clear_layers(device, queue, &texture, layers, label, 1.0);
+fn shadow_cascades(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    let texture = depth_texture(
+        device,
+        "lighting cascade atlas",
+        extent(SIZE.0, SIZE.1, CASCADES as u32),
+        1,
+    );
+    clear_layers(
+        device,
+        queue,
+        &texture,
+        CASCADES as u32,
+        "lighting cascade atlas",
+        1.0,
+    );
+    for cascade in 0..CASCADES as u32 {
+        paint_shadow_band(device, queue, &texture, cascade);
+    }
     texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     })
 }
 
-/// A cube depth texture cleared to the lit far-plane floor, viewed as a cube
-/// array (same `ref < texel` compare semantics as [`cleared_depth`]).
-fn cleared_cube(device: &wgpu::Device, queue: &wgpu::Queue, label: &str) -> wgpu::TextureView {
-    let texture = depth_texture(device, label, extent(SIZE.0, SIZE.1, 6), 1);
-    clear_layers(device, queue, &texture, 6, label, 1.0);
+/// The cube shadow map: all six faces cleared to the lit floor and painted
+/// with the same band, viewed as a cube array.
+fn shadow_cube(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    let texture = depth_texture(device, "lighting shadow cube", extent(SIZE.0, SIZE.1, 6), 1);
+    clear_layers(device, queue, &texture, 6, "lighting shadow cube", 1.0);
+    for face in 0..6 {
+        paint_shadow_band(device, queue, &texture, face);
+    }
     texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::CubeArray),
         ..Default::default()
@@ -1659,15 +1690,17 @@ fn cleared_cube(device: &wgpu::Device, queue: &wgpu::Queue, label: &str) -> wgpu
 }
 
 /// The occluder the shadow view reads: a near-plane band (`0.0`) over the
-/// lower half of one atlas layer.
+/// lower half of a depth layer, painted into every cascade and every cube face
+/// as well as the atlas.
 ///
-/// With the `ref < texel` compare of this stack (see [`cleared_depth`]), a
+/// With the `ref <= texel` compare of this stack (see [`shadow_cascades`]), a
 /// fragment reference (0.2–0.9 here) passes against the 1.0 floor and fails
 /// against the 0.0 band: fragments whose shadow projection lands in the band
 /// are occluded; the rest of the map stays on the lit floor. Without a
 /// painted occluder the shadow view is a vacuum — every texel reports full
-/// visibility and the
-/// selector could be deleted without the parity gate noticing.
+/// visibility and the selector could be deleted without the parity gate
+/// noticing.
+///
 /// A depth-only quad writer: `TOP` clips the strip to the lower half (the
 /// occluder band) or leaves it full (a whole-layer fill), and `DEPTH` is the
 /// depth the fragments store.
@@ -1722,7 +1755,8 @@ fn depth_fill_pipeline(device: &wgpu::Device, top: f32, depth: f32) -> wgpu::Ren
     })
 }
 
-/// Paint the occluder band into `layer` of the shadow atlas.
+/// Paint the occluder band into one layer of `texture`: an atlas layer, a
+/// cascade or a cube face.
 fn paint_shadow_band(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1762,9 +1796,9 @@ fn paint_shadow_band(
     queue.submit(std::iter::once(encoder.finish()));
 }
 
-/// The shadow atlas: layer 0 the point light reads is the lit near-plane
-/// floor; layer 1, the spot light's layer, carries the painted occluder band
-/// over its lower half.
+/// The shadow atlas: layer 0 is the lit near-plane floor (no staged light
+/// samples it — the point light reads the cube map); layer 1, the spot
+/// light's layer, carries the painted occluder band over its lower half.
 ///
 /// The texture is returned rather than the view because the band painter
 /// needs the texture itself (a per-layer view).
@@ -1949,13 +1983,13 @@ fn linear_sampler(device: &wgpu::Device) -> wgpu::Sampler {
     })
 }
 
-/// A sampler that compares with `Less`, like the shadow passes build.
+/// The comparison sampler the renderer's shadow pools build (`LessEqual` over
+/// [`SamplerKind::LinearClamp`]), so the stand fetches through the descriptor
+/// production uses instead of an equivalent-looking one.
 fn comparison_sampler(device: &wgpu::Device) -> wgpu::Sampler {
     device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("lighting shadow sampler"),
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        compare: Some(wgpu::CompareFunction::Less),
-        ..Default::default()
+        compare: Some(wgpu::CompareFunction::LessEqual),
+        ..ornis_render::flags::SamplerKind::LinearClamp.descriptor()
     })
 }
