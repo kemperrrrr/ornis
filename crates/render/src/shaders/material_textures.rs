@@ -276,15 +276,27 @@ mod tests {
     fn sampled_factors_compose_as_plain_multiplies() {
         let module = wgsl_source_textured();
         // One sampler for every role: binding 19, the table's only sampler
-        // the material textures may use.
+        // the material textures may use. The roles share one material UV, so
+        // the coordinate is one expression — the translator's image-query
+        // dedupe composes it once — and the gate pins that shared operand
+        // and its definition rather than spelling the coordinate at each
+        // call, which the dedupe would turn red again.
+        let mut uvs = Vec::new();
         for role in ["tex_0_16_", "tex_0_17_", "tex_0_18_"] {
-            assert!(
-                module.contains(&format!(
-                    "textureSample({role}, sampler_0_19_, vec2<f32>(in2_.x, in2_.y))"
-                )),
-                "`{role}` is not sampled with the material sampler at the material UV"
-            );
+            let prefix = format!("textureSample({role}, sampler_0_19_, ");
+            let start = module
+                .find(&prefix)
+                .unwrap_or_else(|| panic!("`{role}` is not sampled with the material sampler"));
+            let rest = &module[start + prefix.len()..];
+            let end = rest.find(')').expect("the sample call is closed");
+            uvs.push(rest[..end].to_string());
         }
+        assert!(
+            uvs.windows(2).all(|pair| pair[0] == pair[1]),
+            "the roles must sample at one material UV, got {uvs:?}"
+        );
+        let uv = format!("let {} = vec2<f32>(in2_.x, in2_.y);", uvs[0]);
+        assert!(module.contains(&uv), "`{}` is not the material UV", uvs[0]);
         // DSL spellings must not leak into the committed artifact.
         for leaked in ["Vec3", "glam", "f32_lit"] {
             assert!(!module.contains(leaked), "`{leaked}` leaked into the WGSL");
