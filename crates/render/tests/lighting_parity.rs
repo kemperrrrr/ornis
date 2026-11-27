@@ -8,22 +8,22 @@
 //! What the gate covers: the g-buffer read (albedo, alpha, octahedral normal,
 //! material id, depth), the material lookup across four records — dielectric,
 //! metal, coated fuzz and transmissive with a subsurface term — the ambient,
-//! emission and image-based terms, the `debug_view` dispatch (beauty and the
-//! diffuse view, which isolates the direct term) and, at 4x, the Karis-weighted
-//! resolve over partially covered samples. The shadow view closes over the
-//! cascaded, atlas and cube lookups: it is the one image that reports them, so
-//! comparing it is what keeps the shadow selectors inside the gate.
+//! emission and image-based terms, the direct light sum with one real light of
+//! each kind (a cascaded directional, a point with a cube shadow and a spot
+//! with an atlas shadow — the walk reads them from the clustered storage, and
+//! each one must move pixels on its own), the `debug_view` dispatch (beauty and
+//! the diffuse view, which isolates the direct term) and, at 4x, the
+//! Karis-weighted resolve over partially covered samples. The shadow view runs
+//! the cascaded, atlas and cube lookups over shadow maps painted with a lit
+//! floor and one shadowed band, so it reports both a lit and an occluded
+//! texel — a vacuum image cannot keep the shadow selectors inside the gate.
 //!
-//! What it does **not** cover, and why: the direct-light sum. Filling the
-//! clustered light list with real radiance makes the frozen DSL reference
-//! produce non-finite channels, and the translated kernel clears them
-//! (`sanitize_hdr` selects per channel; the DSL multiplied by a `0/1` mask,
-//! and `NaN * 0` stays `NaN`). `compare` therefore counts non-finite-vs-zero
-//! texels separately from mismatches — but rather than lean on that for the
-//! whole frame, the inputs here keep the light list at zero intensity, so every
-//! texel the gate compares is finite on both sides. Giving the pass a lit
-//! punctual light is the open item this raises: the two shaders then disagree
-//! about more than the `NaN`, and that is a kernel question, not a test one.
+//! One recorded difference: the frozen DSL's `sanitize_hdr` multiplied by a
+//! 0/1 mask, and `NaN * 0` stays `NaN`; the translated kernel selects per
+//! channel and clears. `compare` counts non-finite-vs-zero texels separately
+//! from mismatches and the gates pin the count to zero — with the input as
+//! staged the reference is finite everywhere, so a divergence is a gate
+//! failure, not an accepted footnote.
 //!
 //! `assert_lit` guards the other direction: a frame that rendered nothing
 //! would compare equal to itself, so the reference has to carry light and
@@ -93,7 +93,7 @@ fn translated_lighting_matches_the_dsl_pixels() {
     let Some((device, queue)) = device_pair() else {
         return;
     };
-    let inputs = Inputs::new(&device, &queue, false, keep_lights);
+    let inputs = Inputs::new(&device, &queue, false, &keep_lights);
     for debug_view in DEBUG_VIEWS {
         let reference = render(&device, &queue, &inputs, DSL_1X, "fs_main", debug_view);
         let translated = render(
@@ -121,12 +121,13 @@ fn translated_lighting_matches_the_dsl_pixels() {
 ///
 /// This is the one view that runs the lookups and reports them, so comparing
 /// it is what keeps the shadow selectors inside the gate.
+// qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
 #[test]
 fn translated_shadow_visibility_matches_the_dsl_pixels() {
     let Some((device, queue)) = device_pair() else {
         return;
     };
-    let inputs = Inputs::new(&device, &queue, false, keep_lights);
+    let inputs = Inputs::new(&device, &queue, false, &keep_lights);
     let reference = render(&device, &queue, &inputs, DSL_1X, "fs_main", 6);
     let translated = render(
         &device,
@@ -144,12 +145,119 @@ fn translated_shadow_visibility_matches_the_dsl_pixels() {
     );
 }
 
+/// Every light moves pixels on its own: turning one off changes the beauty
+/// frame and the diffuse view.
+///
+/// A light the stand never reaches — the failure mode that leaves the frame
+/// lit by ambient only — would make an on/off pair identical here, which is
+/// how the earlier revision (records staged in the block's own array, which
+/// the walk never reads) passed while covering no direct light at all.
+#[test]
+fn each_light_moves_pixels_on_its_own() {
+    let Some((device, queue)) = device_pair() else {
+        return;
+    };
+    let lit = Inputs::new(&device, &queue, false, &keep_lights);
+    for kind in 0..3u32 {
+        for view in [0u32, 3] {
+            let dark = Inputs::new(&device, &queue, false, &light_off(kind as usize));
+            let on = render(&device, &queue, &lit, DSL_1X, "fs_main", view);
+            let off = render(&device, &queue, &dark, DSL_1X, "fs_main", view);
+            let differing = differing_texels(&on, &off);
+            assert!(
+                differing > 0,
+                "light {kind} contributes nothing in view {view}: {differing} texels changed"
+            );
+        }
+    }
+}
+
+/// The shadow view is not a vacuum: some texels report full visibility, some
+/// are occluded by the painted band, and the spot light's radiance actually
+/// follows the band (lit above it, dark below it).
+// qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
+#[test]
+fn shadow_view_reports_lit_and_occluded_texels() {
+    let Some((device, queue)) = device_pair() else {
+        return;
+    };
+    let inputs = Inputs::new(&device, &queue, false, &keep_lights);
+    let beauty_lit = render(&device, &queue, &inputs, DSL_1X, "fs_main", 0);
+    let shadow = render(&device, &queue, &inputs, DSL_1X, "fs_main", 6);
+    // The readback rows carry padding chunks; keep the real texels only.
+    let real: Vec<(usize, usize, [f32; 3])> = shadow
+        .chunks_exact(8)
+        .enumerate()
+        .filter(|(index, _)| index % (SIZE.0 as usize + 16) < SIZE.0 as usize)
+        .map(|(index, texel)| {
+            let x = index % (SIZE.0 as usize + 16);
+            let y = index / (SIZE.0 as usize + 16);
+            (x, y, [0usize, 2, 4].map(|l| half_to_f32(&texel[l..l + 2])))
+        })
+        .collect();
+    let shadow_r = |t: &(usize, usize, [f32; 3])| t.2[0];
+    let lit = real.iter().filter(|t| shadow_r(t) > 0.999).count();
+    let occluded = real.iter().filter(|t| shadow_r(t) < 0.001).count();
+    assert!(
+        lit > 0 && occluded > 0,
+        "shadow view vacuum: {lit} fully visible, {occluded} fully occluded — the band did not reach the atlas"
+    );
+    // The band occludes the spot light, so turning it off must not change
+    // the band region of the beauty frame — and must change the lit region.
+    let dark = Inputs::new(&device, &queue, false, &light_off(2));
+    let beauty_dark = render(&device, &queue, &dark, DSL_1X, "fs_main", 0);
+    let real_lit: Vec<[f32; 3]> = beauty_lit
+        .chunks_exact(8)
+        .enumerate()
+        .filter(|(index, _)| index % (SIZE.0 as usize + 16) < SIZE.0 as usize)
+        .map(|(_, texel)| [0usize, 2, 4].map(|l| half_to_f32(&texel[l..l + 2])))
+        .collect();
+    let real_dark: Vec<[f32; 3]> = beauty_dark
+        .chunks_exact(8)
+        .enumerate()
+        .filter(|(index, _)| index % (SIZE.0 as usize + 16) < SIZE.0 as usize)
+        .map(|(_, texel)| [0usize, 2, 4].map(|l| half_to_f32(&texel[l..l + 2])))
+        .collect();
+    let band = SIZE.1 as usize / 2;
+    let row = |t: &[f32; 3]| {
+        (
+            (t[0] * 1e4) as i64,
+            (t[1] * 1e4) as i64,
+            (t[2] * 1e4) as i64,
+        )
+    };
+    let changed: Vec<bool> = real_lit
+        .iter()
+        .zip(real_dark.iter())
+        .map(|(a, b)| row(a) != row(b))
+        .collect();
+    let lit_half = changed[..band * (SIZE.0 as usize)].iter().any(|c| *c);
+    let band_half_unchanged = changed[band * (SIZE.0 as usize)..].iter().all(|c| !c);
+    let sample: Vec<(usize, usize, [f32; 3], [f32; 3])> = changed[band * (SIZE.0 as usize)..]
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| **c)
+        .map(|(i, _)| {
+            let x = i % SIZE.0 as usize;
+            let y = band + i / SIZE.0 as usize;
+            let at = y * (SIZE.0 as usize) + x;
+            (x, y, real_lit[at], real_dark[at])
+        })
+        .take(4)
+        .collect();
+    assert!(
+        lit_half && band_half_unchanged,
+        "spot light does not follow the shadow band: lit half changed = {lit_half}, band half changed = {}, changed texels = {sample:?}",
+        !band_half_unchanged
+    );
+}
+
 #[test]
 fn translated_msaa_lighting_matches_the_dsl_pixels() {
     let Some((device, queue)) = device_pair() else {
         return;
     };
-    let inputs = Inputs::new(&device, &queue, true, keep_lights);
+    let inputs = Inputs::new(&device, &queue, true, &keep_lights);
     let reference = render(&device, &queue, &inputs, DSL_4X, "fs_main", 0);
     let translated = render(
         &device,
@@ -242,6 +350,23 @@ fn compare(reference: &[u8], candidate: &[u8]) -> Comparison {
     comparison
 }
 
+/// Count texels whose half-float channels differ by more than the tolerance.
+fn differing_texels(reference: &[u8], candidate: &[u8]) -> usize {
+    reference
+        .chunks_exact(8)
+        .zip(candidate.chunks_exact(8))
+        .filter(|(a, b)| {
+            (0..8).step_by(2).any(|lane| {
+                let (x, y) = (
+                    half_to_f32(&a[lane..lane + 2]),
+                    half_to_f32(&b[lane..lane + 2]),
+                );
+                x.is_finite() && y.is_finite() && (x - y).abs() > FLOAT_TOLERANCE
+            })
+        })
+        .count()
+}
+
 /// Every input the lighting pass reads, in binding order.
 struct Inputs {
     /// Whether the three per-sample layers are 4x ones.
@@ -302,10 +427,10 @@ impl Inputs {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         multisampled: bool,
-        patch: fn(&mut Vec<u8>, &mut Vec<u8>),
+        patch: &dyn Fn(&mut Vec<u8>, &mut Vec<u8>),
     ) -> Self {
         let mut lighting = lighting_bytes();
-        let mut clustered = clustered_bytes();
+        let mut clustered = clustered_lights_bytes();
         patch(&mut lighting, &mut clustered);
         Self {
             multisampled,
@@ -331,7 +456,7 @@ impl Inputs {
                 depth_ramp(device, queue)
             },
             lighting_sampler: linear_sampler(device),
-            shadow_tex: cleared_depth(device, queue, "lighting shadow atlas", 1),
+            shadow_tex: shadow_atlas(device, queue),
             shadow_sampler: comparison_sampler(device),
             shadow_cube_tex: cleared_cube(device, queue, "lighting shadow cube"),
             prefilter_cube: solid_cube(device, queue, "lighting prefiltered", [0.3, 0.4, 0.5, 1.0]),
@@ -346,23 +471,18 @@ impl Inputs {
                 "lighting cluster params",
                 &cluster_params_bytes(),
             ),
-            clustered_lights: storage(
-                device,
-                queue,
-                "lighting clustered lights",
-                &clustered_bytes(),
-            ),
+            clustered_lights: storage(device, queue, "lighting clustered lights", &clustered),
             cluster_light_indices: storage(
                 device,
                 queue,
                 "lighting cluster indices",
-                &[1u32, 0, 0, 0].concat_bytes(),
+                &cluster_indices_bytes(),
             ),
             cluster_grid: storage(
                 device,
                 queue,
                 "lighting cluster grid",
-                &[0u32, 1, 1, 0].concat_bytes(),
+                &cluster_grid_bytes(),
             ),
         }
     }
@@ -434,17 +554,6 @@ impl EntireBinding for wgpu::Buffer {
 }
 
 /// Splice four `u32` into the byte list the storage bindings expect.
-trait ConcatBytes {
-    /// The bytes of every word, little-endian.
-    fn concat_bytes(&self) -> Vec<u8>;
-}
-
-impl ConcatBytes for [u32; 4] {
-    fn concat_bytes(&self) -> Vec<u8> {
-        self.iter().flat_map(|word| word.to_le_bytes()).collect()
-    }
-}
-
 /// Render `fragment` over [`SIZE`] and read the result back.
 ///
 /// `debug_view` is written into the lighting block, so one input set serves
@@ -803,16 +912,35 @@ fn view_proj() -> Mat4 {
 /// matrix the lighting pass does not read.
 fn camera_bytes() -> Vec<u8> {
     let view_proj = view_proj();
+    // Field order per the DSL's `Camera`: view, inverse, eye, previous. The
+    // eye is read by `csm_visibility`, so a misplaced `camera_pos` turns the
+    // cascade lookups into garbage the reference cannot explain.
     let mut bytes = Vec::with_capacity(CAMERA_BYTES);
-    for matrix in [view_proj, view_proj.inverse(), view_proj] {
+    for matrix in [view_proj, view_proj.inverse()] {
         bytes.extend_from_slice(bytemuck::bytes_of(&matrix.to_cols_array()));
     }
     bytes.extend_from_slice(bytemuck::bytes_of(&[0.4f32, 0.6, 3.0, 1.0]));
+    bytes.extend_from_slice(bytemuck::bytes_of(&view_proj.to_cols_array()));
     bytes
 }
 
 /// Lighting patch that changes nothing: the reference input set.
 fn keep_lights(_lighting: &mut Vec<u8>, _clustered: &mut Vec<u8>) {}
+
+/// Lighting patch that zeroes light `index`'s intensity, in both spellings.
+///
+/// The record is one byte per word: the intensity sits in the last lane of
+/// the colour field, and the walk reads the clustered copy, so both copies
+/// are patched — the block's own array stays in step only for symmetry.
+fn light_off(index: usize) -> impl Fn(&mut Vec<u8>, &mut Vec<u8>) {
+    move |lighting: &mut Vec<u8>, clustered: &mut Vec<u8>| {
+        for (block, offset) in [(lighting, 16), (clustered, 0)] {
+            let at = offset + index * LIGHT_BYTES + FIELD_COLOR;
+            let cursor = at + 12;
+            block[cursor..cursor + 4].copy_from_slice(&0.0f32.to_le_bytes());
+        }
+    }
+}
 
 /// Byte writer used by the hand-built uniform blocks.
 fn put(bytes: &mut [u8], at: usize, lane: usize, value: f32) {
@@ -820,85 +948,139 @@ fn put(bytes: &mut [u8], at: usize, lane: usize, value: f32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-/// The lighting block: ambient, three lights and four cascades.
+/// The lighting block: ambient, the light prefix and four cascades.
 ///
-/// The `lights` array is carried but not read — the walk takes its list from
-/// the clustered storage (see [`clustered_bytes`]), which is what the pass
-/// binds in production. `light_count` still counts the non-clustered prefix
-/// the loop walks first, so it stays in step with that storage.
+/// The walk takes its list from the clustered storage (see
+/// [`clustered_lights_bytes`]) and addresses the first `light_count` records
+/// there directly (`k * LIGHT_STRIDE`), so the block's own `lights` array is
+/// carried but not read — `light_count` still counts that prefix, in step
+/// with the storage.
 ///
 /// Light `0` is directional with `params.x = 1.0`, above `CSM_ACTIVE_EDGE`, so
 /// it takes the cascaded path and has no atlas layer (`params.w < 0`); light
 /// `1` is a point light with a cube layer; light `2` is a spot light with a
 /// cube layer as well, so the cone term and the cube selector both run.
+// qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
 fn lighting_bytes() -> Vec<u8> {
     let mut bytes = vec![0u8; CSM_AT + CASCADES * CASCADE_BYTES + 64];
     for (lane, value) in [0.05f32, 0.06, 0.07, 1.0].into_iter().enumerate() {
         put(&mut bytes, 0, lane, value);
     }
-    let light = |index: usize| 16 + index * LIGHT_BYTES;
-    // Directional, cascaded, no atlas layer.
-    put(&mut bytes, light(0), 0, 0.0);
-    for (lane, value) in [0.3f32, 0.4, 1.0].into_iter().enumerate() {
-        put(&mut bytes, light(0) + FIELD_DIRECTION, lane, value);
-    }
-    for (lane, value) in [0.25f32, 0.6, 1.0, 1.0].into_iter().enumerate() {
-        put(&mut bytes, light(0) + FIELD_COLOR, lane, value);
-    }
-    put(&mut bytes, light(0) + FIELD_PARAMS, 0, 1.0);
-    put(&mut bytes, light(0) + FIELD_PARAMS, 3, -1.0);
-    // Point at (0.6, 0.8, 1.4), range 8, layer 0.
-    put(&mut bytes, light(1), 0, 1.0);
-    for (lane, value) in [0.6f32, 0.8, 1.4].into_iter().enumerate() {
-        put(&mut bytes, light(1) + FIELD_POSITION, lane, value);
-    }
-    for (lane, value) in [1.0f32, 0.45, 0.15, 2.0].into_iter().enumerate() {
-        put(&mut bytes, light(1) + FIELD_COLOR, lane, value);
-    }
-    for (lane, value) in [8.0f32, 0.99, 0.9, 0.0].into_iter().enumerate() {
-        put(&mut bytes, light(1) + FIELD_PARAMS, lane, value);
-    }
-    // Spot at the frame centre, pointed at it, layer 1.
-    put(&mut bytes, light(2), 0, 2.0);
-    for (lane, value) in [0.0f32, 0.0, -1.0].into_iter().enumerate() {
-        put(&mut bytes, light(2) + FIELD_DIRECTION, lane, value);
-    }
-    for (lane, value) in [0.4f32, 0.5, 1.6].into_iter().enumerate() {
-        put(&mut bytes, light(2) + FIELD_POSITION, lane, value);
-    }
-    for (lane, value) in [0.35f32, 1.0, 0.8, 1.5].into_iter().enumerate() {
-        put(&mut bytes, light(2) + FIELD_COLOR, lane, value);
-    }
-    for (lane, value) in [6.0f32, 0.95, 0.7, 1.0].into_iter().enumerate() {
-        put(&mut bytes, light(2) + FIELD_PARAMS, lane, value);
-    }
-    // Both shadowed lights get a finite view-projection: a zero matrix would
-    // divide by a zero `w`, and the compare that follows would be a NaN
-    // lookup — the shaders could then differ over how a driver answers it,
-    // which is not what this gate is about.
-    let columns = view_proj().to_cols_array();
-    for index in [1, 2] {
-        let at = light(index) + FIELD_SHADOW_VP;
-        bytes[at..at + 64].copy_from_slice(bytemuck::bytes_of(&columns));
-    }
-    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
+    // The block carries the same records the walk reads from the clustered
+    // storage; one spelling ([`light_records`]) feeds both, so a patched
+    // intensity reaches the loop through the path it actually reads.
+    // qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
+    let records = light_records();
+    bytes[16..16 + records.len()].copy_from_slice(&records);
     bytes[LIGHT_COUNT_AT..LIGHT_COUNT_AT + 4].copy_from_slice(&3u32.to_le_bytes());
     put(&mut bytes, LIGHT_COUNT_AT + 4, 0, 0.4);
     put(&mut bytes, LIGHT_COUNT_AT + 8, 0, 4.0);
+    let columns = view_proj().to_cols_array();
     let csm = CSM_AT;
     for cascade in 0..CASCADES {
         let at = csm + cascade * CASCADE_BYTES;
         bytes[at..at + CASCADE_BYTES].copy_from_slice(bytemuck::bytes_of(&columns));
     }
-    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
     let tail = csm + CASCADES * CASCADE_BYTES;
-    put(&mut bytes, tail, 2, 1.0);
+    // `view_fwd` is the camera's forward: the cascade split distances count
+    // along it, so a zero or reversed vector sends the slab to the wrong
+    // cascade.
+    let forward = (glam::Vec3::ZERO - glam::Vec3::new(0.4, 0.6, 3.0)).normalize();
+    for (lane, value) in forward.to_array().into_iter().enumerate() {
+        put(&mut bytes, tail, lane, value);
+    }
     for (lane, value) in [4.0f32, 8.0, 16.0, 32.0].into_iter().enumerate() {
         put(&mut bytes, tail + 16, lane, value);
     }
     put(&mut bytes, tail + 32, 0, 64.0);
     bytes[tail + 36..tail + 40].copy_from_slice(&(CASCADES as u32).to_le_bytes());
     bytes
+}
+
+/// The three real lights, in the record layout both the uniform block and the
+/// clustered storage spell (`Light`: kind, direction, position, colour with an
+/// intensity lane, params, shadow view-projection).
+///
+/// Light `0` is directional with `params.x = 1.0`, above `CSM_ACTIVE_EDGE`, so
+/// it takes the cascaded path and has no atlas layer (`params.w < 0`); light
+/// `1` is a point light with a cube layer; light `2` is a spot light with a
+/// cube-side layer `1`, so the cone term and the atlas selector both run.
+///
+/// Both shadowed lights get a finite view-projection: a zero matrix would
+/// divide by a zero `w`, and the compare that follows would be a NaN
+/// lookup — the shaders could then differ over how a driver answers it,
+/// which is not what this gate is about.
+fn light_records() -> Vec<u8> {
+    let mut records = vec![0u8; GRID_LIGHT_COUNT * LIGHT_BYTES];
+    let at = |record: usize, field: usize| record * LIGHT_BYTES + field;
+    // Directional, cascaded, no atlas layer.
+    put(&mut records, at(0, 0), 0, 0.0);
+    for (lane, value) in [0.3f32, 0.4, 1.0].into_iter().enumerate() {
+        put(&mut records, at(0, FIELD_DIRECTION), lane, value);
+    }
+    for (lane, value) in [0.25f32, 0.6, 1.0, 1.0].into_iter().enumerate() {
+        put(&mut records, at(0, FIELD_COLOR), lane, value);
+    }
+    put(&mut records, at(0, FIELD_PARAMS), 0, 1.0);
+    put(&mut records, at(0, FIELD_PARAMS), 3, -1.0);
+    // Point in front of the reconstructed slab (the scene sits at z ≈ 2–2.9,
+    // normals facing +z), so its light reaches the surface: a light behind
+    // the plane fails the `nol > EPS` guard and contributes nothing.
+    // The direction must not be zero even for points: the walk's `l` mixes
+    // the normalised direction with the point direction, and `NaN * 0.0`
+    // keeps the NaN — production stages `(0, 0, 1)` for the same reason.
+    // Point at (0.6, 0.8, 4.4), range 8, cube layer 0.
+    put(&mut records, at(1, 0), 0, 1.0);
+    for (lane, value) in [0.2f32, 0.3, 1.0].into_iter().enumerate() {
+        put(&mut records, at(1, FIELD_DIRECTION), lane, value);
+    }
+    for (lane, value) in [0.6f32, 0.8, 4.4].into_iter().enumerate() {
+        put(&mut records, at(1, FIELD_POSITION), lane, value);
+    }
+    for (lane, value) in [1.0f32, 0.45, 0.15, 2.0].into_iter().enumerate() {
+        put(&mut records, at(1, FIELD_COLOR), lane, value);
+    }
+    for (lane, value) in [8.0f32, 0.99, 0.9, 0.0].into_iter().enumerate() {
+        put(&mut records, at(1, FIELD_PARAMS), lane, value);
+    }
+    // Spot above the frame centre, pointed down at the slab, atlas layer 1.
+    put(&mut records, at(2, 0), 0, 2.0);
+    for (lane, value) in [0.0f32, 0.0, -1.0].into_iter().enumerate() {
+        put(&mut records, at(2, FIELD_DIRECTION), lane, value);
+    }
+    for (lane, value) in [0.4f32, 0.5, 4.4].into_iter().enumerate() {
+        put(&mut records, at(2, FIELD_POSITION), lane, value);
+    }
+    for (lane, value) in [0.35f32, 1.0, 0.8, 1.5].into_iter().enumerate() {
+        put(&mut records, at(2, FIELD_COLOR), lane, value);
+    }
+    for (lane, value) in [6.0f32, 0.95, 0.7, 1.0].into_iter().enumerate() {
+        put(&mut records, at(2, FIELD_PARAMS), lane, value);
+    }
+    // Grid light: a second point off to the side, in front of the slab, so
+    // the indirect path (grid span → index → record) carries its own light.
+    // The direction must not be zero: the cone term normalises it even for
+    // points, and a zero vector turns the whole frame non-finite (see the
+    // point light above).
+    put(&mut records, at(3, 0), 0, 1.0);
+    for (lane, value) in [0.2f32, 0.3, 1.0].into_iter().enumerate() {
+        put(&mut records, at(3, FIELD_DIRECTION), lane, value);
+    }
+    for (lane, value) in [-1.6f32, -0.8, 4.2].into_iter().enumerate() {
+        put(&mut records, at(3, FIELD_POSITION), lane, value);
+    }
+    for (lane, value) in [0.15f32, 0.4, 0.9, 1.5].into_iter().enumerate() {
+        put(&mut records, at(3, FIELD_COLOR), lane, value);
+    }
+    for (lane, value) in [10.0f32, 0.99, 0.9, 1.0].into_iter().enumerate() {
+        put(&mut records, at(3, FIELD_PARAMS), lane, value);
+    }
+    let columns = view_proj().to_cols_array();
+    for record in 1..GRID_LIGHT_COUNT {
+        let vp = at(record, FIELD_SHADOW_VP);
+        records[vp..vp + 64].copy_from_slice(bytemuck::bytes_of(&columns));
+    }
+    records
 }
 
 /// Four materials, one per g-buffer id: dielectric, metal, coated fuzz and
@@ -928,6 +1110,12 @@ fn material_bytes() -> Vec<u8> {
         slots[12] = [0.0, 0.2, 0.0, 0.2];
         slots[13] = [1.0, 1.0, 1.0, 1.0];
         slots[14] = [1.5, 0.0, 0.0, 0.0];
+        // thin_film_params: weight, thickness (µm), ior. The ior must stay
+        // sane even with weight 0: `thin_film_modulation` divides by it and
+        // `pow` of the negative `r0` term NaNs, and the weight-0 `mix` in
+        // `thin_film_weight_mix` keeps the NaN, which the spec lobe then
+        // multiplies in through `0.0 * NaN`.
+        slots[15] = [0.0, 0.2, 1.5, 0.0];
         // geometry_params: opacity, thin-walled, unlit.
         slots[18] = [1.0, 0.0, 0.0, 0.0];
         match index % 4 {
@@ -956,7 +1144,7 @@ fn material_bytes() -> Vec<u8> {
     bytes
 }
 
-/// Cluster params: one cell holding one clustered light.
+/// Cluster params: clustered mode on.
 fn cluster_params_bytes() -> Vec<u8> {
     let mut bytes = Vec::with_capacity(16);
     for word in [1u32, 1, 1, 0] {
@@ -965,20 +1153,47 @@ fn cluster_params_bytes() -> Vec<u8> {
     bytes
 }
 
-/// Eight `Light` records for the clustered storage: the three lights the walk
-/// reads, at indices `0`, `1` and `2`.
+/// Lights the walk reads through the grid span (beyond `light_count`).
+const GRID_LIGHT_COUNT: usize = 4;
+/// Spans the grid carries: the full `CLUSTERS_X × CLUSTERS_Y × CLUSTERS_Z`
+/// grid, because `cluster_index` addresses every cell — a short buffer sends
+/// most texels out of bounds, and an out-of-bounds storage read is undefined.
+/// 16×9×24, the `cluster_index` grid (`gpu-pbr` layout constants).
+const GRID_SPANS: u32 = 16 * 9 * 24;
+
+/// The cluster grid: cell 0 claims one light (record 3, the grid point
+/// light), every other cell has an empty span.
+fn cluster_grid_bytes() -> Vec<u8> {
+    let mut words = vec![0u32; (GRID_SPANS * 2) as usize];
+    words[0] = 0;
+    words[1] = 1;
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    bytes
+}
+
+/// The grid index list: cell 0's span points at record 3.
+fn cluster_indices_bytes() -> Vec<u8> {
+    let words = [3u32, 0, 0, 0];
+    let mut bytes = Vec::with_capacity(words.len() * 4);
+    for word in words {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    bytes
+}
+
+/// The clustered storage: the three real records the walk addresses for
+/// `k < light_count`, then zeroed slots.
 ///
-/// The records live here because the walk starts from `clustered_lights[k]`
-/// for `k < light_count` and only reaches the uniform array for lights the
-/// grid adds beyond that. Writing them anywhere else leaves the frame lit by
-/// ambient only — which a parity gate happily accepts, and which is why the
-/// coverage check below asserts the walk moves pixels.
-fn clustered_bytes() -> Vec<u8> {
-    // Zeroed on purpose: every record is a light of intensity `0`, so the walk
-    // runs without contributing. The frame is then lit by ambient, IBL and the
-    // shadow lookups — see the module docs for what that does and does not
-    // cover.
-    vec![0u8; 8 * LIGHT_BYTES]
+/// The walk starts from `clustered_lights[k]` for the prefix and reaches
+/// `cluster_light_indices` only for lights the grid adds beyond that, so the
+/// records must live here — writing them into the block's own array leaves
+/// the frame lit by ambient only, which a parity gate happily accepts. One
+/// grid light (index 1) is staged through the grid so the indirect path is
+/// read too; see `Inputs::new`.
+fn clustered_lights_bytes() -> Vec<u8> {
+    let mut records = light_records();
+    records.resize(8 * LIGHT_BYTES, 0);
+    records
 }
 
 /// The albedo map: a colour ramp whose alpha crosses nothing but stays
@@ -1410,8 +1625,14 @@ fn depth_texture(
     })
 }
 
-/// A depth texture of `layers` cleared to the far plane, so every compare is
-/// lit. The returned view is a depth-array view.
+/// A depth texture of `layers` cleared to the lit far-plane floor, so every
+/// compare is lit. The returned view is a depth-array view.
+///
+/// On this stack the comparison sampler's `Less` reports `ref < texel` (the
+/// Metal operand order), so the lit floor is the far plane (`1.0`) and an
+/// occluder is any texel *below* the reference — a cleared-to-near (`0.0`)
+/// map shadows every texel, which is how an earlier revision of this stand
+/// silently zeroed the whole direct term.
 fn cleared_depth(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1419,32 +1640,177 @@ fn cleared_depth(
     layers: u32,
 ) -> wgpu::TextureView {
     let texture = depth_texture(device, label, extent(SIZE.0, SIZE.1, layers), 1);
-    clear_layers(device, queue, &texture, layers, label);
+    clear_layers(device, queue, &texture, layers, label, 1.0);
     texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     })
 }
 
-/// A cube depth texture cleared to the far plane, viewed as a cube array.
+/// A cube depth texture cleared to the lit far-plane floor, viewed as a cube
+/// array (same `ref < texel` compare semantics as [`cleared_depth`]).
 fn cleared_cube(device: &wgpu::Device, queue: &wgpu::Queue, label: &str) -> wgpu::TextureView {
     let texture = depth_texture(device, label, extent(SIZE.0, SIZE.1, 6), 1);
-    clear_layers(device, queue, &texture, 6, label);
+    clear_layers(device, queue, &texture, 6, label, 1.0);
     texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::CubeArray),
         ..Default::default()
     })
 }
 
-/// Clear every layer of `texture` to the far plane, one pass per layer.
+/// The occluder the shadow view reads: a near-plane band (`0.0`) over the
+/// lower half of one atlas layer.
+///
+/// With the `ref < texel` compare of this stack (see [`cleared_depth`]), a
+/// fragment reference (0.2–0.9 here) passes against the 1.0 floor and fails
+/// against the 0.0 band: fragments whose shadow projection lands in the band
+/// are occluded; the rest of the map stays on the lit floor. Without a
+/// painted occluder the shadow view is a vacuum — every texel reports full
+/// visibility and the
+/// selector could be deleted without the parity gate noticing.
+/// A depth-only quad writer: `TOP` clips the strip to the lower half (the
+/// occluder band) or leaves it full (a whole-layer fill), and `DEPTH` is the
+/// depth the fragments store.
+const SHADOW_FILL_WGSL: &str = r#"
+@vertex
+fn vs_band(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    // Two triangles strip over NDC y in [-1, TOP]: the lower half, or all.
+    let corners = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(1.0, -1.0),
+        vec2<f32>(-1.0, TOP),
+        vec2<f32>(1.0, TOP),
+    );
+    let corner = corners[index];
+    return vec4<f32>(corner.x, corner.y, DEPTH, 1.0);
+}
+"#;
+
+/// A depth-only quad pipeline storing whatever `vs_band` writes.
+fn depth_fill_pipeline(device: &wgpu::Device, top: f32, depth: f32) -> wgpu::RenderPipeline {
+    let source = SHADOW_FILL_WGSL
+        .replace("TOP", &format!("{top:?}"))
+        .replace("DEPTH", &format!("{depth:?}"));
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("lighting shadow band"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("lighting shadow band"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_band"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: None,
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Paint the occluder band into `layer` of the shadow atlas.
+fn paint_shadow_band(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    layer: u32,
+) {
+    let pipeline = depth_fill_pipeline(device, 0.0, 0.0);
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2),
+        base_array_layer: layer,
+        array_layer_count: Some(1),
+        ..Default::default()
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("band"),
+    });
+    {
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lighting shadow band"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &view,
+                depth_ops: Some(wgpu::Operations {
+                    // Keep the lit floor; draw the band on top.
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        rpass.set_pipeline(&pipeline);
+        rpass.draw(0..4, 0..1);
+    }
+    queue.submit(std::iter::once(encoder.finish()));
+}
+
+/// The shadow atlas: layer 0 the point light reads is the lit near-plane
+/// floor; layer 1, the spot light's layer, carries the painted occluder band
+/// over its lower half.
+///
+/// The texture is returned rather than the view because the band painter
+/// needs the texture itself (a per-layer view).
+fn shadow_atlas(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    let texture = depth_texture(
+        device,
+        "lighting shadow atlas",
+        extent(SIZE.0, SIZE.1, 2),
+        1,
+    );
+    clear_layers(device, queue, &texture, 2, "lighting shadow atlas", 1.0);
+    paint_shadow_band(device, queue, &texture, 1);
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    })
+}
+
+/// Fill every layer of `texture` with `value`, one pass per layer.
+///
+/// The pass both clears and draws a full-coverage depth quad: a depth-only
+/// pass without a pipeline did not stick on Metal, which left the cascade and
+/// cube maps undefined and every shadow lookup occluded.
 fn clear_layers(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
     layers: u32,
     label: &str,
+    value: f32,
 ) {
-    for layer in 0..layers {
+    clear_layer_range(device, queue, texture, 0, layers, label, value)
+}
+
+/// Fill layers `base..base + layers` of `texture` with `value`.
+fn clear_layer_range(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    base: u32,
+    layers: u32,
+    label: &str,
+    value: f32,
+) {
+    let pipeline = depth_fill_pipeline(device, 1.0, value);
+    for layer in base..base + layers {
         let view = texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2),
             base_array_layer: layer,
@@ -1454,13 +1820,13 @@ fn clear_layers(
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
         {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(label),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: wgpu::LoadOp::Clear(value),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -1469,6 +1835,8 @@ fn clear_layers(
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            rpass.set_pipeline(&pipeline);
+            rpass.draw(0..4, 0..1);
         }
         queue.submit([encoder.finish()]);
     }

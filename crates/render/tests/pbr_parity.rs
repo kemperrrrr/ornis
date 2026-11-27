@@ -383,6 +383,7 @@ fn material_bytes() -> Vec<u8> {
 /// `CSM_ACTIVE_EDGE`, so it takes the cascaded path; `params.w = -1.0` keeps it
 /// out of the single-layer atlas. Light `1` is a point light with a layer in
 /// `params.w`, which takes the cube path.
+// qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
 fn lighting_bytes() -> Vec<u8> {
     let mut bytes = vec![0u8; CSM_AT + CASCADES * CASCADE_BYTES + 64];
     let put = |bytes: &mut Vec<u8>, at: usize, lane: usize, value: f32| {
@@ -424,6 +425,7 @@ fn lighting_bytes() -> Vec<u8> {
     put(&mut bytes, point + 16, 2, 0.9);
     put(&mut bytes, point + 16, 3, 0.0);
     // light_count, ibl_weight, ibl_max_mip, debug_view.
+    // qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
     bytes[LIGHT_COUNT_AT..LIGHT_COUNT_AT + 4].copy_from_slice(&2u32.to_le_bytes());
     put(&mut bytes, LIGHT_COUNT_AT + 4, 0, 0.4);
     put(&mut bytes, LIGHT_COUNT_AT + 8, 0, 4.0);

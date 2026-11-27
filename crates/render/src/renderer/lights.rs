@@ -8,7 +8,9 @@ use super::*;
 /// One GPU light: direction + color packed as `vec4`s.
 ///
 /// Evaluation kind of a [`GpuLight`] entry: directional, point, or spot.
-/// Float (not enum): the stage DSL compares kinds with `>`.
+/// Float (not enum): the lighting walk (gpu-lighting `walk.rs`) branches on
+/// the kind word with step thresholds, so the constants must keep the
+/// `directional < point < spot` ordering the thresholds encode.
 pub(crate) const LIGHT_KIND_DIRECTIONAL: f32 = 0.0;
 
 /// Evaluation kind of a [`GpuLight`] entry: point light.
