@@ -1,19 +1,19 @@
 {
   "version": 2,
-  "quality_score": 0.7576587881645962,
-  "iosp_score": 0.9694036094179515,
+  "quality_score": 0.758926326613309,
+  "iosp_score": 0.9694620064416081,
   "violations": 256,
-  "total": 12771,
+  "total": 12798,
   "complexity_warnings": 73,
-  "magic_number_warnings": 134,
+  "magic_number_warnings": 132,
   "nesting_depth_warnings": 19,
-  "function_length_warnings": 125,
+  "function_length_warnings": 124,
   "unsafe_warnings": 12,
-  "error_handling_warnings": 19,
+  "error_handling_warnings": 18,
   "duplicate_groups": 94,
   "dead_code_warnings": 391,
   "dead_type_warnings": 0,
-  "fragment_groups": 720,
+  "fragment_groups": 718,
   "boilerplate_warnings": 324,
   "srp_struct_warnings": 24,
   "srp_module_warnings": 103,
@@ -23,12 +23,12 @@
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 5,
-  "tq_untested_warnings": 148,
+  "tq_untested_warnings": 146,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 23,
-  "total_findings": 2793,
+  "total_findings": 2781,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -88,7 +88,7 @@
     {
       "name": "install_object_animation",
       "file": "crates/app/src/lib.rs",
-      "line": 123
+      "line": 124
     },
     {
       "name": "set_rigid_field",
@@ -228,7 +228,7 @@
     {
       "name": "bake_bind_transform",
       "file": "crates/animation/src/lib.rs",
-      "line": 3796
+      "line": 3794
     },
     {
       "name": "assemble_clips",
@@ -1303,7 +1303,7 @@
     {
       "name": "quality",
       "file": "xtask/src/quality.rs",
-      "line": 2536
+      "line": 2519
     },
     {
       "name": "showcase_engine",
