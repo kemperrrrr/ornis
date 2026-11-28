@@ -8,11 +8,17 @@
 //! would survive into the kernel's LLVM IR, and the translator only sees calls
 //! written in the entry.
 //!
-//! Off `wasm32` the same functions evaluate for real through [`libm`]: the host
-//! build of a shader crate is the reference the GPU parity gates compare
-//! against, so it has to return values rather than panic. The two arms round
-//! independently — a parity gate compares them with a tolerance, it never
+//! Off `wasm32` the same functions evaluate for real: `sqrt` calls
+//! [`f32::sqrt`] and the rest go through [`libm`]. `f32::sqrt` is implemented
+//! in `std` rather than `core` on this toolchain, so the host arm links `std`;
+//! the wasm arm does not. The host build is the reference the GPU parity gates
+//! compare against, so it has to return values rather than panic. The two arms
+//! round independently — a parity gate compares them with a tolerance, it never
 //! expects a bit-exact match.
+
+/// `f32::sqrt` lives in `std`. The wasm build never compiles this arm.
+#[cfg(not(target_arch = "wasm32"))]
+extern crate std;
 
 /// Host-side implementations shared by the arithmetic functions below.
 ///
@@ -136,8 +142,9 @@ unary!(
 
 /// `sqrt(value)` — one WGSL `sqrt`.
 ///
-/// `no_std` has no `f32::sqrt`; a Newton series would not match the GPU
-/// instruction.
+/// The host build calls [`f32::sqrt`]. The wasm build imports the operation,
+/// so the GPU instruction is the one that runs; a Newton series would not
+/// match it.
 #[inline(always)]
 #[must_use]
 pub fn sqrt(value: f32) -> f32 {
@@ -147,7 +154,7 @@ pub fn sqrt(value: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        libm::sqrtf(value)
+        value.sqrt()
     }
 }
 
@@ -324,7 +331,7 @@ pub fn length3(x: f32, y: f32, z: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        libm::sqrtf(x * x + y * y + z * z)
+        sqrt(x * x + y * y + z * z)
     }
 }
 
@@ -359,7 +366,7 @@ pub fn normalize_lane<const LANE: u32>(x: f32, y: f32, z: f32) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let inverse = 1.0 / libm::sqrtf(x * x + y * y + z * z);
+        let inverse = 1.0 / sqrt(x * x + y * y + z * z);
         match LANE {
             0 => x * inverse,
             1 => y * inverse,

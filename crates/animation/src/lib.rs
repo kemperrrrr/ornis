@@ -3358,8 +3358,6 @@ fn root_matrix(
 /// Ordering: register after `skel_sample`, pin
 /// `try_order_before("skel_sample", "skel_skin_cpu")`.
 #[derive(Debug, Clone, Copy)]
-// qual:api — public host API kept for compatibility (custom schedules
-// that skin every mesh); the engine installs `SkelSkinGpuFallbackSystem`.
 pub struct SkelSkinSystem;
 
 impl SkelSkinSystem {
