@@ -1562,11 +1562,16 @@ fn level1(stages: &mut StageList<'_>) {
         false,
     );
 
+    // `--root-deps-only`: the requirement table is what this repository
+    // declares. Without it the stage also reports the versions third-party
+    // crates pin inside their own manifests — `gltf`'s `syn 2`, `winit`'s
+    // `windows-sys 0.52` — which nothing here can bump and which went red on
+    // every PR when the registry removed `windows-targets 0.52.x`.
     stages.run(
         "outdated",
         "outdated",
-        "cargo outdated --workspace --exit-code 1 (hard gate: must be latest)",
-        stages.cargo(&["outdated", "--workspace", "--exit-code", "1"]),
+        "cargo outdated --workspace --root-deps-only --exit-code 1 (hard gate: declared deps must be latest)",
+        stages.cargo(&["outdated", "--workspace", "--root-deps-only", "--exit-code", "1"]),
         false,
     );
 
@@ -1634,13 +1639,19 @@ fn dependencies_upgrade_stage(stages: &mut StageList<'_>) {
     // version — i.e. `cargo update` alone cannot reach it and `cargo
     // upgrade` would have to bump the requirement. Minor-only lag
     // (`latest == compat`) is the `outdated` stage's job and passes here.
+    // Only the workspace's own requirements are read (`--root-deps-only`):
+    // a version an upstream crate pins in its manifest is not a requirement
+    // this repository can move, and reporting it turned the gate red on a
+    // registry-side removal of `windows-targets 0.52.x` that no bump here
+    // can undo.
     if !stages.enabled("upgrade-check") {
         return;
     }
     stages.n += 1;
     let (idx, total) = (stages.n, stages.total);
     let name = "upgrade-check";
-    let desc = "cargo outdated --workspace --format json (majors must be latest)";
+    let desc =
+        "cargo outdated --workspace --root-deps-only --format json (declared majors must be latest)";
     eprintln!();
     eprintln!("═══ [{idx}/{total}] {name}: {desc} ═══");
     let started = Instant::now();
@@ -1657,7 +1668,13 @@ fn dependencies_upgrade_stage(stages: &mut StageList<'_>) {
         return;
     }
     let output = Command::new("cargo")
-        .args(["outdated", "--workspace", "--format", "json"])
+        .args([
+            "outdated",
+            "--workspace",
+            "--root-deps-only",
+            "--format",
+            "json",
+        ])
         .current_dir(stages.root)
         .output();
     match output {
