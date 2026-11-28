@@ -56,5 +56,13 @@ harness = false
 name = "query_bench"
 harness = false
 
+# Trajectory + timing report for the GPU SI solver. Needs an adapter, so the
+# target only builds on the `gpu` feature (CI's bench-compile stage runs it
+# with `--features gpu`).
+[[bench]]
+name = "gpu_si_trajectory"
+harness = false
+required-features = ["gpu"]
+
 [lints]
 workspace = true

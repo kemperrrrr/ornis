@@ -1,34 +1,34 @@
 {
   "version": 2,
-  "quality_score": 0.7369999457563455,
-  "iosp_score": 0.9668205064238493,
-  "violations": 266,
-  "total": 12245,
-  "complexity_warnings": 78,
-  "magic_number_warnings": 162,
-  "nesting_depth_warnings": 20,
-  "function_length_warnings": 130,
+  "quality_score": 0.7576587881645962,
+  "iosp_score": 0.9694036094179515,
+  "violations": 256,
+  "total": 12771,
+  "complexity_warnings": 73,
+  "magic_number_warnings": 134,
+  "nesting_depth_warnings": 19,
+  "function_length_warnings": 125,
   "unsafe_warnings": 12,
-  "error_handling_warnings": 22,
+  "error_handling_warnings": 19,
   "duplicate_groups": 94,
-  "dead_code_warnings": 419,
+  "dead_code_warnings": 391,
   "dead_type_warnings": 0,
-  "fragment_groups": 718,
-  "boilerplate_warnings": 329,
+  "fragment_groups": 720,
+  "boilerplate_warnings": 324,
   "srp_struct_warnings": 24,
-  "srp_module_warnings": 108,
-  "wildcard_import_warnings": 48,
+  "srp_module_warnings": 103,
+  "wildcard_import_warnings": 45,
   "sdp_violations": 0,
   "coupling_warnings": 0,
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 5,
-  "tq_untested_warnings": 159,
+  "tq_untested_warnings": 148,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 23,
-  "total_findings": 2881,
+  "total_findings": 2792,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -61,14 +61,9 @@
       "line": 1274
     },
     {
-      "name": "lower",
-      "file": "crates/llvm2gpu/src/lower.rs",
-      "line": 49
-    },
-    {
       "name": "setup",
       "file": "crates/core/benches/store_bench.rs",
-      "line": 8
+      "line": 9
     },
     {
       "name": "Color::hex",
@@ -78,12 +73,12 @@
     {
       "name": "free_live_snapshot",
       "file": "crates/core/src/smart_store.rs",
-      "line": 97
+      "line": 109
     },
     {
       "name": "EditorSession::default",
       "file": "crates/app/src/session.rs",
-      "line": 319
+      "line": 355
     },
     {
       "name": "PhysicsRuntime::sync_soft_in",
@@ -93,7 +88,7 @@
     {
       "name": "install_object_animation",
       "file": "crates/app/src/lib.rs",
-      "line": 117
+      "line": 123
     },
     {
       "name": "set_rigid_field",
@@ -128,7 +123,7 @@
     {
       "name": "main",
       "file": "crates/shell/src/main.rs",
-      "line": 82
+      "line": 74
     },
     {
       "name": "GameApp::process_remote_commands",
@@ -173,12 +168,12 @@
     {
       "name": "build_lighting_uniform",
       "file": "crates/render/src/renderer/lights.rs",
-      "line": 322
+      "line": 324
     },
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer/lights.rs",
-      "line": 765
+      "line": 767
     },
     {
       "name": "Renderer3D::create_forward_pass",
@@ -261,36 +256,6 @@
       "line": 191
     },
     {
-      "name": "array_ir_ty",
-      "file": "crates/macros/src/wgsl_lower.rs",
-      "line": 915
-    },
-    {
-      "name": "infer_lit_ty",
-      "file": "crates/macros/src/wgsl_lower.rs",
-      "line": 951
-    },
-    {
-      "name": "lower_array_repeat",
-      "file": "crates/macros/src/wgsl_lower.rs",
-      "line": 979
-    },
-    {
-      "name": "lower_local",
-      "file": "crates/macros/src/wgsl_lower.rs",
-      "line": 1090
-    },
-    {
-      "name": "parse_binding_base_ty",
-      "file": "crates/macros/src/gpu_pipeline.rs",
-      "line": 117
-    },
-    {
-      "name": "parse_binding_group",
-      "file": "crates/macros/src/gpu_pipeline.rs",
-      "line": 192
-    },
-    {
       "name": "TypeAnalyzer::visit_type",
       "file": "crates/macros/src/pipeline_config.rs",
       "line": 127
@@ -324,21 +289,6 @@
       "name": "AutoProfiler::load_or_calibrate",
       "file": "crates/wgpu_backend/src/profiler.rs",
       "line": 59
-    },
-    {
-      "name": "print_expr",
-      "file": "crates/shader-lang/src/writer.rs",
-      "line": 206
-    },
-    {
-      "name": "print_stmt",
-      "file": "crates/shader-lang/src/writer.rs",
-      "line": 267
-    },
-    {
-      "name": "print_if",
-      "file": "crates/shader-lang/src/writer.rs",
-      "line": 347
     },
     {
       "name": "build_avbd_scene",
@@ -478,7 +428,7 @@
     {
       "name": "pack_single_point_batches",
       "file": "crates/physics/src/gpu/si_batches.rs",
-      "line": 528
+      "line": 394
     },
     {
       "name": "SoftBody::chain",
@@ -628,62 +578,62 @@
     {
       "name": "Engine::set_solver_kind",
       "file": "crates/physics/src/lib.rs",
-      "line": 432
+      "line": 431
     },
     {
       "name": "Engine::set_routing",
       "file": "crates/physics/src/lib.rs",
-      "line": 447
+      "line": 446
     },
     {
       "name": "Engine::collapse_to_single",
       "file": "crates/physics/src/lib.rs",
-      "line": 488
+      "line": 487
     },
     {
       "name": "Engine::restore_world_snapshot",
       "file": "crates/physics/src/lib.rs",
-      "line": 1084
+      "line": 1083
     },
     {
       "name": "Engine::split_step",
       "file": "crates/physics/src/lib.rs",
-      "line": 1140
+      "line": 1139
     },
     {
       "name": "Engine::fracture_split",
       "file": "crates/physics/src/lib.rs",
-      "line": 1175
+      "line": 1174
     },
     {
       "name": "Engine::split_remove_body",
       "file": "crates/physics/src/lib.rs",
-      "line": 1228
+      "line": 1227
     },
     {
       "name": "Engine::split_remove_joint",
       "file": "crates/physics/src/lib.rs",
-      "line": 1261
+      "line": 1260
     },
     {
       "name": "Engine::fracture_pass",
       "file": "crates/physics/src/lib.rs",
-      "line": 1344
+      "line": 1343
     },
     {
       "name": "Engine::step",
       "file": "crates/physics/src/lib.rs",
-      "line": 1423
+      "line": 1422
     },
     {
       "name": "Engine::remove_body",
       "file": "crates/physics/src/lib.rs",
-      "line": 1454
+      "line": 1453
     },
     {
       "name": "Engine::remove_joint",
       "file": "crates/physics/src/lib.rs",
-      "line": 1542
+      "line": 1541
     },
     {
       "name": "FeatherstoneEngine::fk_pose",
@@ -1353,7 +1303,7 @@
     {
       "name": "quality",
       "file": "xtask/src/quality.rs",
-      "line": 2291
+      "line": 2536
     },
     {
       "name": "showcase_engine",

@@ -199,10 +199,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if symbol::imported(callee) == "texture_load_2d_f32" {
             return self.texture_load_f32(out, args);
         }
-        if symbol::imported(callee) == "texture_width_2d_f32x4" {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::TEXTURE_WIDTH_2D_F32X4 {
             return self.texture_size(out, args, 0, TextureKind::Sampled);
         }
-        if symbol::imported(callee) == "texture_height_2d_f32x4" {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::TEXTURE_HEIGHT_2D_F32X4 {
             return self.texture_size(out, args, 1, TextureKind::Sampled);
         }
         if symbol::imported(callee) == "texture_width_2d" {
@@ -220,16 +220,16 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if symbol::imported(callee) == ornis_gpu_abi::symbols::UNIFORM_ARRAY_VEC4_LANE {
             return self.uniform_array_vec4_lane(out, args);
         }
-        if symbol::imported(callee) == "uniform_nested_field_f32" {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::UNIFORM_NESTED_FIELD_F32 {
             return self.uniform_nested_field(out, args, ornis_gpu_abi::TYPE_TAG_F32);
         }
-        if symbol::imported(callee) == "uniform_nested_field_u32" {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::UNIFORM_NESTED_FIELD_U32 {
             return self.uniform_nested_field(out, args, ornis_gpu_abi::TYPE_TAG_U32);
         }
-        if symbol::imported(callee) == "uniform_field_vec4_plane_dot" {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::UNIFORM_FIELD_VEC4_PLANE_DOT {
             return self.uniform_plane_dot(out, args);
         }
-        if symbol::imported(callee) == "uniform_field_vec4_component_f32" {
+        if symbol::imported(callee) == ornis_gpu_abi::symbols::UNIFORM_FIELD_VEC4_COMPONENT_F32 {
             return self.uniform_field_vec4_component(out, args);
         }
         if symbol::imported(callee) == "uniform_field_f32" {

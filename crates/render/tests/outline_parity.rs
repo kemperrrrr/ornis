@@ -82,7 +82,10 @@ struct Inputs {
 /// One instance cannot catch a wrong record stride: instance `0` starts at
 /// offset `0` for `52u` and `53u` alike. Three do — a stride step error moves
 /// instance `1` and `2` to garbage words and the pixels move with them. The
-/// three flags cover every picker branch across the frame at once.
+/// frames below drive the flag list both ways: uniform frames for each value
+/// (the `0`/`1` hover colours and `2` selected), then one mixed list
+/// `[0, 1, 2]` so a single frame carries all three branches and an off-by-one
+/// in the per-instance flag index moves a pixel.
 const INSTANCES: u32 = 3;
 
 /// A model matrix that is not symmetric, so a transposed upload lands
@@ -119,8 +122,9 @@ fn view_proj() -> [[f32; 4]; 4] {
     ]
 }
 
-/// Build the buffers for one flag value (`0` none, `1` hover, `2` selected).
-fn inputs(device: &wgpu::Device, queue: &wgpu::Queue, flag: u32) -> Inputs {
+/// Build the buffers for one flag list (`0` none, `1` hover, `2` selected),
+/// one entry per instance.
+fn inputs(device: &wgpu::Device, queue: &wgpu::Queue, flags: [u32; INSTANCES as usize]) -> Inputs {
     let create = |label: &str, words: &[u8], usage: wgpu::BufferUsages| {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
@@ -167,19 +171,16 @@ fn inputs(device: &wgpu::Device, queue: &wgpu::Queue, flag: u32) -> Inputs {
         ),
         flags: create(
             "outline flags",
-            &flags_bytes(flag),
+            &flags_bytes(flags),
             wgpu::BufferUsages::STORAGE,
         ),
         instances: INSTANCES,
     }
 }
 
-/// The flag list, one entry per instance.
-fn flags_bytes(flag: u32) -> Vec<u8> {
-    (0..INSTANCES)
-        .map(|_| flag)
-        .collect::<Vec<u32>>()
-        .to_bytes()
+/// Little-endian bytes of the per-instance flag list.
+fn flags_bytes(flags: [u32; INSTANCES as usize]) -> Vec<u8> {
+    flags.to_vec().to_bytes()
 }
 
 /// Little-endian bytes of a `u32` list.
@@ -321,10 +322,12 @@ fn translated_outline_matches_the_dsl_pixels() {
     let translated_vertex = ornis_render::shaders::outline_generated::wgsl_vertex_source();
     let translated_fragment = ornis_render::shaders::outline_generated::wgsl_fragment_source();
     // Every flag the host can upload: `0` and `1` both paint the hover colour,
-    // `2` the selected one, so the pick is compared in both directions.
+    // `2` the selected one, so the pick is compared in both directions. The
+    // last frame mixes them per instance, which is the only shape that catches
+    // an index applied to the wrong entry of the flag list.
     let mut references = Vec::new();
-    for flag in [0u32, 1, 2] {
-        let inputs = inputs(&device, &queue, flag);
+    for flags in [[0u32, 0, 0], [1, 1, 1], [2, 2, 2], [0, 1, 2]] {
+        let inputs = inputs(&device, &queue, flags);
         let reference = render(&device, &queue, DSL_VERTEX, DSL_FRAGMENT, &inputs);
         let new = render(
             &device,
@@ -334,13 +337,13 @@ fn translated_outline_matches_the_dsl_pixels() {
             &inputs,
         );
         let mismatches = mismatched_pixels(&reference, &new);
-        assert_eq!(mismatches, 0, "flag {flag}: {mismatches} pixels differ");
+        assert_eq!(mismatches, 0, "flags {flags:?}: {mismatches} pixels differ");
         // A gate over two blank images proves nothing: the hull has to paint
         // pixels on both sides.
         let painted = painted_pixels(&reference);
         assert!(
             painted > (SIZE.0 * SIZE.1 / 20) as usize,
-            "flag {flag} painted only {painted} pixels"
+            "flags {flags:?} painted only {painted} pixels"
         );
         references.push(reference);
     }
@@ -354,6 +357,18 @@ fn translated_outline_matches_the_dsl_pixels() {
     assert!(
         mismatched_pixels(&references[1], &references[2]) > 0,
         "the selected colour must differ from the hover one"
+    );
+    // The mixed frame paints instance `2` selected and instance `0` hover, so it
+    // differs from both uniform frames. A flag list read with a fixed index
+    // would reproduce one of them exactly.
+    let mixed = &references[3];
+    assert!(
+        mismatched_pixels(&references[0], mixed) > 0,
+        "a selected instance must not paint the hover colour"
+    );
+    assert!(
+        mismatched_pixels(&references[2], mixed) > 0,
+        "a hover instance must not paint the selected colour"
     );
 }
 

@@ -510,6 +510,43 @@ pub const GPU_CROSS3_LANE: &str = "gpu_cross3_lane";
 /// from one operand triple.
 pub const GPU_NORMALIZE3_LANE: &str = "gpu_normalize3_lane";
 
+/// `(param i32 i32 i32 i32 i32) (result f32)` — one component of a `vec4`
+/// uniform field (`group, binding, struct id, field, component`).
+///
+/// The SDK exposes one component per import, so a shader may read the same
+/// field through four calls; the translator deduplicates those loads.
+pub const UNIFORM_FIELD_VEC4_COMPONENT_F32: &str = "uniform_field_vec4_component_f32";
+
+/// `(param i32 i32 i32 i32 i32) (result f32)` — `dot` of one operand triple
+/// with the xyz lanes of a `vec4` uniform field.
+pub const UNIFORM_FIELD_VEC4_PLANE_DOT: &str = "uniform_field_vec4_plane_dot";
+
+/// `(param i32 i32 i32 i32 i32) (result f32)` — `f32` field of a nested
+/// uniform struct (`group, binding, struct id, nested index, field`).
+pub const UNIFORM_NESTED_FIELD_F32: &str = "uniform_nested_field_f32";
+
+/// `u32` sibling of [`UNIFORM_NESTED_FIELD_F32`]: same operands, `u32` field.
+pub const UNIFORM_NESTED_FIELD_U32: &str = "uniform_nested_field_u32";
+
+/// Width of a texture whose sampled shape is `f32x4`.
+///
+/// Distinct from [`TEXTURE_WIDTH_2D`]: the declared sample type is part of
+/// the import name, so the depth and colour shapes stay separate opcodes.
+pub const TEXTURE_WIDTH_2D_F32X4: &str = "texture_width_2d_f32x4";
+
+/// `f32x4` sibling of [`TEXTURE_HEIGHT_2D`]; see [`TEXTURE_WIDTH_2D_F32X4`].
+pub const TEXTURE_HEIGHT_2D_F32X4: &str = "texture_height_2d_f32x4";
+
+/// `(param i32 i32) (result i32)` — element count of an `array<f32>` storage
+/// binding (`group, binding`).
+pub const STORAGE_LEN_F32: &str = "storage_len_f32";
+
+/// `u32` sibling of [`STORAGE_LEN_F32`]: element count of `array<u32>`.
+pub const STORAGE_LEN_U32: &str = "storage_len_u32";
+
+/// `vec4` sibling of [`STORAGE_LEN_F32`]: element count of `array<vec4<f32>>`.
+pub const STORAGE_LEN_U32X4: &str = "storage_len_u32x4";
+
 /// Compute entry. Optional: a module without this export still lowers.
 ///
 /// The translator binds the function's single `i32` parameter to
