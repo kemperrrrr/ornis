@@ -1,6 +1,6 @@
 //! Offline translator from LLVM IR (stable `rustc`) to WGSL and SPIR-V.
 //!
-//! The translator covers the compute and fragment subset of `3.1.2`: `cs_main`
+//! The translator covers the compute and raster subset: `cs_main`, `vs_main`,
 //! and `fs_main` built from `SROA`-scalarized arithmetic, comparisons,
 //! `select`, signed and unsigned integer bit/arithmetic ops, the
 //! `sqrt`/`sin` family, the `ornis_gpu` storage/uniform/texture ABI,
@@ -11,6 +11,15 @@
 //! `compute` kernel `wasm2gpu` already tests. `TextureSampling::Multisampled`
 //! re-declares the same kernel's textures as multisampled images with
 //! sample-0 loads, which is the 4x AO variant.
+//!
+//! A raster entry has no parameters: builtins and `@location` values are
+//! `ornis_gpu` imports (`vertex_index`, `instance_index`,
+//! `vertex_input_lane`, `fragment_input_lane`) and outputs are stores
+//! (`vertex_position`, `vertex_store_*`, `fragment_store_location`). The lowerer
+//! reads the interface back out of those calls, so the declared `vecN` width of
+//! each location is the highest lane the body touches. A vertex entry returns
+//! a struct with `@builtin(position)`; a fragment entry returns the bare
+//! `@location(0) vec4<f32>` when that is its only target.
 //!
 //! Values keep their LLVM bit pattern: `i32` lives as WGSL `u32`, and signed
 //! operators bitcast around the operation, so `ashr`/`sdiv`/`srem`/`sitofp`/
@@ -24,9 +33,10 @@
 //! an `if`/`loop` or after an arm that returned is rejected instead of
 //! emitting WGSL Tint refuses (or native UB).
 //!
-//! Linear memory (`load`/`store`/`getelementptr`), irreducible CFGs, and
-//! multi-exit loops are rejected so an unknown shape never becomes a wrong
-//! shader.
+//! Linear memory outside `alloca`-backed locals and module constants,
+//! irreducible CFGs, and multi-exit loops are rejected so an unknown shape
+//! never becomes a wrong shader; every rejection names the function, block, and
+//! instruction it refused (see [`TranslateError`]).
 //!
 //! Kernels written against the typed SDK (`ornis-gpu-shader`) lower to the same
 //! IR as the raw `extern "C"` ones, so nothing here knows about `Storage` or
@@ -38,16 +48,21 @@
 
 mod emit;
 mod error;
+mod inline;
 mod lower;
 pub mod meta;
 mod parse;
+mod site;
+mod symbol;
 
 pub use emit::Translated;
 pub use error::TranslateError;
-pub use meta::{ShaderMeta, extract as extract_meta, parse as parse_meta};
+pub use meta::{
+    ShaderMeta, extract as extract_meta, extract_entry as extract_meta_for, parse as parse_meta,
+};
 
 /// How the translator declares texture bindings.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum TextureSampling {
     /// `texture_2d<f32>` / `texture_depth_2d`; `textureLoad` reads mip 0.
     #[default]
@@ -56,25 +71,39 @@ pub enum TextureSampling {
     /// `textureLoad` reads sample 0. This is the 4x MSAA build of the same
     /// kernel: the body is unchanged, only the declared texture type is.
     Multisampled,
+    /// Only the listed `(group, binding)` textures are multisampled.
+    ///
+    /// A pass can bind a resolved colour target next to an unresolved
+    /// multisampled depth buffer (fog reads HDR at 1x and g-buffer depth at
+    /// 4x), so the sampling mode belongs to the binding, not to the module.
+    Listed(Vec<(u32, u32)>),
 }
 
 impl TextureSampling {
-    /// Whether bindings lower to multisampled image types.
-    fn multisampled(self) -> bool {
-        self == Self::Multisampled
+    /// Whether the texture at `(group, binding)` lowers to a multisampled type.
+    fn multisampled_at(&self, group: u32, binding: u32) -> bool {
+        match self {
+            Self::SingleSample => false,
+            Self::Multisampled => true,
+            Self::Listed(bindings) => bindings.contains(&(group, binding)),
+        }
     }
 }
 
 /// Translate using the metadata emitted by `#[gpu_entry]`.
 ///
-/// Falls back to the scalar toy defaults when the shader has no metadata
-/// global (older kernels).
+/// Every entry point the module defines goes into one WGSL module, in the
+/// order the IR declares them: a pass ships `vs_main` and `fs_main` together,
+/// sharing the bindings both stages read. A shader without a metadata record
+/// (older kernels) falls back to the scalar toy defaults.
 ///
 /// # Errors
 ///
-/// [`TranslateError::Unsupported`] when the entry is not `cs_main` or the body
-/// leaves the translated subset, and [`TranslateError::UnsupportedType`] when
-/// the metadata names a uniform struct the translator cannot lay out.
+/// [`TranslateError::Unsupported`] when an entry is not `cs_main`, `vs_main`,
+/// or `fs_main`, or a body leaves the translated subset, and
+/// [`TranslateError::UnsupportedType`] when the metadata names a uniform
+/// struct the translator cannot lay out, or two entries declare the same
+/// struct id with different tags.
 pub fn translate_with_meta(llvm_ir: &str) -> Result<Translated, TranslateError> {
     translate_with_meta_and_sampling(llvm_ir, TextureSampling::SingleSample)
 }
@@ -92,32 +121,152 @@ pub fn translate_with_meta_and_sampling(
     llvm_ir: &str,
     sampling: TextureSampling,
 ) -> Result<Translated, TranslateError> {
-    let func = parse::parse(llvm_ir)?;
-    let (meta, workgroup) = match meta::extract(llvm_ir)? {
-        Some(meta) => {
-            if meta.entry != ornis_gpu_abi::symbols::CS_MAIN
-                && meta.entry != ornis_gpu_abi::symbols::FS_MAIN
-            {
-                return Err(TranslateError::Unsupported);
-            }
-            let workgroup = meta.workgroup;
-            (Some(meta), workgroup)
-        }
-        None => (None, ornis_gpu_abi::symbols::CS_WORKGROUP),
-    };
-    let structs = match &meta {
-        Some(meta) => meta.table(),
-        None => Vec::new(),
-    };
-    let refs: Vec<&[u8]> = structs.iter().map(Vec::as_slice).collect();
-    let module = lower::lower(&func, &refs, workgroup, sampling.multisampled())?;
-    emit::emit(&module)
+    translate_module(
+        llvm_ir,
+        None,
+        sampling,
+        Workgroup::PerEntry,
+        Tables::FromMeta,
+    )
 }
 
-/// Parse textual LLVM IR and lower the `cs_main` compute entry.
+/// Translate one named entry: the single-entry form `xtask build-shaders
+/// --entry …` uses, so the other entries stay out of the emitted module.
+///
+/// # Errors
+///
+/// Same as [`translate_with_meta`], plus [`TranslateError::Unsupported`] when
+/// the module defines no entry called `entry`.
+pub fn translate_entry_with_sampling(
+    llvm_ir: &str,
+    entry: &str,
+    sampling: TextureSampling,
+) -> Result<Translated, TranslateError> {
+    translate_module(
+        llvm_ir,
+        Some(entry),
+        sampling,
+        Workgroup::PerEntry,
+        Tables::FromMeta,
+    )
+}
+
+/// Translate every entry, or only `entry` when one is named.
+///
+/// `workgroup` is [`Workgroup::PerEntry`] for a kernel built with
+/// `#[gpu_entry]`, whose metadata carries the size, and a fixed size for the
+/// hand-written IR of the tests, which has no metadata to read it from.
+fn translate_module(
+    llvm_ir: &str,
+    only: Option<&str>,
+    sampling: TextureSampling,
+    workgroup: Workgroup,
+    tables: Tables<'_>,
+) -> Result<Translated, TranslateError> {
+    // Every define is parsed: a kernel may call a function of its own crate,
+    // and those helpers are lowered into the same module. A helper whose
+    // signature carries a pointer is inlined first — WGSL has no pointer
+    // parameters — so its body is lowered where the pointer's base is known.
+    let parsed = parse::parse_module(llvm_ir)?;
+    let skipped = parsed.skipped;
+    let noreturn = parsed.noreturn;
+    let module = inline::inline_pointer_calls(parsed.funcs)?;
+    let funcs: Vec<&parse::LlvmFunc> = match only {
+        Some(entry) => vec![
+            module
+                .iter()
+                .find(|func| func.name == entry)
+                .ok_or_else(TranslateError::unsupported)?,
+        ],
+        None => module
+            .iter()
+            .filter(|func| parse::is_entry(&func.name))
+            .collect(),
+    };
+    if funcs.is_empty() {
+        return Err(TranslateError::unsupported());
+    }
+    let metas = match workgroup {
+        Workgroup::PerEntry => meta::extract(llvm_ir)?,
+        Workgroup::Fixed(_) => Vec::new(),
+    };
+    let merged;
+    let refs: Vec<&[u8]> = match tables {
+        Tables::FromMeta => {
+            merged = merge_tables(&metas)?;
+            merged.iter().map(Vec::as_slice).collect()
+        }
+        Tables::Explicit(structs) => structs.to_vec(),
+    };
+    let mut lowering = lower::Lowering::new(&refs, sampling);
+    lowering.reserve_skipped(skipped);
+    lowering.reserve_noreturn(noreturn);
+    lowering.reserve_diverging(&module);
+    lowering.reserve_definitions(&module);
+    lowering.reserve_barriers(&module);
+    lowering.add_helpers(&module)?;
+    for func in &funcs {
+        let size = match workgroup {
+            Workgroup::PerEntry => metas
+                .iter()
+                .find(|meta| meta.entry == func.name)
+                .map_or(ornis_gpu_abi::symbols::CS_WORKGROUP, |meta| meta.workgroup),
+            Workgroup::Fixed(size) => size,
+        };
+        lowering.push(func, size)?;
+    }
+    emit::emit(&lowering.finish())
+}
+
+/// Where the uniform-struct table comes from.
+#[derive(Clone, Copy)]
+enum Tables<'a> {
+    /// The `ornis_gpu.types` records of the module, one table per crate.
+    FromMeta,
+    /// A table the caller passes, as the hand-written IR of the tests does.
+    Explicit(&'a [&'a [u8]]),
+}
+
+/// Where an entry's `@workgroup_size` comes from.
+#[derive(Clone, Copy)]
+enum Workgroup {
+    /// From the `#[gpu_entry]` metadata of each entry.
+    PerEntry,
+    /// One size for every entry: hand-written IR declares none.
+    Fixed([u32; 3]),
+}
+
+/// Merge the uniform-struct tables of every entry record.
+///
+/// Struct ids are assigned by the kernel author and shared per crate, so two
+/// entries that use the same id must agree on it. Disagreeing tags would make
+/// one entry read the other's layout, so that is an error rather than a
+/// last-one-wins merge.
+fn merge_tables(metas: &[meta::ShaderMeta]) -> Result<Vec<Vec<u8>>, TranslateError> {
+    let mut merged: Vec<Vec<u8>> = Vec::new();
+    for meta in metas {
+        for (id, tags) in meta.structs.iter() {
+            let index = *id as usize;
+            if merged.len() <= index {
+                merged.resize(index + 1, Vec::new());
+            }
+            let slot = &mut merged[index];
+            if slot.is_empty() {
+                *slot = tags.clone();
+            } else if slot != tags {
+                return Err(TranslateError::UnsupportedType(format!(
+                    "uniform struct {id} has different fields in two entries"
+                )));
+            }
+        }
+    }
+    Ok(merged)
+}
+
+/// Parse textual LLVM IR and lower the entry point it defines.
 ///
 /// Requires stable `rustc` with the `wasm32-unknown-unknown` target,
-/// `panic=abort`, and a `#[no_mangle] cs_main(i32) -> f32` export compiled
+/// `panic=abort`, and an exported `cs_main`, `vs_main`, or `fs_main` compiled
 /// with `--emit=llvm-ir`. `xtask build-shaders` builds the checked-in
 /// production artifacts at `opt-level=1`, which keeps dynamic loops
 /// structured; `3` may unroll them into a CFG shape this translator rejects.
@@ -166,7 +315,11 @@ pub fn translate_with_types_and_workgroup(
     structs: &[&[u8]],
     workgroup: [u32; 3],
 ) -> Result<Translated, TranslateError> {
-    let func = parse::parse(llvm_ir)?;
-    let module = lower::lower(&func, structs, workgroup, false)?;
-    emit::emit(&module)
+    translate_module(
+        llvm_ir,
+        None,
+        TextureSampling::SingleSample,
+        Workgroup::Fixed(workgroup),
+        Tables::Explicit(structs),
+    )
 }

@@ -13,8 +13,17 @@ use std::process::{exit, Command};
 
 /// Shader crate compiled when `--package` is omitted.
 const DEFAULT_PACKAGE: &str = "ornis-gpu-shaders";
-/// Entry extracted by the translator.
+/// Entry extracted by the translator when `--entry` is omitted.
 const DEFAULT_ENTRY: &str = "cs_main";
+/// `--entry all`: translate every entry point into one module.
+const ALL_ENTRIES: &str = "all";
+/// Entry-name prefixes the translator recognises a stage from.
+///
+/// A crate may define more than one entry per stage — `vs_main_indirect` or
+/// `fs_main_textured` — and the translator picks the stage by prefix, so the
+/// command line accepts any name that starts with one of these. A name that
+/// matches none is rejected here, where the message can name the rule.
+const ENTRY_PREFIXES: [&str; 3] = [DEFAULT_ENTRY, "vs_main", "fs_main"];
 /// LLVM optimisation level used for the shader crate.
 ///
 /// `1` is the canonical level for the checked-in artifacts: it inlines the
@@ -34,7 +43,8 @@ const DEFAULT_TYPES: [u8; 7] = [6, 6, 6, 6, 6, 6, 2];
 
 struct Args {
     package: String,
-    entry: String,
+    /// Entry to translate; `None` keeps every entry the crate defines.
+    entry: Option<String>,
     opt: String,
     out: PathBuf,
     artifact: Option<PathBuf>,
@@ -42,6 +52,9 @@ struct Args {
     workgroup: [u32; 3],
     types: Vec<u8>,
     multisampled: bool,
+    /// `(group, binding)` pairs to declare multisampled when `--multisampled`
+    /// would mark every texture.
+    multisampled_textures: Vec<(u32, u32)>,
 }
 
 pub fn build_shaders(raw: &[String]) {
@@ -52,9 +65,17 @@ pub fn build_shaders(raw: &[String]) {
             exit(2);
         }
     };
-    if args.entry != DEFAULT_ENTRY && args.entry != "fs_main" {
-        eprintln!("xtask build-shaders: entry must be `{DEFAULT_ENTRY}` or `fs_main`");
-        exit(2);
+    if let Some(entry) = &args.entry {
+        let known = ENTRY_PREFIXES
+            .iter()
+            .any(|prefix| entry.starts_with(prefix));
+        if !known {
+            eprintln!(
+                "xtask build-shaders: entry must start with `{}`, `{}`, or `{}`, or be `{ALL_ENTRIES}`",
+                ENTRY_PREFIXES[0], ENTRY_PREFIXES[1], ENTRY_PREFIXES[2]
+            );
+            exit(2);
+        }
     }
     let root = super::workspace_root();
     if let Err(message) = build(&root, &args) {
@@ -66,7 +87,7 @@ pub fn build_shaders(raw: &[String]) {
 fn parse(raw: &[String]) -> Result<Args, String> {
     let mut args = Args {
         package: DEFAULT_PACKAGE.to_string(),
-        entry: DEFAULT_ENTRY.to_string(),
+        entry: Some(DEFAULT_ENTRY.to_string()),
         opt: DEFAULT_OPT.to_string(),
         out: PathBuf::from(DEFAULT_OUT),
         artifact: None,
@@ -74,6 +95,7 @@ fn parse(raw: &[String]) -> Result<Args, String> {
         workgroup: DEFAULT_WORKGROUP,
         types: DEFAULT_TYPES.to_vec(),
         multisampled: false,
+        multisampled_textures: Vec::new(),
     };
     let mut iter = raw.iter();
     while let Some(flag) = iter.next() {
@@ -88,11 +110,13 @@ fn parse(raw: &[String]) -> Result<Args, String> {
         let value = iter.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--package" => args.package = value.clone(),
-            "--entry" => args.entry = value.clone(),
+            "--entry" if value == ALL_ENTRIES => args.entry = None,
+            "--entry" => args.entry = Some(value.clone()),
             "--opt" => args.opt = value.clone(),
             "--out" => args.out = PathBuf::from(value),
             "--artifact" => args.artifact = Some(PathBuf::from(value)),
             "--workgroup" => args.workgroup = parse_workgroup(value)?,
+            "--multisampled-textures" => args.multisampled_textures = parse_bindings(value)?,
             "--types" => args.types = parse_types(value)?,
             other => return Err(format!("unknown argument {other}")),
         }
@@ -129,42 +153,49 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
     let ll = compile(root, args)?;
     let ir =
         std::fs::read_to_string(&ll).map_err(|error| format!("read {}: {error}", ll.display()))?;
-    let translated = match ornis_llvm2gpu::extract_meta(&ir) {
-        Ok(None) => {
-            if args.multisampled {
-                return Err("--multisampled needs a kernel with entry metadata".to_string());
-            }
-            let structs: Vec<&[u8]> = if args.types.is_empty() {
-                Vec::new()
-            } else {
-                vec![args.types.as_slice()]
-            };
-            ornis_llvm2gpu::translate_with_types_and_workgroup(&ir, &structs, args.workgroup)
+    let sampling = match (&args.multisampled_textures, args.multisampled) {
+        (bindings, _) if !bindings.is_empty() => {
+            ornis_llvm2gpu::TextureSampling::Listed(bindings.clone())
         }
-        Ok(Some(_)) => {
-            let sampling = if args.multisampled {
-                ornis_llvm2gpu::TextureSampling::Multisampled
-            } else {
-                ornis_llvm2gpu::TextureSampling::SingleSample
-            };
-            ornis_llvm2gpu::translate_with_meta_and_sampling(&ir, sampling)
+        (_, true) => ornis_llvm2gpu::TextureSampling::Multisampled,
+        (_, false) => ornis_llvm2gpu::TextureSampling::SingleSample,
+    };
+    let records = ornis_llvm2gpu::extract_meta(&ir)
+        .map_err(|error| format!("translate {}: {error}", args.package))?;
+    let translated = if records.is_empty() {
+        if args.multisampled {
+            return Err("--multisampled needs a kernel with entry metadata".to_string());
         }
-        Err(error) => Err(error),
+        let structs: Vec<&[u8]> = if args.types.is_empty() {
+            Vec::new()
+        } else {
+            vec![args.types.as_slice()]
+        };
+        ornis_llvm2gpu::translate_with_types_and_workgroup(&ir, &structs, args.workgroup)
+    } else if let Some(entry) = &args.entry {
+        ornis_llvm2gpu::translate_entry_with_sampling(&ir, entry, sampling)
+    } else {
+        ornis_llvm2gpu::translate_with_meta_and_sampling(&ir, sampling)
     }
     .map_err(|error| format!("translate {}: {error}", args.package))?;
 
     let out = resolve(root, &args.out);
     std::fs::create_dir_all(&out).map_err(|error| format!("create {}: {error}", out.display()))?;
-    let wgsl = out.join(format!("{}.wgsl", args.entry));
+    let stem = args.entry.as_deref().unwrap_or("module");
+    let wgsl = out.join(format!("{stem}.wgsl"));
     std::fs::write(&wgsl, &translated.wgsl)
         .map_err(|error| format!("write {}: {error}", wgsl.display()))?;
-    let bytes: Vec<u8> = translated
-        .compute_spirv
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .collect();
-    let spv = out.join(format!("{}.spv", args.entry));
-    std::fs::write(&spv, bytes).map_err(|error| format!("write {}: {error}", spv.display()))?;
+    // The translator emits SPIR-V for the compute entry only; a raster artifact
+    // is WGSL-only, so no empty `.spv` is left behind for it.
+    if !translated.compute_spirv.is_empty() {
+        let bytes: Vec<u8> = translated
+            .compute_spirv
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        let spv = out.join(format!("{stem}.spv"));
+        std::fs::write(&spv, bytes).map_err(|error| format!("write {}: {error}", spv.display()))?;
+    }
 
     if let Some(artifact) = &args.artifact {
         let artifact = resolve(root, artifact);
@@ -173,9 +204,10 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
                 .map_err(|error| format!("read {}: {error}", artifact.display()))?;
             if current != translated.wgsl {
                 return Err(format!(
-                    "artifact {} is stale; run `cargo xtask build-shaders --artifact {}`",
+                    "artifact {} is stale ({}); run `{}`",
                     artifact.display(),
-                    artifact.display()
+                    drift(&current, &translated.wgsl),
+                    rebuild_command(args, &artifact)
                 ));
             }
             eprintln!("xtask build-shaders: {} is current", artifact.display());
@@ -185,7 +217,11 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
             eprintln!("xtask build-shaders: wrote {}", artifact.display());
         }
     }
-    eprintln!("xtask build-shaders: {} -> {}", args.entry, wgsl.display());
+    eprintln!(
+        "xtask build-shaders: {} -> {}",
+        translated.entries.join("+"),
+        wgsl.display()
+    );
     Ok(())
 }
 
@@ -264,6 +300,27 @@ fn run_cargo_rustc(root: &Path, args: &Args, ll: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `0:2,1:0` → `[(0, 2), (1, 0)]`.
+fn parse_bindings(value: &str) -> Result<Vec<(u32, u32)>, String> {
+    value
+        .split(',')
+        .map(|pair| {
+            let (group, binding) = pair
+                .split_once(':')
+                .ok_or_else(|| format!("binding `{pair}` is not `<group>:<binding>`"))?;
+            let group = group
+                .trim()
+                .parse::<u32>()
+                .map_err(|error| format!("invalid group in `{pair}`: {error}"))?;
+            let binding = binding
+                .trim()
+                .parse::<u32>()
+                .map_err(|error| format!("invalid binding in `{pair}`: {error}"))?;
+            Ok((group, binding))
+        })
+        .collect()
+}
+
 fn parse_types(value: &str) -> Result<Vec<u8>, String> {
     if value.is_empty() {
         return Ok(Vec::new());
@@ -286,15 +343,92 @@ fn resolve(root: &Path, path: &Path) -> PathBuf {
     }
 }
 
+/// The command that regenerates one artifact.
+///
+/// Every artifact needs its own package and entry, and the stages that declare
+/// multisampled textures need those flags too: a suggestion that prints only
+/// `--artifact` would regenerate the *default* shader into that file.
+fn rebuild_command(args: &Args, artifact: &Path) -> String {
+    let mut command = format!(
+        "cargo xtask build-shaders --package {} --entry {}",
+        args.package,
+        args.entry.as_deref().unwrap_or("all")
+    );
+    if args.multisampled {
+        command.push_str(" --multisampled");
+    }
+    if !args.multisampled_textures.is_empty() {
+        command.push_str(" --multisampled-textures");
+        for (group, binding) in &args.multisampled_textures {
+            command.push_str(&format!(" {group}:{binding}"));
+        }
+    }
+    command.push_str(&format!(" --artifact {}", artifact.display()));
+    command
+}
+
+/// One-line summary of how a checked-in artifact differs from the fresh one.
+///
+/// A byte-exact gate that only says "stale" leaves the cause to a manual
+/// rebuild-and-diff; the first differing line and the count of differing lines
+/// say whether the drift is a whole module (translation changed) or a handful
+/// of lines (one helper moved).
+fn drift(current: &str, fresh: &str) -> String {
+    let generated: Vec<&str> = fresh.lines().collect();
+    let checked_in: Vec<&str> = current.lines().collect();
+    let differing = generated
+        .iter()
+        .zip(checked_in.iter())
+        .filter(|(left, right)| left != right)
+        .count()
+        + generated.len().abs_diff(checked_in.len());
+    let first = generated
+        .iter()
+        .zip(checked_in.iter())
+        .position(|(left, right)| left != right)
+        .map_or_else(
+            || "checked-in artifact ends early".to_string(),
+            |line| {
+                format!(
+                    "first difference at line {}: generated `{}`, checked in `{}`",
+                    line + 1,
+                    generated[line].trim(),
+                    checked_in[line].trim()
+                )
+            },
+        );
+    format!(
+        "{differing} differing lines of {}; {first}",
+        generated.len()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn drift_names_the_first_differing_line() {
+        let report = drift("a\nb\nc\n", "a\nB\nc\n");
+        assert!(report.starts_with("1 differing lines of 3;"), "{report}");
+        assert!(
+            report.contains("first difference at line 2: generated `B`, checked in `b`"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn drift_reports_a_truncated_artifact() {
+        let report = drift("a\n", "a\nb\n");
+        assert!(report.starts_with("1 differing lines of 2;"), "{report}");
+        assert!(report.contains("ends early"), "{report}");
+    }
+
+    #[test]
     fn parse_defaults() {
         let args = parse(&[]).expect("defaults");
         assert_eq!(args.package, DEFAULT_PACKAGE);
-        assert_eq!(args.entry, DEFAULT_ENTRY);
+        assert_eq!(args.entry.as_deref(), Some(DEFAULT_ENTRY));
         assert_eq!(args.opt, DEFAULT_OPT);
         assert!(!args.check);
         assert!(args.artifact.is_none());
@@ -337,6 +471,22 @@ mod tests {
     #[test]
     fn check_requires_artifact() {
         assert!(parse(&["--check".to_string()]).is_err());
+    }
+
+    #[test]
+    fn multisampled_textures_parse_group_binding_pairs() {
+        let args = parse(&["--multisampled-textures".to_string(), "0:2,1:0".to_string()])
+            .expect("bindings");
+        assert_eq!(args.multisampled_textures, [(0, 2), (1, 0)]);
+        assert!(parse(&["--multisampled-textures".to_string(), "0".to_string()]).is_err());
+    }
+
+    #[test]
+    fn entry_all_translates_every_entry_point() {
+        let args = parse(&["--entry".to_string(), "all".to_string()]).expect("all");
+        assert!(args.entry.is_none());
+        let args = parse(&["--entry".to_string(), "vs_main".to_string()]).expect("vertex");
+        assert_eq!(args.entry.as_deref(), Some("vs_main"));
     }
 
     #[test]

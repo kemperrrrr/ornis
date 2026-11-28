@@ -401,9 +401,10 @@ transpiler из исполняемого Rust и не Wasm.
 
 Сегментированная Wasm-память — **другой фронтенд**: «настоящий rustc в
 телах» ценой своего ABI и транслятора. Имеет смысл как research / этап 2,
-если DSL упрётся в язык (generics, сложный control flow).
+если транслятор LLVM IR (llvm2gpu) упрётся в язык (generics, сложный
+control flow).
 
-Практически ближе и дешевле сейчас: усиливать DSL + Naga и явные
+Практически ближе и дешевле сейчас: усиливать транслятор + Naga и явные
 `Context` / bindings. Если идти в Wasm-путь — начинать с typed
 provenance + offset-only pointers + imports для texture, а не с нарезки
 32 бит на space/id/offset.
@@ -414,9 +415,9 @@ provenance + offset-only pointers + imports для texture, а не с наре�
 |---------|--------|
 | Packing space+binding+offset в каждый i32 | Идея-катализатор; как default ABI — нет (storage offset, LLVM, wgpu bindless) |
 | Provenance в типе/SSA, offset в указателе, texture-импорты | Рабочая форма надстройки для прототипа |
-| Замена текущего DSL-пути | Не сейчас; research note до явного решения |
+| Замена текущего пути (llvm2gpu) | Не сейчас; research note до явного решения |
 
-Сделано как research-прототип, не как замена DSL: toy ABI (§4),
+Сделано как research-прототип, не как замена llvm2gpu: toy ABI (§4),
 storage read/write (скаляры, векторы, простые структуры, индекс
 элемента — access chain) и CFG с абстрактной интерпретацией
 provenance. Bindless по-прежнему не default.

@@ -144,26 +144,31 @@ impl<T: bytemuck::Pod> AutoLane<T> {
 mod tests {
     use super::*;
 
-    #[ornis_macros::gpu_pipeline(
-        workgroup_size = 64,
-        storage(buf: [f32; 64], read_write),
-        builtin(gid: global_invocation_id),
-    )]
-    fn scale_lane() {
-        buf[gid.x] = buf[gid.x] * 2.0;
-    }
+    /// Doubling kernel: one storage buffer, one invocation per lane.
+    ///
+    /// Literal WGSL rather than a translated kernel: these tests exercise the
+    /// backend's residency and dispatch, not shader codegen, and the dependency
+    /// would pull a build step into a crate that does not otherwise own shaders.
+    const SCALE_LANE_WGSL: &str = "\
+@group(0) @binding(0) var<storage, read_write> buf: array<f32>;
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    buf[gid.x] = buf[gid.x] * 2.0;
+}
+";
 
     /// Second proven kernel: fused multiply-add. It exercises a different
-    /// ALU shape than [`scale_lane`] so AutoLane coverage is not tied to a
+    /// ALU shape than [`SCALE_LANE_WGSL`] so AutoLane coverage is not tied to a
     /// single codegen path.
-    #[ornis_macros::gpu_pipeline(
-        workgroup_size = 64,
-        storage(buf: [f32; 64], read_write),
-        builtin(gid: global_invocation_id),
-    )]
-    fn madd_lane() {
-        buf[gid.x] = buf[gid.x] * 2.0 + 1.0;
-    }
+    const MADD_LANE_WGSL: &str = "\
+@group(0) @binding(0) var<storage, read_write> buf: array<f32>;
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    buf[gid.x] = buf[gid.x] * 2.0 + 1.0;
+}
+";
 
     /// Adapter if the machine has one; `None` (skip the test) otherwise.
     /// Unlike [`WgpuContext::new_blocking`](crate::context::WgpuContext::new_blocking),
@@ -295,7 +300,7 @@ mod tests {
             &device,
             lane.gpu_buffer().expect("buffer exists"),
             "auto_lane scale test",
-            scale_lane::wgsl_source(),
+            SCALE_LANE_WGSL,
         );
         // If this ran on CPU it would multiply by 3; GPU multiplies by 2.
         lane.execute(&mut sync, Some(&pipeline), Some(&bg), |data| {
@@ -345,7 +350,7 @@ mod tests {
             &device,
             lane.gpu_buffer().expect("buffer exists"),
             "auto_lane round trip test",
-            scale_lane::wgsl_source(),
+            SCALE_LANE_WGSL,
         );
         // Run 1 (GPU): 1.0 -> 2.0.
         assert!(
@@ -386,7 +391,7 @@ mod tests {
             &device,
             lane.gpu_buffer().expect("buffer exists"),
             "auto_lane madd test",
-            madd_lane::wgsl_source(),
+            MADD_LANE_WGSL,
         );
         // If this ran on CPU it would multiply by 5; GPU must do x*2+1.
         lane.execute(&mut sync, Some(&pipeline), Some(&bg), |data| {
@@ -414,7 +419,7 @@ mod tests {
             &device,
             lane.gpu_buffer().expect("buffer exists"),
             "auto_lane madd round trip test",
-            madd_lane::wgsl_source(),
+            MADD_LANE_WGSL,
         );
         // Run 1 (GPU): 1.0 -> 3.0.
         assert!(
@@ -459,7 +464,7 @@ mod tests {
             &device,
             lane.gpu_buffer().expect("buffer exists"),
             "auto_lane cpu-vs-gpu test",
-            madd_lane::wgsl_source(),
+            MADD_LANE_WGSL,
         );
         assert!(
             lane.execute(&mut sync, Some(&pipeline), Some(&bg), |_| panic!(
@@ -486,14 +491,15 @@ mod tests {
         );
     }
 
-    #[ornis_macros::gpu_pipeline(
-        workgroup_size = 64,
-        storage(counts: [u32; 64], read_write),
-        builtin(gid: global_invocation_id),
-    )]
-    fn double_counts() {
-        counts[gid.x] = counts[gid.x] * 2;
-    }
+    /// `u32` lane kernel: doubling counts, to cover a non-`f32` lane element.
+    const DOUBLE_COUNTS_WGSL: &str = "\
+@group(0) @binding(0) var<storage, read_write> counts: array<u32>;
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    counts[gid.x] = counts[gid.x] * 2u;
+}
+";
 
     #[test]
     fn gpu_verdict_supports_u32_lanes() {
@@ -506,7 +512,7 @@ mod tests {
             &device,
             lane.gpu_buffer().expect("buffer exists"),
             "auto_lane u32 test",
-            double_counts::wgsl_source(),
+            DOUBLE_COUNTS_WGSL,
         );
         // CPU would triple; GPU must double.
         lane.execute(&mut sync, Some(&pipeline), Some(&bg), |data| {

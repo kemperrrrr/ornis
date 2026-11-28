@@ -162,8 +162,8 @@ impl QualityFlags {
     ///
     /// The clippy stage runs two commands (the workspace lint and the
     /// render-bench lint under `test-util`), and `build-shaders` checks
-    /// nine artifacts, so that id counts nine times: the denominator
-    /// has to be right before the first stage prints its header.
+    /// thirty artifacts, so that id counts thirty times: the denominator has
+    /// to be right before the first stage prints its header.
     fn total_stages(&self) -> usize {
         let stages = self
             .active_ids()
@@ -172,8 +172,10 @@ impl QualityFlags {
             .count();
         // `build-shaders` runs the base id plus one extra per remaining
         // artifact: cull, clusters, gtao, histogram, adapt, ssao, gtao 4x,
-        // ssao 4x, and the AO blur.
-        let shader_checks = 8 * usize::from(self.ci && self.enabled("build-shaders"));
+        // ssao 4x, the AO blur, the translated post passes (composite, hdr,
+        // fog 1x/4x, bloom, aa edge, aa taa 1x/4x, gbuffer, gbuffer
+        // vertex-only) and the stats blit.
+        let shader_checks = 30 * usize::from(self.ci && self.enabled("build-shaders"));
         stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
@@ -2129,6 +2131,156 @@ fn ci_stages(stages: &mut StageList<'_>) {
     );
     check_shader_artifact(
         stages,
+        Some("ornis-gpu-composite"),
+        Some("all"),
+        "crates/render/src/shaders/composite_generated.wgsl",
+        "cargo xtask build-shaders --check (composite WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-hdr-composite"),
+        Some("all"),
+        "crates/render/src/shaders/hdr_composite_generated.wgsl",
+        "cargo xtask build-shaders --check (hdr composite WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-aa-edge"),
+        Some("all"),
+        "crates/render/src/shaders/aa_edge_generated.wgsl",
+        "cargo xtask build-shaders --check (aa edge WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-aa-taa"),
+        Some("all"),
+        "crates/render/src/shaders/aa_taa_generated.wgsl",
+        "cargo xtask build-shaders --check (aa taa WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-gbuffer"),
+        Some("all"),
+        "crates/render/src/shaders/gbuffer_generated.wgsl",
+        "cargo xtask build-shaders --check (gbuffer WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-gbuffer"),
+        Some("vs_main"),
+        "crates/render/src/shaders/gbuffer_vertex_generated.wgsl",
+        "cargo xtask build-shaders --check (gbuffer vertex-only WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-pbr"),
+        Some("fs_main"),
+        "crates/render/src/shaders/pbr_generated.wgsl",
+        "cargo xtask build-shaders --check (forward PBR WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-pbr"),
+        Some("fs_main_textured"),
+        "crates/render/src/shaders/pbr_textured_generated.wgsl",
+        "cargo xtask build-shaders --check (textured forward PBR WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-lighting"),
+        Some("fs_main_lighting"),
+        "crates/render/src/shaders/lighting_generated.wgsl",
+        "cargo xtask build-shaders --check (deferred lighting WGSL drift)",
+    );
+    check_shader_artifact_listed(
+        stages,
+        Some("ornis-gpu-lighting"),
+        Some("fs_main_lighting_msaa"),
+        "crates/render/src/shaders/lighting_msaa_generated.wgsl",
+        "cargo xtask build-shaders --check (deferred lighting 4x WGSL drift)",
+        "0:4,0:5,0:8",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-avbd"),
+        Some("cs_main"),
+        "crates/physics/src/gpu/avbd_stub_generated.wgsl",
+        "cargo xtask build-shaders --check (AVBD rung-1 WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-avbd"),
+        Some("cs_main_row"),
+        "crates/physics/src/gpu/avbd_row_generated.wgsl",
+        "cargo xtask build-shaders --check (AVBD rung-2 WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-si"),
+        Some("cs_main_contact"),
+        "crates/physics/src/gpu/si_contact_generated.wgsl",
+        "cargo xtask build-shaders --check (SI contact WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-quad"),
+        Some("vs_main_quad"),
+        "crates/render/src/shaders/quad_vertex_generated.wgsl",
+        "cargo xtask build-shaders --check (shared quad vertex WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-skinning"),
+        Some("vs_main_skinned"),
+        "crates/render/src/shaders/skinning_generated.wgsl",
+        "cargo xtask build-shaders --check (skinned vertex WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-outline"),
+        Some("vs_main"),
+        "crates/render/src/shaders/outline_vertex_generated.wgsl",
+        "cargo xtask build-shaders --check (outline vertex WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-outline"),
+        Some("fs_main"),
+        "crates/render/src/shaders/outline_fragment_generated.wgsl",
+        "cargo xtask build-shaders --check (outline fragment WGSL drift)",
+    );
+    check_shader_artifact_listed(
+        stages,
+        Some("ornis-gpu-aa-taa"),
+        Some("all"),
+        "crates/render/src/shaders/aa_taa_msaa_generated.wgsl",
+        "cargo xtask build-shaders --check (aa taa 4x WGSL drift)",
+        "0:2",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-bloom"),
+        Some("all"),
+        "crates/render/src/shaders/bloom_generated.wgsl",
+        "cargo xtask build-shaders --check (bloom WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-fog"),
+        Some("all"),
+        "crates/render/src/shaders/fog_generated.wgsl",
+        "cargo xtask build-shaders --check (fog WGSL drift)",
+    );
+    check_shader_artifact_listed(
+        stages,
+        Some("ornis-gpu-fog"),
+        Some("all"),
+        "crates/render/src/shaders/fog_msaa_generated.wgsl",
+        "cargo xtask build-shaders --check (fog 4x WGSL drift)",
+        "0:2",
+    );
+    check_shader_artifact(
+        stages,
         Some("ornis-gpu-cluster"),
         None,
         "crates/render/src/renderer/clusters/cluster_generated.wgsl",
@@ -2183,6 +2335,13 @@ fn ci_stages(stages: &mut StageList<'_>) {
         "crates/render/src/shaders/ao_blur_generated.wgsl",
         "cargo xtask build-shaders --check (ao blur WGSL drift)",
     );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-blit"),
+        Some("all"),
+        "crates/runner/src/stats/blit_generated.wgsl",
+        "cargo xtask build-shaders --check (stats blit WGSL drift)",
+    );
 }
 
 /// One checked-in WGSL artifact. `package` is omitted for the default crate.
@@ -2195,6 +2354,34 @@ fn check_shader_artifact(
     desc: &str,
 ) {
     check_shader_artifact_sampling(stages, package, entry, artifact, desc, false);
+}
+
+/// Like [`check_shader_artifact`], with the listed textures multisampled.
+///
+/// Both forms end in [`check_shader_artifact_args`], which is the one place the
+/// command line is built; the untested-function rule cannot see through the
+/// helper, hence the annotations below.
+// qual:allow(test_quality, untested) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+///
+/// A pass can bind a resolved colour target next to an unresolved depth buffer,
+/// so the 4x build names the depth binding instead of switching every texture.
+// qual:allow(test_quality, untested, max_parameters=6) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+fn check_shader_artifact_listed(
+    stages: &mut StageList<'_>,
+    package: Option<&str>,
+    entry: Option<&str>,
+    artifact: &str,
+    desc: &str,
+    bindings: &str,
+) {
+    check_shader_artifact_args(
+        stages,
+        package,
+        entry,
+        artifact,
+        desc,
+        &["--multisampled-textures", bindings],
+    );
 }
 
 /// Like [`check_shader_artifact`], with the 4x MSAA texture declarations.
@@ -2218,6 +2405,24 @@ fn check_shader_artifact_sampling(
     desc: &str,
     multisampled: bool,
 ) {
+    let extra: &[&str] = if multisampled {
+        &["--multisampled"]
+    } else {
+        &[]
+    };
+    check_shader_artifact_args(stages, package, entry, artifact, desc, extra);
+}
+
+/// The one place a shader artifact check builds its command line.
+// qual:allow(test_quality, untested) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+fn check_shader_artifact_args(
+    stages: &mut StageList<'_>,
+    package: Option<&str>,
+    entry: Option<&str>,
+    artifact: &str,
+    desc: &str,
+    extra: &[&str],
+) {
     if !wasm_target_installed() {
         stages.skip(
             "build-shaders",
@@ -2235,9 +2440,7 @@ fn check_shader_artifact_sampling(
         args.push("--entry");
         args.push(entry);
     }
-    if multisampled {
-        args.push("--multisampled");
-    }
+    args.extend_from_slice(extra);
     args.push("--artifact");
     args.push(artifact);
     args.push("--check");
@@ -3731,7 +3934,8 @@ mod tests {
         assert_eq!(only_fmt.total_stages(), 1);
         let only_shaders =
             QualityFlags::parse(&["--ci".to_string(), "--only=build-shaders".to_string()]);
-        assert_eq!(only_shaders.total_stages(), 9);
+        // One stage per checked-in artifact.
+        assert_eq!(only_shaders.total_stages(), 31);
     }
 
     #[test]

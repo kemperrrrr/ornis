@@ -1,61 +1,27 @@
-//! Composite shader generated from Rust (Render path 2).
+//! UI composite pass: translated from Rust through LLVM IR.
 //!
-//! Canonical source is the Rust code in this module; WGSL is assembled
-//! from constants + `srgb_to_linear::wgsl_source()` (kernel from
-//! `crates/render/src/shaders/math.rs` via `#[kernel]`). The former
-//! handwritten `shaders/wgsl/composite.wgsl` was deleted after the `#[stage]`
-//! translation; `composite.rs` (LegacyCompositePass) now uses only this module.
+//! The shader itself lives in `crates/gpu-composite` and is written against the
+//! stable SDK: `#[gpu_entry(vertex)]` draws the quad from two module constants
+//! indexed by `@builtin(vertex_index)`, and `#[gpu_entry(fragment)]` samples the
+//! PBR and UI layers, decodes the UI texel from sRGB to linear light, and mixes
+//! it over the scene by its alpha. `xtask build-shaders --package
+//! ornis-gpu-composite --entry all` compiles that crate for
+//! `wasm32-unknown-unknown`, translates its LLVM IR, and writes the checked-in
+//! `composite_generated.wgsl` next to this file; `--check` in CI catches drift.
+//!
+//! The resource table below is still the single source of truth for the bind
+//! group layout, and it matches the `#[gpu(...)]` attributes in the kernel.
 
-use super::interface::UiCompositeOut as VertexOutput;
-use super::{Resource, ResourceKind, Sampler, ShaderModule, Texture2d, naga_ir, wgsl_decl};
-use crate::shaders::math::srgb_to_linear;
-use ornis_macros::stage;
+use super::{Resource, ResourceKind};
 
-/// Composite fragment resources as a context bundle (`ctx.pbr_tex`, …).
-#[allow(dead_code)]
-#[derive(ornis_macros::ShaderContext)]
-pub(crate) struct CompositeContext {
-    pub pbr_tex: Texture2d,
-    pub pbr_sampler: Sampler,
-    pub ui_tex: Texture2d,
-    pub ui_sampler: Sampler,
-}
+/// Vertex entry point of the translated module.
+pub const VS_ENTRY: &str = "vs_main";
 
-/// Legacy composite vertex entry, translated by [`stage`](ornis_macros::stage).
-/// DSL-only — replaced by `vs_main::wgsl_source()`. Uses the
-/// `var`-out form (`let mut out: T;` + field assignment).
-#[stage(vertex)]
-fn vs_main(vertex_index: super::VertexIndex, consts: Context<super::QuadConsts>) -> VertexOutput {
-    let mut out: VertexOutput;
-    out.position = consts.quad[vertex_index];
-    out.uv = consts.uvs[vertex_index];
-    return out;
-}
+/// Fragment entry point of the translated module.
+pub const FS_ENTRY: &str = "fs_main";
 
-/// Legacy composite fragment entry, translated by [`stage`](ornis_macros::stage).
-/// DSL-only — texture bundle (`ctx: CompositeContext`).
-#[stage(fragment)]
-fn fs_main(input: VertexOutput, ctx: Context<CompositeContext>) -> super::Location<0, glam::Vec4> {
-    let bg = textureSampleLevel(ctx.pbr_tex, ctx.pbr_sampler, input.uv, 0.0);
-    let ui = textureSampleLevel(ctx.ui_tex, ctx.ui_sampler, input.uv, 0.0);
-    let ui_linear = srgb_to_linear(ui.rgb);
-    return glam::Vec4::new(mix(bg.rgb, ui_linear, ui.a), 1.0);
-}
-
-/// Composite-specific quad corners/UVs (different winding from
-/// [`STANDARD_QUAD`](super::STANDARD_QUAD)), as Rust data.
-const COMPOSITE_QUAD: [[f32; 4]; 4] = [
-    [-1.0, -1.0, 0.0, 1.0],
-    [-1.0, 1.0, 0.0, 1.0],
-    [1.0, -1.0, 0.0, 1.0],
-    [1.0, 1.0, 0.0, 1.0],
-];
-
-/// Composite-specific UVs, as Rust data.
-const COMPOSITE_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [0.0, 0.0], [1.0, 1.0], [1.0, 0.0]];
-
-/// Resource layout of the legacy composite pass (what `LegacyCompositePass`
-/// builds its layout from in `composite.rs`).
+/// Resource layout of the composite pass (`CompositePass` builds its layout
+/// from this table).
 pub const COMPOSITE_RESOURCES: [Resource; 4] = [
     Resource {
         group: 0,
@@ -91,37 +57,11 @@ pub const COMPOSITE_RESOURCES: [Resource; 4] = [
     },
 ];
 
-/// Group-0 `@binding` indices the UI composite fragment stage declares.
-const COMPOSITE_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3];
-
-/// WGSL bindings + quad constants + vertex/fragment entry points, assembled
-/// from Rust via the builder: constants and
-/// `srgb_to_linear::wgsl_source()` — the single `srgb_to_linear` in the
-/// system. This removes duplication of the WGSL literal from `composite.rs`.
-fn composite_wgsl_body() -> String {
-    // Derived `VertexOutput` varying plus bindings, quad/UVs and both
-    // entries. Entry points are `vs_main`/`fs_main` (unified ABI).
-    ShaderModule::new()
-        .decl(wgsl_decl(VertexOutput::WGSL_SOURCE))
-        .resources(&COMPOSITE_RESOURCES, COMPOSITE_FRAGMENT_BINDINGS)
-        .consts(naga_ir::const_block(&COMPOSITE_QUAD, &COMPOSITE_UVS))
-        .consts(crate::shaders::math::wgsl_consts())
-        .entry(vs_main::wgsl_source())
-        // Kernel WGSL already contains `fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> { ... }`
-        .helper(srgb_to_linear::wgsl_source())
-        .entry(fs_main::wgsl_source())
-        .emit()
-}
-
-/// Full WGSL source for the composite pass, assembled from Rust.
+/// Full WGSL source of the pass: the translated module, checked in beside this
+/// file and rebuilt by `xtask build-shaders`.
+#[must_use]
 pub fn wgsl_source() -> String {
-    composite_wgsl_body()
-}
-
-/// Static view for naga validation in tests (cloned from `wgsl_source()`).
-/// Also used for deterministic snapshot testing.
-pub fn wgsl_source_static() -> String {
-    wgsl_source()
+    include_str!("composite_generated.wgsl").to_owned()
 }
 
 #[cfg(test)]
@@ -146,28 +86,41 @@ mod tests {
     }
 
     #[test]
-    fn composite_generated_contains_expected_bindings() {
-        let src = wgsl_source();
-        assert!(src.contains("@group(0) @binding(0) var pbr_tex"));
-        assert!(src.contains("@group(0) @binding(1) var pbr_sampler"));
-        assert!(src.contains("@group(0) @binding(2) var ui_tex"));
-        assert!(src.contains("@group(0) @binding(3) var ui_sampler"));
-        assert!(src.contains("fn vs_main("));
-        assert!(src.contains("fn fs_main("));
-        assert!(src.contains("fn srgb_to_linear"));
+    fn composite_generated_contains_both_entries() {
+        let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
+        // The module keeps the IR's declaration order, so the entries are
+        // matched by name and stage rather than by position.
+        assert_eq!(
+            super::super::entry_stage(&module, VS_ENTRY),
+            Some(naga::ShaderStage::Vertex)
+        );
+        assert_eq!(
+            super::super::entry_stage(&module, FS_ENTRY),
+            Some(naga::ShaderStage::Fragment)
+        );
+        assert_eq!(module.entry_points.len(), 2);
     }
 
-    /// Every table row's declaration appears in the assembled shader, and
-    /// every row maps to a layout entry: shader and pipeline agree.
+    /// The translated bindings are declared where the resource table says.
     #[test]
     fn composite_resources_cover_shader_and_layout() {
-        use super::super::{bgl_entry, resource_decl};
-        let src = wgsl_source();
+        let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
+        let bindings = super::super::declared_bindings(&module);
         assert_eq!(COMPOSITE_RESOURCES.len(), 4);
-        for r in COMPOSITE_RESOURCES {
-            assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
-            let e = bgl_entry(&r, false);
-            assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
+        for resource in COMPOSITE_RESOURCES {
+            assert!(
+                bindings.contains(&(resource.group, resource.binding)),
+                "missing {}",
+                resource.name
+            );
         }
+    }
+
+    /// The UI texel goes through the sRGB decode before the mix.
+    #[test]
+    fn composite_generated_decodes_srgb() {
+        let src = wgsl_source();
+        assert!(src.contains("pow("), "{src}");
+        assert!(src.contains("0.04045"), "{src}");
     }
 }

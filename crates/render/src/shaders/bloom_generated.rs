@@ -1,75 +1,25 @@
-//! Bloom shader generated from Rust (Render path 2).
+//! Bloom bright-pass: translated from Rust through LLVM IR.
 //!
-//! Canonical source is the Rust code in this module; WGSL is assembled
-//! from constants + `luminance::wgsl_source()` (kernel from
-//! `crates/render/src/shaders/math.rs` via `#[kernel]`). The former
-//! handwritten `shaders/wgsl/bloom_fragment.wgsl` was deleted after the
-//! `#[stage]` translation; `renderer::create_bloom_pass` now uses only this module.
+//! The shader lives in `crates/gpu-bloom`: `#[gpu_entry(vertex)]` draws the
+//! shared fullscreen quad, and `#[gpu_entry(fragment)]` keeps what is brighter
+//! than `threshold + BLOOM_SOFT_KNEE` with the `smoothstep` knee, so the cut
+//! does not band. `xtask build-shaders --package ornis-gpu-bloom --entry all`
+//! writes the checked-in `bloom_generated.wgsl`; `--check` in CI catches
+//! drift.
 
-use super::interface::BloomVertexOut as BloomVertexOutput;
-use super::{
-    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, ShaderModule, Texture2d, naga_ir,
-    wgsl_decl,
-};
+use super::{Resource, ResourceKind};
 use crate::renderer::BloomUniform;
-use crate::shaders::math::luminance;
-use ornis_macros::stage;
 
-/// Bloom vertex entry, translated by [`stage`](ornis_macros::stage).
-/// DSL-only — replaced by `vs_main::wgsl_source()`.
-#[stage(vertex)]
-fn vs_main(
-    vertex_index: super::VertexIndex,
-    consts: Context<super::QuadConsts>,
-) -> BloomVertexOutput {
-    return BloomVertexOutput {
-        clip_position: consts.quad[vertex_index],
-        uv: consts.uvs[vertex_index],
-    };
-}
+/// Vertex entry point of the translated module.
+pub const VS_ENTRY: &str = "vs_main";
 
-/// Width of the bloom bright-pass soft knee, added above the luminance threshold.
+/// Fragment entry point of the translated module.
+pub const FS_ENTRY: &str = "fs_main";
+
+/// Width of the bloom bright-pass soft knee, added above the luminance
+/// threshold. The kernel carries the same number; the parity gate pins them.
 pub const BLOOM_SOFT_KNEE: f32 = 0.05;
 
-/// WGSL declaration of [`BLOOM_SOFT_KNEE`], bit-exact with the Rust constant.
-fn bloom_knee_const() -> String {
-    format!(
-        "const {}: f32 = {};\n",
-        stringify!(BLOOM_SOFT_KNEE),
-        super::f32_lit(BLOOM_SOFT_KNEE)
-    )
-}
-
-/// Bloom fragment entry, translated by [`stage`](ornis_macros::stage):
-/// bright-pass reselection. DSL-only — resource bundle
-/// (`ctx: BloomContext`).
-/// `Vec4::new(vec3, scalar)` spells the WGSL `vec4<f32>(vec3, f32)`
-/// constructor; the `returns` override carries the `@location` return.
-/// Bloom bright-pass resources as a context bundle (`ctx.src_tex`, …).
-#[allow(dead_code)]
-#[derive(ornis_macros::ShaderContext)]
-pub(crate) struct BloomContext {
-    pub src_tex: Texture2d,
-    pub src_sampler: Sampler,
-    pub bloom_params: BloomUniform,
-}
-
-#[stage(fragment)]
-fn fs_main(input: BloomVertexOutput, ctx: Context<BloomContext>) -> super::Location<0, glam::Vec4> {
-    let color = textureSample(ctx.src_tex, ctx.src_sampler, input.uv).rgb;
-    let luma = luminance(color);
-    let keep = smoothstep(
-        ctx.bloom_params.threshold,
-        ctx.bloom_params.threshold + BLOOM_SOFT_KNEE,
-        luma,
-    );
-    return glam::Vec4::new(color * keep, 1.0);
-}
-
-/// WGSL bindings + quad constants + vertex/fragment entry points.
-///
-/// Assembled at runtime as a `String`, but the source is Rust: constants and
-/// `luminance::wgsl_source()` — the single `luminance` in the system.
 /// Resource layout of the bloom pass. The uniform carries the explicit
 /// minimum size the handwritten layout spelled (`size_of::<BloomUniform>`).
 pub const BLOOM_RESOURCES: [Resource; 3] = [
@@ -99,30 +49,10 @@ pub const BLOOM_RESOURCES: [Resource; 3] = [
     },
 ];
 
-fn bloom_wgsl_body() -> String {
-    // Derived `BloomParams` layout and `BloomVertexOut` varying spliced
-    // into the header (bindings + quad + entries) via the builder.
-    ShaderModule::new()
-        .decl(wgsl_decl(BloomUniform::WGSL_SOURCE))
-        .resources(&BLOOM_RESOURCES, &[0, 1, 2])
-        .consts(naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS))
-        .consts(crate::shaders::math::wgsl_consts())
-        .consts(bloom_knee_const())
-        .decl(wgsl_decl(BloomVertexOutput::WGSL_SOURCE))
-        .entry(vs_main::wgsl_source())
-        .helper(luminance::wgsl_source())
-        .entry(fs_main::wgsl_source())
-        .emit()
-}
-
-/// Full WGSL source for the bloom pass, assembled from Rust.
+/// Full WGSL source of the pass: the translated module.
+#[must_use]
 pub fn wgsl_source() -> String {
-    bloom_wgsl_body()
-}
-
-/// Static view for naga validation in tests.
-pub fn wgsl_source_static() -> String {
-    wgsl_source()
+    include_str!("bloom_generated.wgsl").to_owned()
 }
 
 #[cfg(test)]
@@ -147,45 +77,45 @@ mod tests {
     }
 
     #[test]
-    fn bloom_generated_contains_expected_bindings() {
-        let src = wgsl_source();
-        assert!(src.contains("@group(0) @binding(0) var src_tex"));
-        assert!(src.contains("@group(0) @binding(1) var src_sampler"));
-        assert!(src.contains("@group(0) @binding(2) var<uniform> bloom_params"));
-        assert!(src.contains("fn vs_main("));
-        assert!(src.contains("fn fs_main("));
-        assert!(src.contains("fn luminance"));
-    }
-
-    /// Translated entries keep the legacy shape (naga + pixels carry the
-    /// rest; generated entries are single-line).
-    #[test]
-    fn bloom_entries_match_legacy_shape() {
-        let vs = vs_main::wgsl_source();
-        assert!(vs.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) vertex_index: u32)"));
-        assert!(
-            vs.contains("return BloomVertexOutput(quad[vertex_index], uvs[vertex_index]) /* clip_position, uv */;")
+    fn bloom_generated_contains_both_entries() {
+        let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
+        assert_eq!(
+            super::super::entry_stage(&module, VS_ENTRY),
+            Some(naga::ShaderStage::Vertex)
         );
-        let fs = fs_main::wgsl_source();
-        assert!(fs.starts_with("@fragment\nfn fs_main(input: BloomVertexOutput)"));
-        assert!(fs.contains("-> @location(0) vec4<f32>"));
-        assert!(fs.contains("let color = textureSample(src_tex, src_sampler, input.uv).rgb;"));
-        assert!(fs.contains("return vec4<f32>(color * keep, 1.0);"));
+        assert_eq!(
+            super::super::entry_stage(&module, FS_ENTRY),
+            Some(naga::ShaderStage::Fragment)
+        );
+        assert_eq!(module.entry_points.len(), 2);
     }
 
-    /// Every table row's declaration appears in the assembled shader, and
-    /// every row maps to a layout entry: shader and pipeline agree.
+    /// The bright pass is a `smoothstep` over the threshold, with the knee the
+    /// host constant names.
+    #[test]
+    fn bloom_generated_keeps_the_soft_knee() {
+        let src = wgsl_source();
+        assert!(src.contains("smoothstep("), "{src}");
+        assert!(
+            src.contains(&super::super::f32_lit(BLOOM_SOFT_KNEE)),
+            "the knee constant is missing"
+        );
+    }
+
+    /// Every table row's binding appears in the shader, and the uniform row
+    /// carries the explicit minimum size the layout spells.
     #[test]
     fn bloom_resources_cover_shader_and_layout() {
-        use super::super::{bgl_entry, resource_decl};
-        let src = wgsl_source();
+        let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
+        let bindings = super::super::declared_bindings(&module);
         assert_eq!(BLOOM_RESOURCES.len(), 3);
-        for r in BLOOM_RESOURCES {
-            assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
-            let e = bgl_entry(&r, false);
-            assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
+        for resource in BLOOM_RESOURCES {
+            assert!(
+                bindings.contains(&(resource.group, resource.binding)),
+                "missing {}",
+                resource.name
+            );
         }
-        // The uniform row carries the explicit minimum size.
         assert!(matches!(
             BLOOM_RESOURCES[2].min_size,
             Some(s) if s == std::mem::size_of::<BloomUniform>() as u64

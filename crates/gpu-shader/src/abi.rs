@@ -50,8 +50,47 @@ unsafe extern "C" {
         field: u32,
         component: u32,
     ) -> f32;
+    #[link_name = "uniform_array_vec4_lane"]
+    fn uniform_array_vec4_lane(
+        group: u32,
+        binding: u32,
+        sid: u32,
+        field: u32,
+        index: u32,
+        element_field: u32,
+        lane: u32,
+    ) -> f32;
+    #[link_name = "uniform_nested_vec4_lane"]
+    fn uniform_nested_vec4_lane(
+        group: u32,
+        binding: u32,
+        sid: u32,
+        field: u32,
+        inner: u32,
+        component: u32,
+    ) -> f32;
+    #[link_name = "uniform_nested_array_vec4_lane"]
+    #[allow(clippy::too_many_arguments)]
+    fn uniform_nested_array_vec4_lane(
+        group: u32,
+        binding: u32,
+        sid: u32,
+        outer: u32,
+        field: u32,
+        index: u32,
+        element_field: u32,
+        lane: u32,
+    ) -> f32;
     #[link_name = "gpu_exp"]
     fn gpu_exp(value: f32) -> f32;
+    #[link_name = "gpu_pow"]
+    fn gpu_pow(base: f32, exponent: f32) -> f32;
+    #[link_name = "gpu_atan2"]
+    fn gpu_atan2(y: f32, x: f32) -> f32;
+    #[link_name = "gpu_smoothstep"]
+    fn gpu_smoothstep(low: f32, high: f32, x: f32) -> f32;
+    #[link_name = "gpu_sqrt"]
+    fn gpu_sqrt(value: f32) -> f32;
     #[link_name = "uniform_field_vec4_plane_dot"]
     fn uniform_field_vec4_plane_dot(
         group: u32,
@@ -82,20 +121,47 @@ unsafe extern "C" {
     fn gpu_mix(start: f32, end: f32, factor: f32) -> f32;
     #[link_name = "gpu_fract"]
     fn gpu_fract(value: f32) -> f32;
+    #[link_name = "gpu_floor"]
+    fn gpu_floor(value: f32) -> f32;
+    #[link_name = "gpu_ceil"]
+    fn gpu_ceil(value: f32) -> f32;
     #[link_name = "gpu_cos"]
     fn gpu_cos(value: f32) -> f32;
     #[link_name = "gpu_sin"]
     fn gpu_sin(value: f32) -> f32;
     #[link_name = "gpu_acos"]
     fn gpu_acos(value: f32) -> f32;
+    #[link_name = "gpu_tan"]
+    fn gpu_tan(value: f32) -> f32;
+    #[link_name = "gpu_dpdx"]
+    fn gpu_dpdx(value: f32) -> f32;
+    #[link_name = "gpu_dpdy"]
+    fn gpu_dpdy(value: f32) -> f32;
+    #[link_name = "gpu_ln"]
+    fn gpu_ln(value: f32) -> f32;
     #[link_name = "gpu_cross3_lane"]
     fn gpu_cross3_lane(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, lane: u32) -> f32;
     #[link_name = "gpu_normalize3_lane"]
     fn gpu_normalize3_lane(x: f32, y: f32, z: f32, lane: u32) -> f32;
     #[link_name = "texture_load_2d_f32"]
     fn texture_load_2d_f32(group: u32, binding: u32, x: u32, y: u32) -> f32;
+    #[link_name = "texture_load_2d_u32"]
+    fn texture_load_2d_u32(group: u32, binding: u32, x: u32, y: u32) -> u32;
     #[link_name = "texture_load_2d_f32x4"]
     fn texture_load_2d_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32;
+    #[link_name = "texture_load_2d_f32_sample"]
+    fn texture_load_2d_f32_sample(group: u32, binding: u32, x: u32, y: u32, sample: u32) -> f32;
+    #[link_name = "texture_load_2d_u32_sample"]
+    fn texture_load_2d_u32_sample(group: u32, binding: u32, x: u32, y: u32, sample: u32) -> u32;
+    #[link_name = "texture_load_2d_f32x4_sample"]
+    fn texture_load_2d_f32x4_sample(
+        group: u32,
+        binding: u32,
+        x: u32,
+        y: u32,
+        lane: u32,
+        sample: u32,
+    ) -> f32;
     #[link_name = "texture_sample_level_2d_f32x4"]
     fn texture_sample_level_2d_f32x4(
         group: u32,
@@ -105,6 +171,62 @@ unsafe extern "C" {
         x: f32,
         y: f32,
         lane: u32,
+    ) -> f32;
+    #[link_name = "texture_sample_2d_f32x4"]
+    fn texture_sample_2d_f32x4(
+        group: u32,
+        binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        x: f32,
+        y: f32,
+        lane: u32,
+    ) -> f32;
+    #[link_name = "texture_sample_level_cube_f32x4"]
+    fn texture_sample_level_cube_f32x4(
+        group: u32,
+        binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+        lod: f32,
+        lane: u32,
+    ) -> f32;
+    #[link_name = "texture_sample_cube_f32x4"]
+    fn texture_sample_cube_f32x4(
+        group: u32,
+        binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+        lane: u32,
+    ) -> f32;
+    #[link_name = "texture_sample_compare_2d_array_f32"]
+    fn texture_sample_compare_2d_array_f32(
+        group: u32,
+        binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        x: f32,
+        y: f32,
+        layer: u32,
+        reference: f32,
+    ) -> f32;
+    #[link_name = "texture_sample_compare_cube_array_f32"]
+    fn texture_sample_compare_cube_array_f32(
+        group: u32,
+        binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+        layer: u32,
+        reference: f32,
     ) -> f32;
     #[link_name = "texture_width_2d"]
     fn texture_width_2d(group: u32, binding: u32) -> i32;
@@ -126,14 +248,48 @@ unsafe extern "C" {
     fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32;
     #[link_name = "workgroup_barrier"]
     fn import_workgroup_barrier();
+    #[link_name = "fragment_discard"]
+    fn import_fragment_discard();
     #[link_name = "global_invocation_lane"]
     fn import_global_invocation_lane(axis: u32) -> u32;
     #[link_name = "local_invocation_index"]
     fn import_local_invocation_index() -> u32;
     #[link_name = "fragment_uv_lane"]
     fn import_fragment_uv_lane(lane: u32) -> f32;
+    #[link_name = "fragment_position_lane"]
+    fn import_fragment_position_lane(lane: u32) -> f32;
     #[link_name = "fragment_store_f32x4"]
     fn fragment_store_f32x4(r: f32, g: f32, b: f32, a: f32);
+    #[link_name = "vertex_index"]
+    fn import_vertex_index() -> u32;
+    #[link_name = "instance_index"]
+    fn import_instance_index() -> u32;
+    #[link_name = "vertex_input_lane"]
+    fn import_vertex_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
+    #[link_name = "vertex_input_u32"]
+    fn import_vertex_input_u32(location: u32) -> u32;
+    #[link_name = "vertex_input_u32x4"]
+    fn import_vertex_input_u32x4(location: u32, lane: u32) -> u32;
+    #[link_name = "vertex_position"]
+    fn import_vertex_position(x: f32, y: f32, z: f32, w: f32);
+    #[link_name = "vertex_store_f32x2"]
+    fn import_vertex_store_f32x2(location: u32, x: f32, y: f32);
+    #[link_name = "vertex_store_f32x3"]
+    fn import_vertex_store_f32x3(location: u32, x: f32, y: f32, z: f32);
+    #[link_name = "vertex_store_f32x4"]
+    fn import_vertex_store_f32x4(location: u32, x: f32, y: f32, z: f32, w: f32);
+    #[link_name = "vertex_store_u32"]
+    fn import_vertex_store_u32(location: u32, value: u32);
+    #[link_name = "fragment_input_lane"]
+    fn import_fragment_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
+    #[link_name = "fragment_input_u32"]
+    fn import_fragment_input_u32(location: u32) -> u32;
+    #[link_name = "fragment_store_location"]
+    fn import_fragment_store_location(location: u32, r: f32, g: f32, b: f32, a: f32);
+    #[link_name = "fragment_store_f32x2_location"]
+    fn import_fragment_store_f32x2_location(location: u32, x: f32, y: f32);
+    #[link_name = "fragment_store_u32_location"]
+    fn import_fragment_store_u32_location(location: u32, value: u32);
 }
 
 /// Call one declared import.
@@ -213,6 +369,30 @@ pub(crate) fn vec4_component(
     ))
 }
 
+/// `sqrt(value)` — one WGSL `sqrt`.
+#[inline(always)]
+pub(crate) fn sqrt(value: f32) -> f32 {
+    call!(gpu_sqrt(value))
+}
+
+/// `smoothstep(low, high, x)` — one WGSL `smoothstep`.
+#[inline(always)]
+pub(crate) fn smoothstep(low: f32, high: f32, x: f32) -> f32 {
+    call!(gpu_smoothstep(low, high, x))
+}
+
+/// `pow(base, exponent)` — one WGSL `pow`.
+#[inline(always)]
+pub(crate) fn pow(base: f32, exponent: f32) -> f32 {
+    call!(gpu_pow(base, exponent))
+}
+
+/// `atan2(y, x)` — one WGSL `atan2`.
+#[inline(always)]
+pub(crate) fn atan2(y: f32, x: f32) -> f32 {
+    call!(gpu_atan2(y, x))
+}
+
 /// `exp(value)` — one WGSL `exp`.
 #[inline(always)]
 pub(crate) fn exp(value: f32) -> f32 {
@@ -236,6 +416,72 @@ pub(crate) fn field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32 {
 #[inline(always)]
 pub(crate) fn nested_field_f32(group: u32, binding: u32, sid: u32, field: u32, inner: u32) -> f32 {
     call!(uniform_nested_field_f32(group, binding, sid, field, inner))
+}
+
+/// Lane `lane` of `vec4` field `element_field` of element `index` of the
+/// fixed-size array field `field`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the call from LLVM IR, and the host build never executes it"
+// qual:allow(srp, max_parameters=7) reason: "one parameter per import operand; the element index is the only runtime value, the rest are immediates the translator folds into the access path"
+#[inline(always)]
+pub(crate) fn array_vec4_lane(
+    group: u32,
+    binding: u32,
+    sid: u32,
+    field: u32,
+    index: u32,
+    element_field: u32,
+    lane: u32,
+) -> f32 {
+    call!(uniform_array_vec4_lane(
+        group,
+        binding,
+        sid,
+        field,
+        index,
+        element_field,
+        lane
+    ))
+}
+
+/// Lane `component` of `vec4` field `inner` of the struct in field `field`.
+#[inline(always)]
+pub(crate) fn nested_vec4_lane(
+    group: u32,
+    binding: u32,
+    sid: u32,
+    field: u32,
+    inner: u32,
+    component: u32,
+) -> f32 {
+    call!(uniform_nested_vec4_lane(
+        group, binding, sid, field, inner, component
+    ))
+}
+
+/// Lane `lane` of a `vec4` field of an element of an array nested one struct
+/// deep: `outer.inner[index].element_field[lane]`.
+// qual:allow(srp, max_parameters=8) reason: "one parameter per import operand; only the element index is a value"
+#[inline(always)]
+pub(crate) fn nested_array_vec4_lane(
+    group: u32,
+    binding: u32,
+    sid: u32,
+    outer: u32,
+    field: u32,
+    index: u32,
+    element_field: u32,
+    lane: u32,
+) -> f32 {
+    call!(uniform_nested_array_vec4_lane(
+        group,
+        binding,
+        sid,
+        outer,
+        field,
+        index,
+        element_field,
+        lane
+    ))
 }
 
 /// `dot((x, y, z, 1), plane)` for the `vec4` field `field`.
@@ -316,6 +562,18 @@ pub(crate) fn fract(value: f32) -> f32 {
     call!(gpu_fract(value))
 }
 
+/// Largest integer not greater than `value`.
+#[inline(always)]
+pub(crate) fn floor(value: f32) -> f32 {
+    call!(gpu_floor(value))
+}
+
+/// Smallest integer not less than `value`.
+#[inline(always)]
+pub(crate) fn ceil(value: f32) -> f32 {
+    call!(gpu_ceil(value))
+}
+
 /// Cosine.
 #[inline(always)]
 pub(crate) fn cos(value: f32) -> f32 {
@@ -334,6 +592,30 @@ pub(crate) fn acos(value: f32) -> f32 {
     call!(gpu_acos(value))
 }
 
+/// Tangent.
+#[inline(always)]
+pub(crate) fn tan(value: f32) -> f32 {
+    call!(gpu_tan(value))
+}
+
+/// Screen-space derivative along x.
+#[inline(always)]
+pub(crate) fn dpdx(value: f32) -> f32 {
+    call!(gpu_dpdx(value))
+}
+
+/// Screen-space derivative along y.
+#[inline(always)]
+pub(crate) fn dpdy(value: f32) -> f32 {
+    call!(gpu_dpdy(value))
+}
+
+/// Natural logarithm.
+#[inline(always)]
+pub(crate) fn ln(value: f32) -> f32 {
+    call!(gpu_ln(value))
+}
+
 /// Lane `lane` of `cross(a, b)`.
 // qual:allow(srp, max_parameters=7) reason: "one operand per import argument: six vector lanes and the result lane; a Vec3 argument would reintroduce the struct the translator does not see"
 #[inline(always)]
@@ -347,6 +629,12 @@ pub(crate) fn normalize3_lane(x: f32, y: f32, z: f32, lane: u32) -> f32 {
     call!(gpu_normalize3_lane(x, y, z, lane))
 }
 
+/// First lane of a `texture_2d<u32>` texel at mip 0.
+#[inline(always)]
+pub(crate) fn texture_load_u32(group: u32, binding: u32, x: u32, y: u32) -> u32 {
+    call!(texture_load_2d_u32(group, binding, x, y))
+}
+
 /// Scalar load of a depth texture at mip 0.
 #[inline(always)]
 pub(crate) fn texture_load_depth(group: u32, binding: u32, x: u32, y: u32) -> f32 {
@@ -357,6 +645,46 @@ pub(crate) fn texture_load_depth(group: u32, binding: u32, x: u32, y: u32) -> f3
 #[inline(always)]
 pub(crate) fn texture_load_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32 {
     call!(texture_load_2d_f32x4(group, binding, x, y, lane))
+}
+
+/// Sample `sample` of a multisampled depth texture at mip 0.
+#[inline(always)]
+pub(crate) fn texture_load_depth_sample(
+    group: u32,
+    binding: u32,
+    x: u32,
+    y: u32,
+    sample: u32,
+) -> f32 {
+    call!(texture_load_2d_f32_sample(group, binding, x, y, sample))
+}
+
+/// First lane of sample `sample` of a multisampled `texture_2d<u32>`.
+#[inline(always)]
+pub(crate) fn texture_load_u32_sample(
+    group: u32,
+    binding: u32,
+    x: u32,
+    y: u32,
+    sample: u32,
+) -> u32 {
+    call!(texture_load_2d_u32_sample(group, binding, x, y, sample))
+}
+
+/// One lane of sample `sample` of a multisampled `texture_2d<f32>`.
+// qual:allow(srp, max_parameters=6) reason: "one operand per import argument: the binding pair, the texel coordinate, the lane and the sample"
+#[inline(always)]
+pub(crate) fn texture_load_f32x4_sample(
+    group: u32,
+    binding: u32,
+    x: u32,
+    y: u32,
+    lane: u32,
+    sample: u32,
+) -> f32 {
+    call!(texture_load_2d_f32x4_sample(
+        group, binding, x, y, lane, sample
+    ))
 }
 
 /// One lane of `textureSampleLevel(tex, sampler, vec2(x, y), 0.0)`.
@@ -380,6 +708,138 @@ pub(crate) fn texture_sample_level_f32x4(
         x,
         y,
         lane
+    ))
+}
+
+/// One lane of `textureSample(tex, sampler, vec2(x, y))`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+// qual:allow(srp, max_parameters=7) reason: "one operand per import argument: texture binding, sampler binding, uv, and the lane"
+#[inline(always)]
+pub(crate) fn texture_sample_auto(
+    group: u32,
+    binding: u32,
+    sampler_group: u32,
+    sampler_binding: u32,
+    x: f32,
+    y: f32,
+    lane: u32,
+) -> f32 {
+    call!(texture_sample_2d_f32x4(
+        group,
+        binding,
+        sampler_group,
+        sampler_binding,
+        x,
+        y,
+        lane
+    ))
+}
+
+/// One lane of `textureSampleLevel(cube, sampler, dir, lod)`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+// qual:allow(srp, max_parameters=9) reason: "one operand per import argument: two binding pairs, three direction lanes, the level and the lane"
+#[inline(always)]
+pub(crate) fn texture_sample_level_cube(
+    group: u32,
+    binding: u32,
+    sampler_group: u32,
+    sampler_binding: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    lod: f32,
+    lane: u32,
+) -> f32 {
+    call!(texture_sample_level_cube_f32x4(
+        group,
+        binding,
+        sampler_group,
+        sampler_binding,
+        x,
+        y,
+        z,
+        lod,
+        lane
+    ))
+}
+
+/// One lane of `textureSample(cube, sampler, dir)`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+// qual:allow(srp, max_parameters=8) reason: "the explicit-level twin minus the level; the translator reads the operands positionally"
+#[inline(always)]
+pub(crate) fn texture_sample_cube(
+    group: u32,
+    binding: u32,
+    sampler_group: u32,
+    sampler_binding: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    lane: u32,
+) -> f32 {
+    call!(texture_sample_cube_f32x4(
+        group,
+        binding,
+        sampler_group,
+        sampler_binding,
+        x,
+        y,
+        z,
+        lane
+    ))
+}
+
+/// Depth compare through `textureSampleCompare` on a 2D layer stack.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+// qual:allow(srp, max_parameters=8) reason: "one operand per import argument: two binding pairs, uv, the layer and the reference"
+#[inline(always)]
+pub(crate) fn texture_sample_compare_2d_array(
+    group: u32,
+    binding: u32,
+    sampler_group: u32,
+    sampler_binding: u32,
+    x: f32,
+    y: f32,
+    layer: u32,
+    reference: f32,
+) -> f32 {
+    call!(texture_sample_compare_2d_array_f32(
+        group,
+        binding,
+        sampler_group,
+        sampler_binding,
+        x,
+        y,
+        layer,
+        reference
+    ))
+}
+
+/// Depth compare through `textureSampleCompare` on a cube layer stack.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+// qual:allow(srp, max_parameters=9) reason: "the 2D twin plus the direction's third lane; the translator reads the operands positionally"
+#[inline(always)]
+pub(crate) fn texture_sample_compare_cube_array(
+    group: u32,
+    binding: u32,
+    sampler_group: u32,
+    sampler_binding: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    layer: u32,
+    reference: f32,
+) -> f32 {
+    call!(texture_sample_compare_cube_array_f32(
+        group,
+        binding,
+        sampler_group,
+        sampler_binding,
+        x,
+        y,
+        z,
+        layer,
+        reference
     ))
 }
 
@@ -443,6 +903,13 @@ pub(crate) fn workgroup_barrier() {
     call!(import_workgroup_barrier());
 }
 
+/// Discard the current fragment invocation.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+#[inline(always)]
+pub(crate) fn fragment_discard() {
+    call!(import_fragment_discard());
+}
+
 /// Lane `axis` of `@builtin(global_invocation_id)`.
 #[inline(always)]
 pub(crate) fn global_invocation_lane(axis: u32) -> u32 {
@@ -456,13 +923,116 @@ pub(crate) fn local_invocation_index() -> u32 {
 }
 
 /// Lane of the fragment's `@location(0)` UV.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
 #[inline(always)]
 pub(crate) fn fragment_uv_lane(lane: u32) -> f32 {
     call!(import_fragment_uv_lane(lane))
+}
+
+/// Lane of the fragment's `@builtin(position)`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
+#[inline(always)]
+pub(crate) fn fragment_position_lane(lane: u32) -> f32 {
+    call!(import_fragment_position_lane(lane))
 }
 
 /// Write the fragment's `@location(0)` color.
 #[inline(always)]
 pub(crate) fn fragment_store(r: f32, g: f32, b: f32, a: f32) {
     call!(fragment_store_f32x4(r, g, b, a));
+}
+
+/// `@builtin(vertex_index)` of the vertex entry.
+#[inline(always)]
+pub(crate) fn vertex_index() -> u32 {
+    call!(import_vertex_index())
+}
+
+/// `@builtin(instance_index)` of the vertex entry.
+#[inline(always)]
+pub(crate) fn instance_index() -> u32 {
+    call!(import_instance_index())
+}
+
+/// Lane `lane` of the vertex `@location(location)` input of `lanes` lanes.
+#[inline(always)]
+pub(crate) fn vertex_input_lane(location: u32, lanes: u32, lane: u32) -> f32 {
+    call!(import_vertex_input_lane(location, lanes, lane))
+}
+
+/// The `u32` vertex input at `location`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+#[inline(always)]
+pub(crate) fn vertex_input_u32(location: u32) -> u32 {
+    call!(import_vertex_input_u32(location))
+}
+
+/// Lane `lane` of the `vec4<u32>` vertex input at `location`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the translator test lowers the same call from LLVM IR"
+#[inline(always)]
+pub(crate) fn vertex_input_u32x4(location: u32, lane: u32) -> u32 {
+    call!(import_vertex_input_u32x4(location, lane))
+}
+
+/// Write the clip-space `@builtin(position)` of the vertex entry.
+#[inline(always)]
+pub(crate) fn vertex_position(x: f32, y: f32, z: f32, w: f32) {
+    call!(import_vertex_position(x, y, z, w));
+}
+
+/// Write a `vec2<f32>` vertex output at `location`.
+#[inline(always)]
+pub(crate) fn vertex_store_2(location: u32, x: f32, y: f32) {
+    call!(import_vertex_store_f32x2(location, x, y));
+}
+
+/// Write a `vec4<f32>` vertex output at `location`.
+#[inline(always)]
+pub(crate) fn vertex_store_4(location: u32, x: f32, y: f32, z: f32, w: f32) {
+    call!(import_vertex_store_f32x4(location, x, y, z, w));
+}
+
+/// Write a `vec3<f32>` vertex output at `location`.
+#[inline(always)]
+pub(crate) fn vertex_store_3(location: u32, x: f32, y: f32, z: f32) {
+    call!(import_vertex_store_f32x3(location, x, y, z));
+}
+
+/// Write a scalar `u32` vertex output at `location`.
+#[inline(always)]
+pub(crate) fn vertex_store_u32(location: u32, value: u32) {
+    call!(import_vertex_store_u32(location, value));
+}
+
+/// Lane `lane` of the fragment `@location(location)` input of `lanes` lanes.
+#[inline(always)]
+pub(crate) fn fragment_input_lane(location: u32, lanes: u32, lane: u32) -> f32 {
+    call!(import_fragment_input_lane(location, lanes, lane))
+}
+
+/// The scalar `u32` fragment input at `location`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
+#[inline(always)]
+pub(crate) fn fragment_input_u32(location: u32) -> u32 {
+    call!(import_fragment_input_u32(location))
+}
+
+/// Write a `vec2<f32>` fragment output at `location`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
+#[inline(always)]
+pub(crate) fn fragment_store_2(location: u32, x: f32, y: f32) {
+    call!(import_fragment_store_f32x2_location(location, x, y));
+}
+
+/// Write a scalar `u32` fragment output at `location`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
+#[inline(always)]
+pub(crate) fn fragment_store_u32(location: u32, value: u32) {
+    call!(import_fragment_store_u32_location(location, value));
+}
+
+/// Write the fragment output at `location`: a `vec4<f32>` of RGBA lanes.
+#[inline(always)]
+pub(crate) fn fragment_store_location(location: u32, r: f32, g: f32, b: f32, a: f32) {
+    call!(import_fragment_store_location(location, r, g, b, a));
 }

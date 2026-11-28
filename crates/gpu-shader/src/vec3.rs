@@ -1,9 +1,10 @@
 //! Three-lane vector math for kernels.
 //!
-//! `no_std` has no `f32::sqrt`, and a software square root in a shader is worse
-//! than the hardware one: these methods lower to the `ornis_gpu` vector imports
-//! the translator turns into WGSL `dot`/`length`, so a length is one GPU
-//! instruction rather than three multiplies and a libm call.
+//! A software square root in a shader is worse than the hardware one: these
+//! methods lower to the `ornis_gpu` vector imports the translator turns into
+//! WGSL `dot`/`length`, so a length is one GPU instruction rather than three
+//! multiplies and a square root. The host arm of [`crate::sqrt`] is
+//! [`f32::sqrt`].
 //!
 //! `cross` and `normalize` are lane functions ([`crate::cross_lane`],
 //! [`crate::normalize_lane`]): the translator returns one component, not a
@@ -56,10 +57,7 @@ impl Vec3 {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let squared = self.dot(*self);
-            // The host build is a reference for tests only; `sqrt` on `f32`
-            // exists there because `std` is linked into the test harness.
-            crate::host_sqrt(squared)
+            crate::sqrt(self.dot(*self))
         }
     }
 }

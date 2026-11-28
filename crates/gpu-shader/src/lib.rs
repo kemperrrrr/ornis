@@ -43,6 +43,34 @@
 //! methods lower to it. Resource methods only exist on `wasm32`; on the host
 //! they compile and panic, because the host build of a kernel crate has no
 //! bindings to read.
+//!
+//! # Что писать в кернеле, а что нет
+//!
+//! Транслятор — не компилятор Rust: он читает LLVM IR, который стабильный
+//! rustc выдаёт для `no_std`-кернела, и отвергает всё, чего не понимает (с
+//! `TranslateError`, а не молча неверным WGSL). Эти правила держат IR в
+//! подмножестве:
+//!
+//! - **Обход буфера — по индексу, а не итератором по слайсу.** `for i in
+//!   0..len { … storage.load(i) … }` опускается всегда; `for x in slice`
+//!   работает только над локальным массивом, потому что в WGSL нет указателя
+//!   на storage-буфер. `Storage::len()` — это `arrayLength`, то есть длина
+//!   всего биндинга.
+//! - **Локальные данные — `[T; N]`, а не слайсы.** У локального массива
+//!   длина известна на этапе компиляции, поэтому индексация — это
+//!   `alloca` + `getelementptr`; слайс с длиной, известной только в рантайме,
+//!   требует fat pointer и отвергается.
+//! - **Помощники — обычные функции.** Скалярный помощник опускается в
+//!   `naga::Function`; помощник с `&T`/`&mut T`/`&[T]` встраивается в место
+//!   вызова (WGSL не умеет параметры-указатели), а рекурсия отвергается —
+//!   шейдер не может рекурсировать.
+//! - **Без кастов указателей и `unsafe`-арифметики.** `ptrtoint`/`inttoptr`,
+//!   `&*(p as *const T)` и ручное смещение по байтам вне подмножества: адрес
+//!   GPU-буфера не является числом. Нужное смещение — это индекс элемента.
+//! - **Порядок-чувствительные операции — только функциями SDK.** `dot(x, y)`
+//!   для `vec3` — это [`dot3`]; собрать его из `mul`/`add` значит потерять
+//!   порядок слагаемых и `fma`-контракцию GPU, и результат разойдётся с CPU.
+//!   Так же для [`cross_lane`], [`normalize_lane`], [`length3`].
 
 #![no_std]
 #![warn(missing_docs)]
@@ -65,37 +93,28 @@ mod vec3;
 mod workgroup;
 
 pub use access::{ReadOnly, ReadWrite, StorageAccess};
-pub use builtin::{fragment_store, fragment_uv, global_invocation_lane, local_invocation_index};
+pub use builtin::{
+    fragment_discard, fragment_input_lane, fragment_input_u32, fragment_position_lane,
+    fragment_store, fragment_store_2_at, fragment_store_at, fragment_store_u32_at, fragment_uv,
+    global_invocation_lane, instance_index, local_invocation_index, vertex_index,
+    vertex_input_lane, vertex_input_u32, vertex_input_u32x4, vertex_position, vertex_store_2,
+    vertex_store_3, vertex_store_4, vertex_store_u32,
+};
 pub use elements::{AtomicU32, Vec4U32};
 pub use math::{
-    abs, acos, clamp, cos, cross_lane, dot2, dot3, exp2, fract, homogeneous_divide, length3, log2,
-    mix, normalize_lane, sign, sin,
+    abs, acos, atan2, ceil, clamp, cos, cross_lane, dot2, dot3, dpdx, dpdy, exp, exp2, floor,
+    fract, homogeneous_divide, length3, ln, log2, mix, normalize_lane, pow, sign, sin, smoothstep,
+    sqrt, tan,
 };
 pub use ornis_gpu_shader_macros::gpu_entry;
 pub use resource::Storage;
-pub use texture::{DepthTexture2d, Sampler, Texture2d};
+pub use texture::{
+    ComparisonSampler, DepthCubeArray, DepthTexture2d, DepthTexture2dArray, Sampler, Texture2d,
+    Texture2dU32, TextureCube,
+};
 pub use uniform::{GpuStruct, Uniform};
 pub use vec3::Vec3;
 pub use workgroup::{WorkgroupAtomicU32, WorkgroupU32, workgroup_barrier};
-
-/// Base-e exponential, lowered to WGSL `exp`.
-///
-/// `no_std` has no `f32::exp`, and a software series would not match the GPU
-/// instruction. On the host this diverges: a kernel crate is type-checked
-/// there, not executed.
-#[inline(always)]
-#[must_use]
-pub fn exp(value: f32) -> f32 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        crate::abi::exp(value)
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = value;
-        host_unavailable()
-    }
-}
 
 /// Field tag of an `f32` in `ornis_gpu.types` (mirrors `ornis_gpu_abi`).
 pub const TYPE_TAG_F32: u8 = 1;
@@ -111,23 +130,17 @@ pub const TYPE_TAG_VEC3: u8 = 5;
 pub const TYPE_TAG_VEC4: u8 = 6;
 /// Field tag of a nested uniform struct. The next `FIELD_TAGS` byte is its id.
 pub const TYPE_TAG_STRUCT: u8 = 7;
+/// Field tag of a fixed-size array: the element's tag follows, then the length.
+///
+/// `array<Light, 8>` of uniform struct 3 is `TYPE_TAG_ARRAY`, `TYPE_TAG_STRUCT`,
+/// `3`, `8`. A field like that occupies several `FIELD_TAGS` bytes, so the field
+/// index of everything after it is walked with a cursor rather than taken as a
+/// slice offset.
+pub const TYPE_TAG_ARRAY: u8 = 8;
 
 /// Diverging stub behind every resource method outside `wasm32`.
 #[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 pub(crate) fn host_unavailable() -> ! {
     host::unavailable()
-}
-
-/// Square root for the host reference path.
-///
-/// `no_std` has no `f32::sqrt`; the host build only exists so kernel crates can
-/// be type-checked and unit-tested, and the test harness links `std`, which
-/// provides the intrinsic. On `wasm32` the same operation is the
-/// `gpu_length3_xyz` import instead, so this function is never in a shader.
-#[cfg(not(target_arch = "wasm32"))]
-#[inline(always)]
-pub(crate) fn host_sqrt(value: f32) -> f32 {
-    extern crate std;
-    std::primitive::f32::sqrt(value)
 }

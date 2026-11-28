@@ -1,9 +1,14 @@
-//! Reader for the `ornis_gpu_shader_meta` record.
+//! Reader for the `ornis_gpu_shader_meta*` records.
 //!
 //! `#[gpu_entry]` (the `ornis-gpu-shader-macros` attribute) writes one ASCII
 //! record into a `#[used]` global, and `xtask build-shaders` translates the IR
 //! without any CLI flags for the entry, the workgroup size, or the uniform
-//! field tags. The format is defined by `ornis_gpu_shader::meta`; this module
+//! field tags. The global's name carries the entry
+//! (`ornis_gpu_shader_meta_vs_main`), so a crate holds a vertex and a fragment
+//! entry side by side and [`extract`] returns both records; the record body
+//! repeats the entry name, which is what [`extract_entry`] matches on.
+//!
+//! The format is defined by `ornis_gpu_shader::meta`; this module
 //! only reads it, so an artifact produced by an older attribute still
 //! translates as long as it carries the parts it knew about:
 //!
@@ -66,32 +71,53 @@ impl ShaderMeta {
     }
 }
 
-/// Read the metadata global out of textual LLVM IR.
+/// Read every metadata record out of textual LLVM IR.
 ///
-/// Returns `None` when the shader has no record at all (a kernel written
-/// against the raw `ornis_gpu` imports); returns an error when a record exists
-/// but does not parse, because translating it with guessed metadata would
-/// silently produce a different shader.
-pub fn extract(llvm_ir: &str) -> Result<Option<ShaderMeta>, TranslateError> {
-    let Some(text) = record_text(llvm_ir) else {
-        return Ok(None);
-    };
-    parse(&text).map(Some)
+/// An empty vector means the shader has no record at all (a kernel written
+/// against the raw `ornis_gpu` imports); a record that does not parse is an
+/// error, because translating it with guessed metadata would silently produce a
+/// different shader.
+pub fn extract(llvm_ir: &str) -> Result<Vec<ShaderMeta>, TranslateError> {
+    let mut records = Vec::new();
+    for text in record_texts(llvm_ir)? {
+        records.push(parse(&text)?);
+    }
+    Ok(records)
 }
 
-/// The record's contents, unescaped, from the global's initializer.
-fn record_text(llvm_ir: &str) -> Option<String> {
-    let initializer = global_initializer(llvm_ir)?;
-    unescape(initializer)
+/// The record of entry `entry`, when the module carries one.
+///
+/// # Errors
+///
+/// Same as [`extract`]: an unparsable record is never skipped.
+pub fn extract_entry(llvm_ir: &str, entry: &str) -> Result<Option<ShaderMeta>, TranslateError> {
+    Ok(extract(llvm_ir)?
+        .into_iter()
+        .find(|meta| meta.entry == entry))
 }
 
-/// The `c"…"` literal of the metadata global, quotes included.
-fn global_initializer(llvm_ir: &str) -> Option<&str> {
-    let line = llvm_ir
+/// The unescaped contents of every metadata global, in IR order.
+fn record_texts(llvm_ir: &str) -> Result<Vec<String>, TranslateError> {
+    let mut texts = Vec::new();
+    for initializer in global_initializers(llvm_ir) {
+        let text = unescape(initializer).ok_or_else(|| {
+            TranslateError::UnsupportedType("shader metadata is not a byte string".to_string())
+        })?;
+        texts.push(text);
+    }
+    Ok(texts)
+}
+
+/// The `c"…"` literals of the metadata globals, quotes included.
+fn global_initializers(llvm_ir: &str) -> Vec<&str> {
+    llvm_ir
         .lines()
-        .find(|line| line.contains(ornis_gpu_shader::meta::GLOBAL))?;
-    let start = line.find("c\"")?;
-    Some(&line[start..])
+        .filter(|line| line.contains(ornis_gpu_shader::meta::GLOBAL))
+        .filter_map(|line| {
+            let start = line.find("c\"")?;
+            Some(&line[start..])
+        })
+        .collect()
 }
 
 /// Decode the `\\XX` escapes of one LLVM string constant.
@@ -220,34 +246,60 @@ fn parse_uniforms(value: &str, structs: &mut BTreeMap<u32, Vec<u8>>) -> Result<(
         let id = id.parse::<u32>().map_err(|_| {
             TranslateError::UnsupportedType(format!("uniform struct id `{id}` is not a number"))
         })?;
+        // One decimal digit by construction: the writer refuses anything wider
+        // (the record is one byte per tag, so `10` would read as struct `1`
+        // followed by a stray tag). A record that carries a wider id did not
+        // come from the current SDK.
+        if id > ornis_gpu_shader::meta::MAX_DIGIT {
+            return Err(TranslateError::UnsupportedType(format!(
+                "uniform struct id {id} does not fit the one-digit metadata encoding"
+            )));
+        }
         // A `7` consumes the next digit as the nested struct id.
         let bytes = digits.as_bytes();
         let mut tags = Vec::new();
         let mut index = 0;
         while index < bytes.len() {
-            let tag = bytes[index];
-            index += 1;
-            if !tag.is_ascii_digit() {
+            let Some(tag) = digit(bytes[index]) else {
                 return Err(TranslateError::UnsupportedType(format!(
                     "uniform field tag `{}` is not a digit",
-                    char::from(tag)
+                    char::from(bytes[index])
                 )));
-            }
-            let tag = tag - b'0';
+            };
+            index += 1;
             if tag == ornis_gpu_abi::TYPE_TAG_STRUCT {
-                let Some(id_byte) = bytes.get(index).copied() else {
+                tags.push(nested_tag(bytes, &mut index)?);
+            } else if tag == ornis_gpu_abi::TYPE_TAG_ARRAY {
+                // `8`, the element's tag (itself `7` plus an id for an array of
+                // structs) and the length. The parsed form keeps the three
+                // bytes, so every later walk over the list needs a cursor.
+                let element = match bytes.get(index).copied().and_then(digit) {
+                    Some(ornis_gpu_abi::TYPE_TAG_STRUCT) => {
+                        index += 1;
+                        nested_tag(bytes, &mut index)?
+                    }
+                    Some(tag) if tag < ornis_gpu_abi::TYPE_TAG_ARRAY => {
+                        index += 1;
+                        tag
+                    }
+                    _ => {
+                        return Err(TranslateError::UnsupportedType(
+                            "array field needs an element tag".to_string(),
+                        ));
+                    }
+                };
+                let Some(length) = bytes.get(index).copied().and_then(digit) else {
                     return Err(TranslateError::UnsupportedType(
-                        "nested struct tag needs an id".to_string(),
+                        "array field needs a length".to_string(),
                     ));
                 };
                 index += 1;
-                if !id_byte.is_ascii_digit() {
-                    return Err(TranslateError::UnsupportedType(format!(
-                        "uniform field tag `{}` is not a digit",
-                        char::from(id_byte)
-                    )));
+                if length == 0 {
+                    return Err(TranslateError::UnsupportedType(
+                        "uniform array has no elements".to_string(),
+                    ));
                 }
-                tags.push(ornis_gpu_abi::TYPE_TAG_NESTED + (id_byte - b'0'));
+                tags.extend_from_slice(&[ornis_gpu_abi::TYPE_TAG_ARRAY, element, length]);
             } else {
                 tags.push(tag);
             }
@@ -260,4 +312,71 @@ fn parse_uniforms(value: &str, structs: &mut BTreeMap<u32, Vec<u8>>) -> Result<(
         structs.insert(id, tags);
     }
     Ok(())
+}
+
+/// Value of one base-10 digit byte, or `None` for anything else.
+///
+/// The wire format is one byte per tag, so every field of the encoding is a
+/// digit. Subtracting `b'0'` without checking underflowed on a stray byte —
+/// panicking in a debug build and wrapping in a release one.
+fn digit(byte: u8) -> Option<u8> {
+    byte.is_ascii_digit().then(|| byte - b'0')
+}
+
+/// Parse the struct id that follows a nested-struct tag at `index`.
+fn nested_tag(bytes: &[u8], index: &mut usize) -> Result<u8, TranslateError> {
+    let Some(id_byte) = bytes.get(*index).copied() else {
+        return Err(TranslateError::UnsupportedType(
+            "nested struct tag needs an id".to_string(),
+        ));
+    };
+    *index += 1;
+    let id = digit(id_byte).ok_or_else(|| {
+        TranslateError::UnsupportedType(format!(
+            "uniform field tag `{}` is not a digit",
+            char::from(id_byte)
+        ))
+    })?;
+    Ok(ornis_gpu_abi::TYPE_TAG_NESTED + id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_uniforms;
+    use std::collections::BTreeMap;
+
+    /// A byte that is not a digit is a malformed record, not a wrap-around.
+    ///
+    /// The parser subtracted `b'0'` from every tag byte, so `'a'` underflowed —
+    /// a panic in a debug build and a nonsense tag in a release one.
+    #[test]
+    fn a_non_digit_tag_is_an_error() {
+        let mut structs = BTreeMap::new();
+        let error = parse_uniforms("0:1a", &mut structs).expect_err("not a digit");
+        assert!(
+            error.to_string().contains("not a digit"),
+            "the rejection must name the byte: {error}"
+        );
+    }
+
+    /// A struct id wider than one digit did not come from the current SDK's
+    /// writer, and reading it would be reading a different record: the id part
+    /// is one byte, so `uniform=12:` means struct `1` and a stray `2:`.
+    #[test]
+    fn a_two_digit_struct_id_is_rejected() {
+        let mut structs = BTreeMap::new();
+        let error = parse_uniforms("12:62", &mut structs).expect_err("two-digit id");
+        assert!(
+            error.to_string().contains("one-digit"),
+            "the rejection must name the encoding: {error}"
+        );
+    }
+
+    /// A `vec4` followed by a `u32` is two scalar tags, in order.
+    #[test]
+    fn scalar_tags_keep_their_order() {
+        let mut structs = BTreeMap::new();
+        parse_uniforms("0:62", &mut structs).expect("two scalar tags");
+        assert_eq!(structs.get(&0), Some(&vec![6, 2]));
+    }
 }

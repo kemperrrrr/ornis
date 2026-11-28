@@ -17,6 +17,10 @@ editor-backend = { path = "../editor-backend", version = "0.1.0" }
 pollster = "1.0"
 wgpu = "30"
 winit = "0.30"
+# The stats window's blit shader: the crate names the entries it exports, so a
+# rename is a compile error here rather than a pipeline failure at run time.
+# The WGSL itself is the checked-in artifact, not the crate.
+ornis-gpu-blit = { path = "../gpu-blit", version = "0.1.0" }
 
 [lints]
 workspace = true

@@ -78,7 +78,7 @@
   `UnitVec3`, `PositiveF32`, `Clamped01`), `enum` вместо `bool`/`u32`-флагов
   (`BodyRole`, `ExecMode`, `CompositeMode`), `Result` с `thiserror`
   вместо `String`/`Option`/`bool` для ошибок.
-- GPU-контракт — подмена типа в DSL: Rust хранит `MaterialIdx`/`TextureHandle`,
+- GPU-контракт — подмена типа в derive: Rust хранит `MaterialIdx`/`TextureHandle`,
   `#[derive(WgslStruct)]`/`WgslInterface` транслируют их в стандартные `u32`
   (прецедент — `GpuBool` → `u32`); `repr(transparent)` + `Pod` дают нулевую
   стоимость на CPU, layout проверяется `offset_of!`/`size_of` + naga.

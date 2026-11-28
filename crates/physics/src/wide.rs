@@ -33,8 +33,8 @@ use glam::{Mat3, Vec3};
 
 use crate::body::RigidBody;
 use crate::constants::{DEGENERATE_LEN2, FRICTION_IMPULSE_DUST, MIN_EFFECTIVE_MASS};
-use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 use crate::engine::{Manifold, ManifoldState};
+use ornis_gpu_si::row::{contact_friction_clamp, contact_normal_step};
 
 /// SIMD contact batch width (lanes per SoA pack).
 const WIDE_LANES: usize = 4;
@@ -476,8 +476,8 @@ impl WideBatch {
         let rel = point_velocity(self.vb.lane(l), self.wb.lane(l), rb)
             - point_velocity(self.va.lane(l), self.wa.lane(l), ra);
         let vn = rel.dot(n);
-        // Shared isotropic row (contact_math): bit-identical ops, one source.
-        let new_acc = contact_normal_step::eval(
+        // Shared isotropic row (ornis_gpu_si::row): bit-identical ops, one source.
+        let new_acc = contact_normal_step(
             vn,
             self.target.lane(l),
             self.inv_k_n.lane(l),
@@ -634,10 +634,10 @@ impl WideBatch {
 
 /// Coulomb cone projection for one wide-batch friction axis given the
 /// accumulated impulse on the perpendicular axis. Thin alias over the
-/// shared isotropic row ([`crate::contact_math`]); kept so lane call sites
+/// shared isotropic row ([`ornis_gpu_si::row`]); kept so lane call sites
 /// stay unchanged.
 fn clamp_friction_impulse_wide(new_t: f32, other: f32, max_friction: f32) -> f32 {
-    contact_friction_clamp::eval(new_t, other, max_friction)
+    contact_friction_clamp(new_t, other, max_friction)
 }
 
 /// Velocity of a body at a world-space point (linear + angular part).

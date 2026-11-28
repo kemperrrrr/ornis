@@ -1,3 +1,9 @@
+> **Статус 2026-11-22: аудит закрыт #263.** Инвентарь ниже — снимок до
+> миграции; перечисленные в нём «строковые WGSL-фрагменты/сборка» переведены на
+> llvm2gpu (этапы 2–5), DSL (`#[stage]`/`#[kernel]`/`#[gpu_pipeline]`/`wgsl!`) и
+> крейт `ornis-shader-lang` удалены. Читать как историческую запись разрывов,
+> которые предстояло закрыть, а не как текущее состояние.
+
 ## Этап 1 — аудит GPU-шейдеров и разрывов wasm2gpu
 
 Снимок `master` после #229. Инвентаризация по shader-исходникам и точкам создания пайплайнов во всём workspace (`render`, `physics`, `runner`, `wgpu_backend`); строковые/inline WGSL-источники и test-only macro consumers тоже отмечены отдельно.
@@ -13,7 +19,7 @@
 - Deferred lighting: `lighting_generated.rs` — fullscreen `vs_main`, `fs_main` и MSAA-вариант `fs_main_msaa` (экспортируется под WGSL entry `fs_main`).
 - AA: `aa_common.rs` задаёт общий vertex; `aa_edge_generated.rs` и `aa_taa_generated.rs` собирают fragment `fs_main` из WGSL-тел.
 - AO: `ao_generated.rs` — fullscreen vertex плюс raw SSAO/GTAO fragment и bilateral-blur fragment; генерация меняется по методу и sample count.
-- Вне `crates/render`: `crates/runner/src/stats/window.rs::BLIT_WGSL` — production fullscreen vertex `vs` + fragment `fs` для blit stats canvas в отдельное окно.
+- Вне `crates/render`: `crates/runner/src/stats/window.rs::BLIT_WGSL` — production fullscreen vertex `vs` + fragment `fs` для blit stats canvas в отдельное окно. **Мигрировано (этап 5, `crates/gpu-blit`):** `vs_main`/`fs_main` в `stats/blit_generated.wgsl`.
 - Значительная часть Rust entry/helper-тела уже создаётся `#[stage]`/`#[kernel]`, но источники AA/AO и крупные части lighting/post остаются строковыми WGSL-фрагментами/сборкой. Переход означает смену источника исполнения на wasm2gpu, а не просто замену макроса.
 
 **Compute в render**

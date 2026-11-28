@@ -70,13 +70,17 @@ impl Renderer3D {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &vs_module,
-                entry_point: Some(shaders::lighting_generated::vs_main::entry_point()),
+                entry_point: Some(shaders::lighting_generated::VS_ENTRY),
                 buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &fs_module,
-                entry_point: Some(shaders::lighting_generated::fs_main::entry_point()),
+                entry_point: Some(if sample_count <= 1 {
+                    shaders::lighting_generated::LIGHTING_1X_ENTRY
+                } else {
+                    shaders::lighting_generated::LIGHTING_MSAA_ENTRY
+                }),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: output_view.texture().format(),
                     blend: Some(wgpu::BlendState::REPLACE),

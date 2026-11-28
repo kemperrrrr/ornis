@@ -2,8 +2,9 @@
 //!
 //! Binding provenance lives in const generics (`GROUP`, `BINDING`). The only
 //! runtime bits in a [`GpuRef`] are a byte offset. Textures are calls, not
-//! loads from linear memory. This crate is not the production shader DSL
-//! (`ornis-shader-lang` / `#[stage]`); see `docs/rendering/wasm-segmented-memory.md`.
+//! loads from linear memory. This crate is not the production path — shaders
+//! are authored on the typed SDK and translated by `ornis-llvm2gpu`; see
+//! `docs/rendering/wasm-segmented-memory.md`.
 //!
 //! On the host, [`gpu_abi::with_host`] installs a shadow of those bindings so
 //! [`GpuRef::read`] / [`GpuRef::write`] can be executed and checked under Miri.
@@ -39,6 +40,20 @@ pub mod shader {
 /// Import names the offline translator recognizes.
 pub mod symbols;
 
+/// Numerical floors the CPU references and the translated kernels share.
+///
+/// A gate below which a magnitude is f32 rounding dust. Both sides spell it
+/// once here: the kernel crate keeps the literal it lowers (a `const` the
+/// translator folds), and the CPU reference reads the same value, so a change
+/// on one side cannot leave the other behind.
+pub mod thresholds {
+    /// Length, length-squared, impulse and `dt²` floor shared by the contact
+    /// friction clamp and the AVBD degenerate-timestep gate.
+    pub const DEGENERATE: f32 = 1e-12;
+    /// Squared friction impulse treated as dust (the angular terms skip it).
+    pub const FRICTION_DUST: f32 = 1e-24;
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use gpu_abi::{HostMemory, with_host};
 pub use gpu_ref::{GpuRef, Storage, StorageSpace, Uniform, UniformSpace};
@@ -46,10 +61,10 @@ pub use gpu_ref::{GpuRef, Storage, StorageSpace, Uniform, UniformSpace};
 pub use layout::encode_types_section;
 pub use layout::{
     F32_ALIGN, F32_SIZE, FieldLayout, GpuSafeLayout, GpuVec2, GpuVec3, GpuVec4, LayoutMismatch,
-    TYPE_TAG_F32, TYPE_TAG_I32, TYPE_TAG_NESTED, TYPE_TAG_STRUCT, TYPE_TAG_U32, TYPE_TAG_VEC2,
-    TYPE_TAG_VEC3, TYPE_TAG_VEC4, UNIFORM_STRUCT_ALIGN, VEC2_ALIGN, VEC2_SIZE, VEC3_ALIGN,
-    VEC3_SIZE, VEC4_ALIGN, VEC4_SIZE, place_fields, round_up, storage_layout_mismatch,
-    storage_stride, uniform_layout_mismatch, uniform_stride,
+    TYPE_TAG_ARRAY, TYPE_TAG_F32, TYPE_TAG_I32, TYPE_TAG_NESTED, TYPE_TAG_STRUCT, TYPE_TAG_U32,
+    TYPE_TAG_VEC2, TYPE_TAG_VEC3, TYPE_TAG_VEC4, UNIFORM_STRUCT_ALIGN, VEC2_ALIGN, VEC2_SIZE,
+    VEC3_ALIGN, VEC3_SIZE, VEC4_ALIGN, VEC4_SIZE, array_layout, place_fields, round_up,
+    storage_layout_mismatch, storage_stride, uniform_layout_mismatch, uniform_stride,
 };
 pub use shader_io::{
     gpu_cross3, gpu_dot3, gpu_length3, gpu_normalize3, storage_at_f32, storage_at_u32,

@@ -1,8 +1,17 @@
-//! Shader-stage builtins.
+//! Shader-stage builtins and stage interface values.
 //!
 //! The invocation id, the local index, and the fragment UV are not resources
 //! a bind group provides. The axis or lane is a const generic so the
 //! translator sees a literal, which is the only form it lowers.
+//!
+//! The same rule carries the raster stages: a vertex entry reads
+//! `@builtin(vertex_index)`, `@builtin(instance_index)`, and its `@location`
+//! inputs from functions below, and writes `@builtin(position)` plus located
+//! outputs through the `vertex_store_*` writers. A fragment entry reads any
+//! `@location` with [`fragment_input_lane`] and writes any target with
+//! [`fragment_store_at`]. Locations and lanes are const generics for the same
+//! reason the axis is: the translator only lowers immediates, and the declared
+//! `vecN` width of each interface value follows from the lanes actually used.
 
 /// Lane `AXIS` (`0..3`) of `@builtin(global_invocation_id)`.
 #[inline(always)]
@@ -30,6 +39,7 @@ pub fn local_invocation_index() -> u32 {
 }
 
 /// Lane `LANE` (`0..2`) of the fragment's `@location(0)` UV.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
 #[inline(always)]
 #[must_use]
 pub fn fragment_uv<const LANE: u32>() -> f32 {
@@ -42,12 +52,304 @@ pub fn fragment_uv<const LANE: u32>() -> f32 {
     crate::host_unavailable()
 }
 
+/// Lane `LANE` (`0..4`) of the fragment's `@builtin(position)`.
+///
+/// The framebuffer-space position, in pixels: `x`/`y` are the sample point,
+/// `z` the depth, `w` the reciprocal of the interpolated `w`. A blit that
+/// copies one texel per pixel reads `x`/`y` and truncates.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
+#[inline(always)]
+#[must_use]
+pub fn fragment_position_lane<const LANE: u32>() -> f32 {
+    const { assert!(LANE < 4, "fragment position is a vec4") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_position_lane(LANE)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host_unavailable()
+}
+
+/// Drop the current fragment invocation.
+///
+/// The invocation stops before the rest of the entry runs, so a fragment
+/// shader can cut out alpha-tested pixels. Derivatives taken before this call
+/// stay well defined: after a *non-uniform* discard they would not be.
+// qual:allow(test_quality, untested) reason: "shader builtin; the translator test lowers the discard from LLVM IR, and the host build has no invocation to drop"
+#[inline(always)]
+pub fn fragment_discard() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_discard();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host_unavailable()
+}
+
 /// Write the fragment's `@location(0)` color.
 #[inline(always)]
 pub fn fragment_store(r: f32, g: f32, b: f32, a: f32) {
     #[cfg(target_arch = "wasm32")]
     {
         crate::abi::fragment_store(r, g, b, a);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (r, g, b, a);
+        crate::host_unavailable()
+    }
+}
+
+/// `@builtin(vertex_index)` of the vertex entry.
+#[inline(always)]
+#[must_use]
+pub fn vertex_index() -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_index()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::host_unavailable()
+    }
+}
+
+/// `@builtin(instance_index)` of the vertex entry.
+#[inline(always)]
+#[must_use]
+pub fn instance_index() -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::instance_index()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::host_unavailable()
+    }
+}
+
+/// Lane `LANE` of the `LANES`-wide vertex input at `LOC`.
+///
+/// The width is a const generic and not inferred from the lanes the body
+/// reads: the vertex and fragment stages are separate compilations of separate
+/// crates, and the two declarations must name the same `vecN<f32>`.
+#[inline(always)]
+#[must_use]
+pub fn vertex_input_lane<const LOC: u32, const LANES: u32, const LANE: u32>() -> f32 {
+    const { assert!(LOC < 16, "a vertex input is one of 16 locations") };
+    const { assert!(LANES >= 1 && LANES <= 4, "an interface value has 1-4 lanes") };
+    const { assert!(LANE < LANES, "the lane is inside the declared width") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_input_lane(LOC, LANES, LANE)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::host_unavailable()
+    }
+}
+
+/// The `u32` vertex input at `LOC`.
+///
+/// An integer varying is declared `@interpolate(flat)`, so it carries a whole
+/// word instead of a lane: joint indices are a `vec4<u32>`, and the translator
+/// declares it from this call rather than from a lane count.
+// qual:allow(test_quality, untested) reason: "shader builtin; the translator test lowers the same call from LLVM IR"
+#[inline(always)]
+#[must_use]
+pub fn vertex_input_u32<const LOC: u32>() -> u32 {
+    const { assert!(LOC < 16, "a vertex input is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_input_u32(LOC)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::host_unavailable()
+    }
+}
+
+/// Lane `LANE` of the `vec4<u32>` vertex input at `LOC`.
+///
+/// A `vec4<u32>` occupies one location and is declared flat, so a joint index
+/// is one lane of that value rather than a location of its own.
+// qual:allow(test_quality, untested) reason: "shader builtin; the translator test lowers the same call from LLVM IR"
+#[inline(always)]
+#[must_use]
+pub fn vertex_input_u32x4<const LOC: u32, const LANE: u32>() -> u32 {
+    const { assert!(LOC < 16, "a vertex input is one of 16 locations") };
+    const { assert!(LANE < 4, "a vec4<u32> input has four lanes") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_input_u32x4(LOC, LANE)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::host_unavailable()
+    }
+}
+
+/// Clip-space `@builtin(position)` of the vertex output.
+#[inline(always)]
+pub fn vertex_position(x: f32, y: f32, z: f32, w: f32) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_position(x, y, z, w);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (x, y, z, w);
+        crate::host_unavailable()
+    }
+}
+
+/// Write the `vec2<f32>` vertex output at `LOC`.
+#[inline(always)]
+pub fn vertex_store_2<const LOC: u32>(x: f32, y: f32) {
+    const { assert!(LOC < 16, "a vertex output is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_store_2(LOC, x, y);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (x, y);
+        crate::host_unavailable()
+    }
+}
+
+/// Write the `vec3<f32>` vertex output at `LOC`.
+///
+/// Three lanes are a width of their own: padding to `vec4` would change the
+/// declared varying the fragment stage reads.
+#[inline(always)]
+pub fn vertex_store_3<const LOC: u32>(x: f32, y: f32, z: f32) {
+    const { assert!(LOC < 16, "a vertex output is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_store_3(LOC, x, y, z);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (x, y, z);
+        crate::host_unavailable()
+    }
+}
+
+/// Write the scalar `u32` vertex output at `LOC`, declared `@interpolate(flat)`.
+#[inline(always)]
+pub fn vertex_store_u32<const LOC: u32>(value: u32) {
+    const { assert!(LOC < 16, "a vertex output is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_store_u32(LOC, value);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
+        crate::host_unavailable()
+    }
+}
+
+/// Write the `vec4<f32>` vertex output at `LOC`.
+#[inline(always)]
+pub fn vertex_store_4<const LOC: u32>(x: f32, y: f32, z: f32, w: f32) {
+    const { assert!(LOC < 16, "a vertex output is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::vertex_store_4(LOC, x, y, z, w);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (x, y, z, w);
+        crate::host_unavailable()
+    }
+}
+
+/// Lane `LANE` of the `LANES`-wide fragment input at `LOC`.
+///
+/// The vertex stage writes the interpolant at the same location with the same
+/// width; a mismatch is a pipeline error, so the width is declared here too.
+#[inline(always)]
+#[must_use]
+pub fn fragment_input_lane<const LOC: u32, const LANES: u32, const LANE: u32>() -> f32 {
+    const { assert!(LOC < 16, "a fragment input is one of 16 locations") };
+    const { assert!(LANES >= 1 && LANES <= 4, "an interface value has 1-4 lanes") };
+    const { assert!(LANE < LANES, "the lane is inside the declared width") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_input_lane(LOC, LANES, LANE)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::host_unavailable()
+    }
+}
+
+/// The scalar `u32` fragment input at `LOC`.
+///
+/// The integer twin of [`fragment_input_lane`]: the vertex stage wrote one
+/// word at that location with [`vertex_store_u32`].
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
+#[inline(always)]
+#[must_use]
+pub fn fragment_input_u32<const LOC: u32>() -> u32 {
+    const { assert!(LOC < 16, "a fragment input is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_input_u32(LOC)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::host_unavailable()
+    }
+}
+
+/// Write the `vec2<f32>` fragment output at `LOC`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
+#[inline(always)]
+pub fn fragment_store_2_at<const LOC: u32>(x: f32, y: f32) {
+    const { assert!(LOC < 16, "a fragment output is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_store_2(LOC, x, y);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (x, y);
+        crate::host_unavailable()
+    }
+}
+
+/// Write the scalar `u32` fragment output at `LOC`.
+///
+/// An integer attachment (material id, quantized depth) is a `u32` target, not
+/// a color: the output struct member is a plain `u32`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the host build never executes it, and the call it lowers is pinned by the checked-in artifacts (build-shaders --check)"
+#[inline(always)]
+pub fn fragment_store_u32_at<const LOC: u32>(value: u32) {
+    const { assert!(LOC < 16, "a fragment output is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_store_u32(LOC, value);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
+        crate::host_unavailable()
+    }
+}
+
+/// Write the fragment output at `LOC`, one lane per color attachment.
+///
+/// A single `@location(0)` target keeps the bare `vec4<f32>` entry result;
+/// two or more targets become an output struct with one member each.
+#[inline(always)]
+pub fn fragment_store_at<const LOC: u32>(r: f32, g: f32, b: f32, a: f32) {
+    const { assert!(LOC < 16, "a fragment output is one of 16 locations") };
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::fragment_store_location(LOC, r, g, b, a);
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

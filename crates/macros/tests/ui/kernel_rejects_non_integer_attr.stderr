@@ -1,5 +1,0 @@
-error: expected integer literal
- --> tests/ui/kernel_rejects_non_integer_attr.rs:7:10
-  |
-7 | #[kernel("not_an_int")]
-  |          ^^^^^^^^^^^^

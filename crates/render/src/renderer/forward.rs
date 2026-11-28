@@ -339,13 +339,13 @@ impl Renderer3D {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &vs_module,
-                entry_point: Some(shaders::gbuffer_generated::vs_main::entry_point()),
+                entry_point: Some(shaders::gbuffer_generated::VS_ENTRY),
                 buffers: &[Some(Vertex::desc())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &fs_module,
-                entry_point: Some(shaders::pbr_generated::fs_main::entry_point()),
+                entry_point: Some(shaders::pbr_generated::FS_ENTRY),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba16Float,
                     blend: Some(forward_blend_state(transparency)),
@@ -482,13 +482,13 @@ impl Renderer3D {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &vs_module,
-                entry_point: Some(shaders::gbuffer_generated::vs_main::entry_point()),
+                entry_point: Some(shaders::gbuffer_generated::VS_ENTRY),
                 buffers: &[Some(Vertex::desc())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &fs_module,
-                entry_point: Some(shaders::material_textures::fs_main_textured::entry_point()),
+                entry_point: Some(shaders::material_textures::TEXTURED_FS_ENTRY),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba16Float,
                     blend: Some(forward_blend_state(self.transparency)),

@@ -1,0 +1,15 @@
+[package]
+name = "ornis-gpu-pbr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Forward PBR fragment pass on the llvm2gpu SDK"
+
+[dependencies]
+ornis-gpu-shader = { path = "../gpu-shader", version = "0.1.0" }
+ornis-gpu-openpbr = { path = "../gpu-openpbr", version = "0.1.0" }
+
+[lints]
+workspace = true
