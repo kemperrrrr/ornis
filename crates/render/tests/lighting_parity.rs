@@ -33,7 +33,6 @@
 //! Both shaders get the same buffers, so the gate compares shading, not
 //! layout: the pass's own tests pin the resource table against the artifacts.
 
-// qual:allow(srp, file_length=1319) reason: "one parity harness: the inputs, the pipeline and the comparison read as one document"
 #[allow(dead_code)]
 mod common;
 
@@ -96,14 +95,21 @@ fn translated_lighting_matches_the_dsl_pixels() {
     };
     let inputs = Inputs::new(&device, &queue, false, &keep_lights);
     for debug_view in DEBUG_VIEWS {
-        let reference = render(&device, &queue, &inputs, DSL_1X, "fs_main", debug_view);
+        let reference = render(
+            &device,
+            &queue,
+            &inputs,
+            pass(DSL_1X, "fs_main", debug_view),
+        );
         let translated = render(
             &device,
             &queue,
             &inputs,
-            &ornis_render::shaders::lighting_generated::wgsl_source_for_samples(1),
-            ornis_render::shaders::lighting_generated::LIGHTING_1X_ENTRY,
-            debug_view,
+            pass(
+                &ornis_render::shaders::lighting_generated::wgsl_source_for_samples(1),
+                ornis_render::shaders::lighting_generated::LIGHTING_1X_ENTRY,
+                debug_view,
+            ),
         );
         let comparison = compare(&reference, &translated);
         assert_eq!(
@@ -129,14 +135,16 @@ fn translated_shadow_visibility_matches_the_dsl_pixels() {
         return;
     };
     let inputs = Inputs::new(&device, &queue, false, &keep_lights);
-    let reference = render(&device, &queue, &inputs, DSL_1X, "fs_main", 6);
+    let reference = render(&device, &queue, &inputs, pass(DSL_1X, "fs_main", 6));
     let translated = render(
         &device,
         &queue,
         &inputs,
-        &ornis_render::shaders::lighting_generated::wgsl_source_for_samples(1),
-        ornis_render::shaders::lighting_generated::LIGHTING_1X_ENTRY,
-        6,
+        pass(
+            &ornis_render::shaders::lighting_generated::wgsl_source_for_samples(1),
+            ornis_render::shaders::lighting_generated::LIGHTING_1X_ENTRY,
+            6,
+        ),
     );
     let comparison = compare(&reference, &translated);
     assert_eq!(
@@ -162,8 +170,8 @@ fn each_light_moves_pixels_on_its_own() {
     for kind in 0..LIGHT_RECORDS as u32 {
         for view in [0u32, 3] {
             let dark = Inputs::new(&device, &queue, false, &light_off(kind as usize));
-            let on = render(&device, &queue, &lit, DSL_1X, "fs_main", view);
-            let off = render(&device, &queue, &dark, DSL_1X, "fs_main", view);
+            let on = render(&device, &queue, &lit, pass(DSL_1X, "fs_main", view));
+            let off = render(&device, &queue, &dark, pass(DSL_1X, "fs_main", view));
             let differing = differing_texels(&on, &off);
             assert!(
                 differing > 0,
@@ -183,8 +191,8 @@ fn shadow_view_reports_lit_and_occluded_texels() {
         return;
     };
     let inputs = Inputs::new(&device, &queue, false, &keep_lights);
-    let beauty_lit = render(&device, &queue, &inputs, DSL_1X, "fs_main", 0);
-    let shadow = render(&device, &queue, &inputs, DSL_1X, "fs_main", 6);
+    let beauty_lit = render(&device, &queue, &inputs, pass(DSL_1X, "fs_main", 0));
+    let shadow = render(&device, &queue, &inputs, pass(DSL_1X, "fs_main", 6));
     // The readback rows carry padding chunks; keep the real texels only.
     let real: Vec<(usize, usize, [f32; 3])> = shadow
         .chunks_exact(8)
@@ -206,7 +214,7 @@ fn shadow_view_reports_lit_and_occluded_texels() {
     // The band occludes the spot light, so turning it off must not change
     // the band region of the beauty frame — and must change the lit region.
     let dark = Inputs::new(&device, &queue, false, &light_off(2));
-    let beauty_dark = render(&device, &queue, &dark, DSL_1X, "fs_main", 0);
+    let beauty_dark = render(&device, &queue, &dark, pass(DSL_1X, "fs_main", 0));
     let real_lit: Vec<[f32; 3]> = beauty_lit
         .chunks_exact(8)
         .enumerate()
@@ -259,14 +267,16 @@ fn translated_msaa_lighting_matches_the_dsl_pixels() {
         return;
     };
     let inputs = Inputs::new(&device, &queue, true, &keep_lights);
-    let reference = render(&device, &queue, &inputs, DSL_4X, "fs_main", 0);
+    let reference = render(&device, &queue, &inputs, pass(DSL_4X, "fs_main", 0));
     let translated = render(
         &device,
         &queue,
         &inputs,
-        &ornis_render::shaders::lighting_generated::wgsl_source_for_samples(SAMPLES),
-        ornis_render::shaders::lighting_generated::LIGHTING_MSAA_ENTRY,
-        0,
+        pass(
+            &ornis_render::shaders::lighting_generated::wgsl_source_for_samples(SAMPLES),
+            ornis_render::shaders::lighting_generated::LIGHTING_MSAA_ENTRY,
+            0,
+        ),
     );
     let comparison = compare(&reference, &translated);
     assert_eq!(
@@ -554,20 +564,34 @@ impl EntireBinding for wgpu::Buffer {
     }
 }
 
-/// Splice four `u32` into the byte list the storage bindings expect.
+/// The shader, entry and debug view of one lighting draw.
+struct Pass<'a> {
+    /// Fragment WGSL.
+    fragment: &'a str,
+    /// Fragment entry point.
+    entry: &'a str,
+    /// Value written into the lighting block's debug view.
+    debug_view: u32,
+}
+
+fn pass<'a>(fragment: &'a str, entry: &'a str, debug_view: u32) -> Pass<'a> {
+    Pass {
+        fragment,
+        entry,
+        debug_view,
+    }
+}
+
 /// Render `fragment` over [`SIZE`] and read the result back.
 ///
 /// `debug_view` is written into the lighting block, so one input set serves
 /// every view the pass can paint.
-// qual:allow(srp, max_parameters=6) reason: "the pipeline inputs, the two modules and the view selector"
-fn render(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    inputs: &Inputs,
-    fragment: &str,
-    entry: &str,
-    debug_view: u32,
-) -> Vec<u8> {
+fn render(device: &wgpu::Device, queue: &wgpu::Queue, inputs: &Inputs, pass: Pass<'_>) -> Vec<u8> {
+    let Pass {
+        fragment,
+        entry,
+        debug_view,
+    } = pass;
     queue.write_buffer(
         &inputs.lighting,
         (LIGHT_COUNT_AT + 12) as u64,
@@ -963,7 +987,6 @@ fn put(bytes: &mut [u8], at: usize, lane: usize, value: f32) {
 /// atlas layer `1`, so the cone term and the atlas selector both run. The
 /// fourth light sits behind the prefix and reaches the walk only through the
 /// cluster span (see [`cluster_grid_bytes`]).
-// qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
 fn lighting_bytes() -> Vec<u8> {
     let mut bytes = vec![0u8; CSM_AT + CASCADES * CASCADE_BYTES + 64];
     for (lane, value) in [0.05f32, 0.06, 0.07, 1.0].into_iter().enumerate() {
@@ -1379,8 +1402,57 @@ fn fs_fill(input: Varyings) -> Fill {
 }
 "#;
 
+/// One colour target of the fill pipeline. Both attachments share the blend
+/// and the write mask; only the format differs.
+fn color_target(format: wgpu::TextureFormat) -> Option<wgpu::ColorTargetState> {
+    Some(wgpu::ColorTargetState {
+        format,
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    })
+}
+
+/// The fill pipeline: octahedral normal, material id, and a depth attachment.
+fn gbuffer_pipeline(device: &wgpu::Device, shader: &wgpu::ShaderModule) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("lighting g-buffer"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_fill"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_fill"),
+            targets: &[
+                color_target(wgpu::TextureFormat::Rg16Float),
+                color_target(wgpu::TextureFormat::R16Uint),
+            ],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: SAMPLES,
+            ..Default::default()
+        },
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 /// Render the three per-sample g-buffer layers.
-// qual:allow(complexity, max_function_lines=123) reason: "one render pass: the pipeline, the two targets and the draw read as one setup"
 // qual:allow(dry, boilerplate) reason: "the pass descriptor the sibling gates spell too"
 fn msaa_gbuffer(device: &wgpu::Device, queue: &wgpu::Queue) -> MsaaGbuffer {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1413,50 +1485,7 @@ fn msaa_gbuffer(device: &wgpu::Device, queue: &wgpu::Queue) -> MsaaGbuffer {
         view_formats: &[],
     });
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("lighting g-buffer"),
-        layout: None,
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_fill"),
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_fill"),
-            targets: &[
-                Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rg16Float,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-                Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::R16Uint,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-            ],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleStrip,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Always),
-            stencil: Default::default(),
-            bias: Default::default(),
-        }),
-        multisample: wgpu::MultisampleState {
-            count: SAMPLES,
-            ..Default::default()
-        },
-        multiview_mask: None,
-        cache: None,
-    });
+    let pipeline = gbuffer_pipeline(device, &shader);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("lighting g-buffer"),
     });

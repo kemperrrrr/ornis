@@ -11,7 +11,6 @@
 //! Both shaders get the same buffers, so the gate compares shading, not layout:
 //! `pbr_generated`'s own tests pin the uniform offsets against the host records.
 
-// qual:allow(srp, file_length=700) reason: "one parity harness: the inputs, the pipeline and the comparison read as one document"
 #[allow(dead_code)]
 mod common;
 
@@ -383,7 +382,6 @@ fn material_bytes() -> Vec<u8> {
 /// `CSM_ACTIVE_EDGE`, so it takes the cascaded path; `params.w = -1.0` keeps it
 /// out of the single-layer atlas. Light `1` is a point light with a layer in
 /// `params.w`, which takes the cube path.
-// qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
 fn lighting_bytes() -> Vec<u8> {
     let mut bytes = vec![0u8; CSM_AT + CASCADES * CASCADE_BYTES + 64];
     let put = |bytes: &mut Vec<u8>, at: usize, lane: usize, value: f32| {

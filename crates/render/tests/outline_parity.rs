@@ -83,9 +83,10 @@ struct Inputs {
 /// offset `0` for `52u` and `53u` alike. Three do — a stride step error moves
 /// instance `1` and `2` to garbage words and the pixels move with them. The
 /// frames below drive the flag list both ways: uniform frames for each value
-/// (the `0`/`1` hover colours and `2` selected), then one mixed list
-/// `[0, 1, 2]` so a single frame carries all three branches and an off-by-one
-/// in the per-instance flag index moves a pixel.
+/// (the `0`/`1` hover colours and `2` selected), then two mixed lists
+/// `[0, 1, 2]` and `[2, 0, 1]`. Flags `0` and `1` paint the same hover colour,
+/// so swapping those two instances would not move a pixel; putting `2` on a
+/// different instance does.
 const INSTANCES: u32 = 3;
 
 /// A model matrix that is not symmetric, so a transposed upload lands
@@ -323,10 +324,12 @@ fn translated_outline_matches_the_dsl_pixels() {
     let translated_fragment = ornis_render::shaders::outline_generated::wgsl_fragment_source();
     // Every flag the host can upload: `0` and `1` both paint the hover colour,
     // `2` the selected one, so the pick is compared in both directions. The
-    // last frame mixes them per instance, which is the only shape that catches
-    // an index applied to the wrong entry of the flag list.
+    // mixed lists catch an index applied to the wrong entry. `[0, 1, 2]` and
+    // `[2, 0, 1]` put the selected flag on different instances: flags `0` and
+    // `1` are the same colour, so only that second list shows a swap of
+    // instance 0 with instance 1's neighbour that actually changes paint.
     let mut references = Vec::new();
-    for flags in [[0u32, 0, 0], [1, 1, 1], [2, 2, 2], [0, 1, 2]] {
+    for flags in [[0u32, 0, 0], [1, 1, 1], [2, 2, 2], [0, 1, 2], [2, 0, 1]] {
         let inputs = inputs(&device, &queue, flags);
         let reference = render(&device, &queue, DSL_VERTEX, DSL_FRAGMENT, &inputs);
         let new = render(
@@ -369,6 +372,14 @@ fn translated_outline_matches_the_dsl_pixels() {
     assert!(
         mismatched_pixels(&references[2], mixed) > 0,
         "a hover instance must not paint the selected colour"
+    );
+    // `[2, 0, 1]` paints instance 0 selected and instance 2 hover. It differs
+    // from `[0, 1, 2]`, which does the opposite: a 0↔1 swap of the first two
+    // slots would not, because those flags share the hover colour.
+    let swapped = &references[4];
+    assert!(
+        mismatched_pixels(mixed, swapped) > 0,
+        "moving the selected flag from instance 2 to instance 0 must move pixels"
     );
 }
 
