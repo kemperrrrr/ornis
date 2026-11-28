@@ -5,7 +5,7 @@
 //! [`crate::smart_system_fields`]. The visitor overrides couple guard checks with descent bookkeeping by
 //! construction (same as the baselined
 //! `pipeline_config::TypeAnalyzer::visit_type` and
-//! `gpu_pipeline::parse_binding_group`); each carries a targeted
+//! `smart_system` binding-group parsing); each carries a targeted
 //! `qual:allow(iosp)` pin that re-fires if logic or calls grow.
 
 use std::collections::HashSet;
@@ -33,7 +33,7 @@ impl BodyInfo {
     }
 
     /// `let PAT = INIT`: alias-of-link extends the link set.
-    // qual:allow(iosp) reason: "link-binding rule coupling alias-shape checks with set insertion — same shape as baselined gpu_pipeline::parse_binding_group"
+    // qual:allow(iosp) reason: "link-binding rule coupling alias-shape checks with set insertion — same shape as baselined `smart_system` binding-group parsing"
     pub(crate) fn visit_let(&mut self, pat: &Pat, init: &Expr) {
         if is_link_alias(init, &self.links)
             || mentions_entity_member(init, &self.u, &self.links) && is_link_alias_shape(init)
@@ -43,7 +43,7 @@ impl BodyInfo {
     }
 }
 impl<'ast> Visit<'ast> for BodyInfo {
-    // qual:allow(iosp) reason: "let-binding dispatch coupling an init-shape check with the alias rule — same shape as baselined gpu_pipeline::parse_binding_group"
+    // qual:allow(iosp) reason: "let-binding dispatch coupling an init-shape check with the alias rule — same shape as baselined `smart_system` binding-group parsing"
     fn visit_local(&mut self, node: &'ast syn::Local) {
         if let Some(init) = &node.init {
             // `let PAT = INIT` (+ optional `else` divergent — links in the
@@ -53,7 +53,7 @@ impl<'ast> Visit<'ast> for BodyInfo {
         syn::visit::visit_local(self, node);
     }
 
-    // qual:allow(iosp) reason: "if-let binder coupling scrutinee-shape checks with pattern registration — same shape as baselined gpu_pipeline::parse_binding_group"
+    // qual:allow(iosp) reason: "if-let binder coupling scrutinee-shape checks with pattern registration — same shape as baselined `smart_system` binding-group parsing"
     fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
         // `if let PAT = SCRUT`: bindings sourced from `u.field` (or a
         // link) are handles to another entity.
@@ -66,7 +66,7 @@ impl<'ast> Visit<'ast> for BodyInfo {
         syn::visit::visit_expr_if(self, node);
     }
 
-    // qual:allow(iosp) reason: "while-let binder coupling scrutinee-shape checks with pattern registration — same shape as baselined gpu_pipeline::parse_binding_group"
+    // qual:allow(iosp) reason: "while-let binder coupling scrutinee-shape checks with pattern registration — same shape as baselined `smart_system` binding-group parsing"
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
         if let Expr::Let(let_expr) = node.cond.as_ref()
             && (mentions_entity_member(&let_expr.expr, &self.u, &self.links)
@@ -77,7 +77,7 @@ impl<'ast> Visit<'ast> for BodyInfo {
         syn::visit::visit_expr_while(self, node);
     }
 
-    // qual:allow(iosp) reason: "match binder coupling scrutinee-shape checks with arm registration — same shape as baselined gpu_pipeline::parse_binding_group"
+    // qual:allow(iosp) reason: "match binder coupling scrutinee-shape checks with arm registration — same shape as baselined `smart_system` binding-group parsing"
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
         // `match u.field { Some(t) => … }`: every arm pattern binds links.
         if mentions_entity_member(&node.expr, &self.u, &self.links)
@@ -90,7 +90,7 @@ impl<'ast> Visit<'ast> for BodyInfo {
         syn::visit::visit_expr_match(self, node);
     }
 
-    // qual:allow(iosp) reason: "ban diagnostics coupling whole-arg scans with error emission — same shape as baselined gpu_pipeline::parse_binding_base_ty"
+    // qual:allow(iosp) reason: "ban diagnostics coupling whole-arg scans with error emission — same shape as baselined `smart_system` binding-group parsing"
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
         match node {
             Expr::Call(call) => {

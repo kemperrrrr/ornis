@@ -10,6 +10,13 @@ description = "Stable no_std shader SDK for the llvm2gpu path"
 [dependencies]
 ornis-gpu-shader-macros = { path = "../gpu-shader-macros", version = "0.1.0" }
 
+# The host build of a shader crate is the reference implementation the GPU
+# parity gates compare against, so its scalar math has to return real values
+# instead of panicking. `libm` is `no_std`, so it costs nothing on `wasm32`,
+# where these arms do not exist at all.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libm = "0.2"
+
 [lints]
 workspace = true
 

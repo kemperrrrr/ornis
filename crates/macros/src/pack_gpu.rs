@@ -1,8 +1,8 @@
 //! `#[pack(gpu)]` half of `#[derive(Pack)]`: SoA columns as storage lanes.
 //!
 //! The derive sees the struct definition, so it can describe each field
-//! column for the GPU without the caller re-declaring it in
-//! `#[gpu_pipeline]`: [`ornis_core::PackGpu`] impl emitting one
+//! column for the GPU without the caller re-declaring it: an
+//! [`ornis_core::PackGpu`] impl emitting one
 //! [`ornis_core::PackGpuLane`] per field (declaration order) plus the
 //! aligned serializer [`ornis_core::PackGpu::pack_gpu_upload`].
 //!
@@ -20,11 +20,11 @@
 //! `ornis_core::GpuBool` as a mirror).
 //!
 //! A field name becomes the lane's WGSL variable name, so spellings the
-//! WGSL grammar reserves (`ornis_shader_lang::WGSL_RESERVED_WORDS` —
+//! WGSL grammar reserves (`crate::words::WGSL_RESERVED_WORDS` —
 //! `ref`, `type`, `loop`, …) or the `__` identifier prefix are rejected
 //! here, on the field's span.
 
-use ornis_shader_lang::WGSL_RESERVED_WORDS;
+use crate::words::WGSL_RESERVED_WORDS;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;

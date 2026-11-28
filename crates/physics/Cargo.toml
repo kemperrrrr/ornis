@@ -10,6 +10,11 @@ description = "Sequential-impulse rigid-body physics: dynamics, collision detect
 [dependencies]
 glam = "0.34"
 ornis-assets = { path = "../assets", version = "0.1.0" }
+ornis-gpu-abi = { path = "../gpu-abi", version = "0.1.0" }
+# The wide/scalar solvers call the same isotropic contact row the GPU kernel
+# (`cs_main_contact`) is translated from, so the row cannot live on the CPU
+# side: one arithmetic, two consumers (`ornis_gpu_si::row`).
+ornis-gpu-si = { path = "../gpu-si", version = "0.1.0" }
 ornis-core = { path = "../core", version = "0.1.0" }
 rayon = "1.12"
 dashmap = "6"
@@ -50,6 +55,14 @@ harness = false
 [[bench]]
 name = "query_bench"
 harness = false
+
+# Trajectory + timing report for the GPU SI solver. Needs an adapter, so the
+# target only builds on the `gpu` feature (CI's bench-compile stage runs it
+# with `--features gpu`).
+[[bench]]
+name = "gpu_si_trajectory"
+harness = false
+required-features = ["gpu"]
 
 [lints]
 workspace = true

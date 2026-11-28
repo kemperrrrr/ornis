@@ -5,7 +5,6 @@
 //! [`math`](crate::shaders::math)) into a fixed entry-point skeleton, so CPU tests exercise the
 //! exact BRDF code the GPU runs.
 
-mod aa_common;
 pub mod aa_edge_generated;
 pub mod aa_taa_generated;
 pub mod ao_generated;
@@ -15,13 +14,12 @@ pub mod fog_generated;
 pub mod gbuffer_generated;
 pub mod hdr_composite_generated;
 pub mod helpers;
-pub mod interface;
 pub mod lighting_generated;
 pub mod material_textures;
 pub mod math;
-pub mod naga_ir;
 pub mod outline_generated;
 pub mod pbr_generated;
+pub mod quad_vertex_generated;
 
 /// Splice a derived [`WgslStruct`](ornis_macros::WgslStruct) declaration into
 /// assembled WGSL, terminated the way the former handwritten references
@@ -31,6 +29,11 @@ pub mod pbr_generated;
 /// replaces used `};`, so the terminator keeps assembled modules
 /// shaped like the former handwritten sources (pinned by the
 /// `*_matches_legacy_shape` tests).
+///
+/// Test-only: the last production splicer was the quad vertex stage, and that
+/// is a translated artifact now. The cluster-pass oracle still assembles its
+/// WGSL from the derives.
+#[cfg(test)]
 pub(crate) fn wgsl_decl(source: &'static str) -> String {
     format!("{};\n", source.trim_end())
 }
@@ -101,31 +104,14 @@ impl ResourceKind {
     }
 
     /// Multisampled WGSL type spelling of a texture resource (the AO raw
-    /// pass keeps its normal per-sample too, so it selects this spelling
-    /// with its own predicate via [`resource_decl_where`]).
+    /// pass keeps its normal per-sample too, so a pass that selects this
+    /// spelling does so through its own resource table).
     pub fn wgsl_ty_multisampled(&self) -> String {
         match self {
             Self::TextureFloat => "texture_multisampled_2d<f32>".to_string(),
             Self::TextureUint => "texture_multisampled_2d<u32>".to_string(),
             Self::TextureDepth => "texture_depth_multisampled_2d".to_string(),
             _ => self.wgsl_ty_full(),
-        }
-    }
-
-    /// `var<…>` address-space prefix, or `var` for textures/samplers.
-    fn wgsl_var(&self) -> &'static str {
-        match self {
-            Self::Uniform(_) => "var<uniform>",
-            Self::StorageRead(_) | Self::StorageReadArray(_) => "var<storage, read>",
-            Self::StorageRw(_) => "var<storage, read_write>",
-            Self::TextureFloat
-            | Self::TextureUint
-            | Self::TextureDepth
-            | Self::TextureDepthArray
-            | Self::TextureDepthCubeArray
-            | Self::TextureCube
-            | Self::Sampler
-            | Self::SamplerComparison => "var",
         }
     }
 
@@ -191,9 +177,9 @@ impl ResourceKind {
 }
 
 /// One pass resource: where it binds, when it is visible, under what WGSL
-/// name. A pass's `*_RESOURCES` table is the single source of truth for
-/// both the WGSL declaration ([`resource_decl`]) and the `wgpu` layout
-/// entry ([`bgl_entry`]) — the numbers cannot drift between shader and
+/// name. A pass's `*_RESOURCES` table is the single source of truth for the
+/// `wgpu` layout entry ([`bgl_entry`]) and for the artifact tests that parse
+/// the checked-in WGSL back — the numbers cannot drift between shader and
 /// pipeline layout.
 #[derive(Debug, Clone, Copy)]
 pub struct Resource {
@@ -213,24 +199,12 @@ pub struct Resource {
     pub min_size: Option<u64>,
 }
 
-/// WGSL declaration lines for a subset of a [`Resource`] table (one
-/// shader stage): `bindings` lists the `@binding` indices that stage
-/// declares, in order.
-pub fn resource_decls(table: &[Resource], bindings: &[u32]) -> String {
-    let mut out = String::new();
-    for b in bindings {
-        let Some(r) = table.iter().find(|r| r.binding == *b) else {
-            continue;
-        };
-        out.push_str(&resource_decl(r));
-    }
-    out
-}
-
 /// WGSL-valid rendering of an `f32` value: Rust `{}` prints the shortest
 /// round-tripping decimal, plus the `.0` fix for whole values (mirrors
 /// the lowering's `float_lit` for literal tokens). Non-finite values
 /// have no WGSL spelling — loud in debug, clamped caller's problem.
+/// Test-only: the last production `const` block went with the DSL.
+#[cfg(test)]
 pub(crate) fn f32_lit(v: f32) -> String {
     debug_assert!(v.is_finite(), "non-finite f32 has no WGSL spelling");
     let base = format!("{v}");
@@ -240,11 +214,6 @@ pub(crate) fn f32_lit(v: f32) -> String {
         format!("{base}.0")
     }
 }
-/// WGSL declaration line for one [`Resource`].
-pub fn resource_decl(r: &Resource) -> String {
-    resource_decl_for_samples(r, 1)
-}
-
 /// Whether a resource bound to an MSAA target keeps multisampled storage
 /// instead of resolving into a single-sample texture upstream.
 ///
@@ -257,43 +226,6 @@ pub fn resource_decl(r: &Resource) -> String {
 /// never runs MSAA).
 pub fn resource_stays_multisampled(kind: &ResourceKind) -> bool {
     matches!(kind, ResourceKind::TextureDepth | ResourceKind::TextureUint)
-}
-
-/// WGSL declaration line for one [`Resource`] at a sample count: identical to
-/// [`resource_decl`] at 1x; in MSAA mode depth/integer layers spell the
-/// multisampled texture types (see [`resource_stays_multisampled`]).
-pub fn resource_decl_for_samples(r: &Resource, sample_count: u32) -> String {
-    resource_decl_with_ty(r, &r.kind.wgsl_ty_for_samples(sample_count))
-}
-
-/// WGSL declaration line for one [`Resource`] with an explicit
-/// multisampled decision: passes that keep extra layers per-sample (the AO
-/// raw pass keeps its normal, like lighting) select the multisampled
-/// spelling with their own predicate instead of
-/// [`resource_stays_multisampled`].
-pub fn resource_decl_where(r: &Resource, multisampled: bool) -> String {
-    resource_decl_with_ty(r, &selected_wgsl_ty(r, multisampled))
-}
-
-/// Multisampled or single-sample WGSL type for `r`, chosen by the caller.
-fn selected_wgsl_ty(r: &Resource, multisampled: bool) -> String {
-    if multisampled {
-        r.kind.wgsl_ty_multisampled()
-    } else {
-        r.kind.wgsl_ty_full()
-    }
-}
-
-/// One `@group`/`@binding` line spelling `ty` for `r`.
-fn resource_decl_with_ty(r: &Resource, ty: &str) -> String {
-    format!(
-        "@group({}) @binding({}) {} {}: {};\n",
-        r.group,
-        r.binding,
-        r.kind.wgsl_var(),
-        r.name,
-        ty,
-    )
 }
 
 /// Runtime bind-group entries from a [`Resource`] table: binding numbers
@@ -316,145 +248,6 @@ pub fn bind_group_entries<'a>(
             })
         })
         .collect()
-}
-
-/// Ordered shader-module assembly: call sites declare WHAT goes in,
-/// [`emit`](ShaderModule::emit) owns section order and separators.
-/// WGSL needs decl-before-use; the former per-site `format!` skeletons
-/// encoded that order by hand (and could drift) — here the order
-/// (types → resources → consts → helpers → entries) is fixed once.
-/// Pieces are taken verbatim except edge-newline normalization (leading
-/// and trailing `\n` trimmed, sections joined with single `\n`): WGSL is
-/// whitespace-insensitive, and naga plus the pixel probes pin the result.
-pub struct ShaderModule {
-    decls: Vec<String>,
-    resources: Vec<String>,
-    consts: Vec<String>,
-    helpers: Vec<String>,
-    entries: Vec<String>,
-}
-
-impl ShaderModule {
-    /// Empty assembly.
-    pub fn new() -> Self {
-        Self {
-            decls: Vec::new(),
-            resources: Vec::new(),
-            consts: Vec::new(),
-            helpers: Vec::new(),
-            entries: Vec::new(),
-        }
-    }
-
-    /// One type/varying declaration block (derived `WGSL_SOURCE`,
-    /// `wgsl_decl`-wrapped or raw).
-    pub fn decl(mut self, src: impl Into<String>) -> Self {
-        self.decls.push(src.into());
-        self
-    }
-
-    /// Resource declarations from a [`Resource`] table subset (same rows
-    /// the pass layout builds its BGL from).
-    pub fn resources(mut self, table: &[Resource], bindings: &[u32]) -> Self {
-        self.resources.push(resource_decls(table, bindings));
-        self
-    }
-
-    /// Resource declarations from a [`Resource`] table subset at a sample
-    /// count: MSAA-aware spellings (see [`resource_decl_for_samples`]).
-    /// Identical to [`resources`](Self::resources) at 1x.
-    pub fn resources_for_samples(
-        mut self,
-        table: &[Resource],
-        bindings: &[u32],
-        sample_count: u32,
-    ) -> Self {
-        self = self.resources_where(table, bindings, |r| {
-            sample_count > 1 && resource_stays_multisampled(&r.kind)
-        });
-        self
-    }
-
-    /// Resource declarations from a [`Resource`] table subset with a
-    /// caller-provided multisampled decision per row (see
-    /// [`resource_decl_where`]): passes that keep extra layers per-sample
-    /// (the AO raw pass keeps its normal) spell those rows multisampled.
-    pub fn resources_where(
-        mut self,
-        table: &[Resource],
-        bindings: &[u32],
-        multisampled: impl Fn(&Resource) -> bool,
-    ) -> Self {
-        let mut out = String::new();
-        for b in bindings {
-            let Some(r) = table.iter().find(|r| r.binding == *b) else {
-                continue;
-            };
-            out.push_str(&resource_decl_where(r, multisampled(r)));
-        }
-        self.resources.push(out);
-        self
-    }
-
-    /// One `const` block (quad corners/UVs from Rust data, via IR).
-    pub fn consts(mut self, src: impl Into<String>) -> Self {
-        self.consts.push(src.into());
-        self
-    }
-
-    /// One helper/kernel function source.
-    pub fn helper(mut self, src: impl Into<String>) -> Self {
-        self.helpers.push(src.into());
-        self
-    }
-
-    /// Several helper/kernel sources at once.
-    pub fn helpers<I, S>(mut self, srcs: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.helpers.extend(srcs.into_iter().map(Into::into));
-        self
-    }
-
-    /// One entry point (translated body). A module normally carries one;
-    /// several are allowed where the legacy assembly did.
-    pub fn entry(mut self, src: impl Into<String>) -> Self {
-        self.entries.push(src.into());
-        self
-    }
-
-    /// Render the module: sections in fixed order, normalized whitespace.
-    pub fn emit(self) -> String {
-        let mut pieces: Vec<String> = Vec::new();
-        for section in [
-            self.decls,
-            self.resources,
-            self.consts,
-            self.helpers,
-            self.entries,
-        ] {
-            for piece in section {
-                let trimmed = piece.trim_matches('\n');
-                if !trimmed.is_empty() {
-                    pieces.push(trimmed.to_string());
-                }
-            }
-        }
-        let mut out = String::from("\n");
-        if !pieces.is_empty() {
-            out.push_str(&pieces.join("\n"));
-            out.push('\n');
-        }
-        out
-    }
-}
-
-impl Default for ShaderModule {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// `wgpu` bind-group-layout entry for one [`Resource`]; `multisampled`
@@ -500,6 +293,11 @@ pub fn bgl_entry_for_samples(r: &Resource, sample_count: u32) -> wgpu::BindGroup
 
 /// Fullscreen-quad corners shared by the bloom/hdr/lighting passes
 /// (triangle strip order), as Rust data.
+///
+/// Test-only: the corners are a literal of the translated
+/// [`quad_vertex_generated`] entry now, and this table is what
+/// `the_artifact_spells_the_shared_table` checks that literal against.
+#[cfg(test)]
 pub(crate) const STANDARD_QUAD: [[f32; 4]; 4] = [
     [-1.0, -1.0, 0.0, 1.0],
     [1.0, -1.0, 0.0, 1.0],
@@ -508,118 +306,36 @@ pub(crate) const STANDARD_QUAD: [[f32; 4]; 4] = [
 ];
 
 /// Fullscreen-quad UVs shared by the bloom/hdr/lighting passes, as Rust data.
+///
+/// Test-only, for the same reason as [`STANDARD_QUAD`].
+#[cfg(test)]
 pub(crate) const STANDARD_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]];
 
-/// DSL-only GPU handle markers: nominal field types for stage-entry context
-/// bundles (`ctx: LightingContext`). The Rust functions are never compiled,
-/// so these are never instantiated — they exist so context structs are real,
-/// name-resolving Rust items whose fields document the WGSL global each maps
-/// to (field name === global name, enforced by `stage_globals_declared`).
-/// No constructors, no methods, no runtime footprint.
-pub struct Texture2d;
-/// 2D unsigned-int texture handle marker; see [`Texture2d`].
-pub struct Texture2dUint;
-/// Depth-texture handle marker; see [`Texture2d`].
-pub struct DepthTexture;
-/// Depth-texture-array handle marker (shadow-map layers); see [`Texture2d`].
-pub struct DepthTextureArray;
-/// Depth-cube-array handle marker (point-light shadow cubes); see [`Texture2d`].
-pub struct DepthTextureCubeArray;
-/// Color cube-texture handle marker (IBL prefilter / irradiance); see [`Texture2d`].
-pub struct TextureCube;
-/// Sampler handle marker; see [`Texture2d`].
-pub struct Sampler;
-/// Comparison-sampler handle marker (shadow PCF); see [`Texture2d`].
-pub struct ComparisonSampler;
-
-/// Builtin index newtypes: a bare `u32` cannot say *which* index it is
-/// (`vertex_index`, `instance_index`, `@location(0)` and a plain local are
-/// all `u32`), so the meaning travels in the type. `#[stage]` maps
-/// `VertexIndex` → `@builtin(vertex_index) …: u32` (and likewise for
-/// `InstanceIndex`) with no attribute — one source of truth. Newtypes live
-/// in signature position only; bodies use the bare ident (no `.0` tax).
-pub struct VertexIndex(pub u32);
-/// Per-instance index newtype; see [`VertexIndex`].
-pub struct InstanceIndex(pub u32);
-
-/// Context-bundle wrapper: `ctx: Context<LightingContext>` marks the
-/// parameter as a resource bundle (excluded from the WGSL signature;
-/// `ctx.field` lowers to the global `field`), while a bare struct param
-/// (`input: VertexInput`) stays a real WGSL function parameter. The two
-/// spellings are syntactically identical otherwise, so the wrapper — not
-/// an attribute — carries the one disambiguating bit, and signatures stay
-/// attribute-free pure Rust. Never instantiated; see the `Texture2d`
-/// markers.
-pub struct Context<T>(T);
-
-/// Located-value return: `-> Location<0, glam::Vec4>` lowers to
-/// `-> @location(0) vec4<f32>`. A bare Rust return type cannot spell a
-/// WGSL location attribute, and the old `returns = "@location(0) …"`
-/// string embedded WGSL syntax in the signature — the wrapper keeps both
-/// the location number and a real, rustc-checked inner type. Never
-/// instantiated; combining it with an explicit `returns = "…"` is an
-/// error (two sources of truth).
-pub struct Location<const N: usize, T>(T, core::marker::PhantomData<[u8; N]>);
-
-/// Quad constants as a stage-entry context bundle: the fullscreen-vertex
-/// entries share it (`consts: QuadConsts`, `consts.quad[idx]`). A second
-/// `Context<T>` parameter needs no new macro machinery — bundle detection
-/// is generic over the wrapper — it just names the group. Field names
-/// match the WGSL `const` names exactly; the `#[stage]` `context`
-/// lowering strips the `consts.` prefix, no renaming involved.
-#[allow(dead_code)]
-#[derive(ornis_macros::ShaderContext)]
-pub(crate) struct QuadConsts {
-    pub quad: [[f32; 4]; 4],
-    pub uvs: [[f32; 2]; 4],
+/// Stage of `name` in a translated module, for the per-pass artifact tests.
+#[cfg(test)]
+pub(crate) fn entry_stage(module: &naga::Module, name: &str) -> Option<naga::ShaderStage> {
+    module
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.stage)
 }
 
-/// Shared `OpenPBRMaterial` WGSL declaration (20 `vec4` slots), used by the
-/// g-buffer, lighting and forward-PBR skeletons.
-///
-/// Generated from [`OPENPBR_SLOTS`]: the CPU-side
-/// [`OpenPBRMaterial`](ornis_core::material::OpenPBRMaterial) is grouped
-/// (`BaseGroup`, `SpecularGroup`, …), not flat, so there is no 1:1 field
-/// mirror to derive from — the slot-name list is the single source of truth
-/// for the WGSL side. The `openpbr_rust_layout_matches_wgsl_order` test
-/// below pins the group offsets against this slot order instead.
-/// Leading/trailing newlines are part of the legacy assembly contract.
-pub(crate) fn openpbr_material_decl() -> String {
-    let mut out = String::from("\nstruct OpenPBRMaterial {\n");
-    for slot in OPENPBR_SLOTS {
-        out.push_str(&format!("    {slot}: vec4<f32>,\n"));
-    }
-    out.push_str("};\n");
-    out
+/// `(group, binding)` pairs a module declares, for artifact versus table checks.
+#[cfg(test)]
+pub(crate) fn declared_bindings(module: &naga::Module) -> Vec<(u32, u32)> {
+    module
+        .global_variables
+        .iter()
+        .filter_map(|(_, global)| global.binding)
+        .map(|binding| (binding.group, binding.binding))
+        .collect()
 }
 
 /// The WGSL type name of the shared material declaration (no derive:
-/// the CPU side is grouped, so the name lives next to the slot list).
+/// the CPU side is grouped, so the name lives here and the layout is
+/// asserted against the artifact).
 pub(crate) const OPENPBR_WGSL_NAME: &str = "OpenPBRMaterial";
-
-/// The 20 `vec4` slots of `OpenPBRMaterial`, in declaration order.
-pub(crate) const OPENPBR_SLOTS: [&str; 20] = [
-    "base_params",
-    "base_color",
-    "specular_params",
-    "specular_color",
-    "transmission_params",
-    "transmission_color",
-    "transmission_scatter",
-    "subsurface_params",
-    "subsurface_color",
-    "subsurface_radius_scale_gb",
-    "fuzz_params",
-    "fuzz_color",
-    "coat_params",
-    "coat_color",
-    "coat_ior",
-    "thin_film_params",
-    "emission_params",
-    "emission_color",
-    "geometry_params",
-    "geometry_params2",
-];
 
 // ── COMPOSITE_VERTEX ────────────────────────────────────────────────
 
@@ -722,12 +438,16 @@ pub fn outline_fragment() -> String {
 
 // ── GBUFFER_VERTEX ────────────────────────────────────────────────────
 
-/// Assemble the gbuffer vertex shader (instance transforms + world position).
+/// The g-buffer module, both pipelines draw from it.
 ///
-/// Single source of truth — [`gbuffer_generated::wgsl_vertex_source`]
-/// (Rust → WGSL, path 2); shape pinned by `gbuffer_vertex_entry_matches_legacy_shape`.
+/// Single source of truth — [`gbuffer_generated::wgsl_source`] (Rust → WGSL,
+/// path 2). It carries every entry of the pass: the direct and the indirect
+/// vertex stage and the fragment stage. A pipeline layout only has to cover the
+/// bindings the entry point it names actually uses, so one module serves all
+/// three. The forward-PBR pass shares the narrower
+/// [`gbuffer_generated::wgsl_vertex_source`] instead.
 pub fn gbuffer_vertex() -> String {
-    gbuffer_generated::wgsl_vertex_source()
+    gbuffer_generated::wgsl_source()
 }
 
 // ── GBUFFER_FRAGMENT ──────────────────────────────────────────────────
@@ -788,651 +508,119 @@ pub fn octahedral_decode_rust(p: glam::Vec2) -> glam::Vec3 {
 mod tests {
     use super::*;
 
-    /// Extract `(Type, [field names])` markers from `Type(args) /* f1, f2 */`
-    /// constructor comments emitted by struct-literal translation.
-    fn extract_ctors(src: &str) -> Vec<(String, Vec<String>)> {
-        let mut out = Vec::new();
-        let mut rest = src;
-        while let Some(cstart) = rest.find("/* ") {
-            let before = rest[..cstart].trim_end();
-            let Some(cend) = rest[cstart..].find("*/") else {
-                break;
-            };
-            let names: Vec<String> = rest[cstart + 3..cstart + cend]
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
-            // Walk back balanced parens from the ')' ending `before` to the
-            // constructor's opening paren; the identifier before it is the type.
-            if before.ends_with(')') {
-                let mut depth = 0u32;
-                let mut open = None;
-                for (i, ch) in before.char_indices().rev() {
-                    match ch {
-                        ')' => depth += 1,
-                        '(' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                open = Some(i);
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if let Some(i) = open {
-                    let ident: String = before[..i]
-                        .chars()
-                        .rev()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect::<String>()
-                        .chars()
-                        .rev()
-                        .collect();
-                    if !ident.is_empty() {
-                        out.push((ident, names));
-                    }
-                }
-            }
-            rest = &rest[cstart + cend + 2..];
-        }
-        out
-    }
-
-    /// Stage-entry struct literals are positional constructors: the emitted
-    /// `/* names */` comment must list the mirror's fields in `WGSL_FIELDS`
-    /// order. A wrong order would still parse and could pass pixels by
-    /// accident — this test pins the contract instead.
+    /// Every entry name the renderer asks a pipeline for must exist in the
+    /// artifact that pipeline is built from, at the stage the pass binds it.
+    /// The name alone is not the contract — a typo'd or renamed entry fails at
+    /// pipeline creation, on the GPU, at runtime — so each one is parsed out of
+    /// the checked-in WGSL and matched per module.
+    ///
+    /// A pass may bind two modules (the shared quad vertex stage plus its own
+    /// fragment), which is why the table is per module rather than per pass.
     #[test]
-    fn interface_field_order() {
-        use super::interface::{
-            BloomVertexOut, GbufferVertexOutput, HdrFragmentOut, HdrVertexOutput, UiCompositeOut,
-        };
-        let mirrors: &[(&str, &[&str])] = &[
-            (HdrVertexOutput::WGSL_NAME, HdrVertexOutput::WGSL_FIELDS),
-            (HdrFragmentOut::WGSL_NAME, HdrFragmentOut::WGSL_FIELDS),
-            (BloomVertexOut::WGSL_NAME, BloomVertexOut::WGSL_FIELDS),
-            (UiCompositeOut::WGSL_NAME, UiCompositeOut::WGSL_FIELDS),
-            (
-                GbufferVertexOutput::WGSL_NAME,
-                GbufferVertexOutput::WGSL_FIELDS,
-            ),
-        ];
-        let entries: &[String] = &[
-            hdr_composite_generated::vs_main::wgsl_source().to_string(),
-            bloom_generated::vs_main::wgsl_source().to_string(),
-            lighting_generated::vs_main::wgsl_source().to_string(),
-            composite_generated::vs_main::wgsl_source().to_string(),
-            gbuffer_generated::vs_main::wgsl_source().to_string(),
-        ];
-        let mut checked = 0;
-        for src in entries {
-            for (ty, names) in extract_ctors(src) {
-                let fields = mirrors
-                    .iter()
-                    .find(|(n, _)| *n == ty)
-                    .unwrap_or_else(|| panic!("constructor {ty} has no registered mirror"));
-                assert_eq!(
-                    names, fields.1,
-                    "struct literal {ty} lists fields out of mirror order"
-                );
-                checked += 1;
-            }
-        }
-        // Three vertex entries construct varyings positionally today (the
-        // rest use the `var`-out form); zero hits would mean the comments
-        // vanished and the test passes vacuously.
-        assert!(checked >= 3, "expected struct literals, found {checked}");
-    }
+    fn entry_points_match_pass_abi() {
+        use naga::ShaderStage::{Fragment, Vertex};
 
-    /// Every context-bundle / `#[wgsl(global)]` name an entry reads must
-    /// exist in the assembled shader it splices into. Bundle structs (via
-    /// `#[derive(ShaderContext)]`) are the single source: adding a field
-    /// without wiring the global fails here. Catches a typo'd name (the
-    /// entry still parses, naga only fails if the name is *used*
-    /// undeclared — an unused declaration would pass silently).
-    #[test]
-    fn stage_globals_declared() {
-        let hdr_vertex = hdr_composite_generated::wgsl_vertex_source();
-        let hdr_fragment = hdr_composite_generated::wgsl_source();
-        let bloom = bloom_generated::wgsl_source();
-        let lighting = lighting_generated::wgsl_source();
-        let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let composite = composite_generated::wgsl_source();
-        let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
-        let gbuffer_fragment = gbuffer_generated::wgsl_source();
-        let pbr = pbr_generated::wgsl_source();
-        let textured = material_textures::wgsl_source_textured();
-        // (bundle/entry globals, assemblies containing them). QuadConsts is
-        // shared by five vertex entries, so it pins against all five
-        // assemblies carrying the quad constants.
-        let pairs: &[(&[&str], Vec<String>)] = &[
+        /// One entry a pass asks for, and the stage it binds it at.
+        type Entry = (&'static str, naga::ShaderStage);
+        /// An artifact, and every entry a pass asks that artifact for.
+        type Module = (&'static str, String, &'static [Entry]);
+
+        let modules: [Module; 8] = [
             (
-                QuadConsts::GLOBALS,
-                vec![
-                    hdr_vertex.clone(),
-                    hdr_fragment.clone(),
-                    bloom.clone(),
-                    lighting_vertex.clone(),
-                    composite.clone(),
+                "hdr_composite",
+                hdr_composite_generated::wgsl_source(),
+                &[
+                    (hdr_composite_generated::VS_ENTRY, Vertex),
+                    (hdr_composite_generated::FS_ENTRY, Fragment),
                 ],
             ),
             (
-                hdr_composite_generated::HdrContext::GLOBALS,
-                vec![hdr_fragment],
-            ),
-            (bloom_generated::BloomContext::GLOBALS, vec![bloom]),
-            (
-                lighting_generated::LightingContext::GLOBALS,
-                vec![lighting.clone()],
-            ),
-            (lighting_generated::LightingMaps::GLOBALS, vec![lighting]),
-            (
-                composite_generated::CompositeContext::GLOBALS,
-                vec![composite],
+                "bloom",
+                bloom_generated::wgsl_source(),
+                &[
+                    (bloom_generated::VS_ENTRY, Vertex),
+                    (bloom_generated::FS_ENTRY, Fragment),
+                ],
             ),
             (
-                gbuffer_generated::GbufferVertexContext::GLOBALS,
-                vec![gbuffer_vertex],
+                "composite",
+                composite_generated::wgsl_source(),
+                &[
+                    (composite_generated::VS_ENTRY, Vertex),
+                    (composite_generated::FS_ENTRY, Fragment),
+                ],
             ),
             (
-                gbuffer_generated::fs_main::globals(),
-                vec![gbuffer_fragment],
+                "gbuffer",
+                gbuffer_generated::wgsl_source(),
+                &[
+                    (gbuffer_generated::VS_ENTRY, Vertex),
+                    (gbuffer_generated::VS_INDIRECT_ENTRY, Vertex),
+                    (gbuffer_generated::FS_ENTRY, Fragment),
+                ],
             ),
-            (pbr_generated::PbrContext::GLOBALS, vec![pbr]),
             (
-                material_textures::PbrTexturedContext::GLOBALS,
-                vec![textured.clone()],
+                "pbr",
+                pbr_generated::wgsl_source(),
+                &[(pbr_generated::FS_ENTRY, Fragment)],
+            ),
+            (
+                "lighting 1x",
+                lighting_generated::wgsl_source_for_samples(1),
+                &[(lighting_generated::LIGHTING_1X_ENTRY, Fragment)],
+            ),
+            (
+                "lighting 4x",
+                lighting_generated::wgsl_source_for_samples(4),
+                &[(lighting_generated::LIGHTING_MSAA_ENTRY, Fragment)],
+            ),
+            (
+                "quad vertex",
+                quad_vertex_generated::wgsl_vertex_source(),
+                &[(quad_vertex_generated::VS_ENTRY, Vertex)],
             ),
         ];
         let mut checked = 0;
-        for (globals, assemblies) in pairs {
-            assert!(!globals.is_empty(), "bundle must declare its globals");
-            for global in *globals {
-                assert!(
-                    assemblies.iter().any(|src| src.contains(global)),
-                    "global `{global}` declared by a bundle is missing from its assembled shader"
+        for (label, src, entries) in &modules {
+            let module = naga::front::wgsl::parse_str(src)
+                .unwrap_or_else(|e| panic!("{label} artifact must parse: {e}"));
+            for (name, stage) in *entries {
+                assert_eq!(
+                    entry_stage(&module, name),
+                    Some(*stage),
+                    "{label} artifact has no {stage:?} entry `{name}`"
                 );
                 checked += 1;
             }
         }
-        // Nine bundles plus one lone `global` param declare 30+ names today;
-        // fewer means a declaration was dropped and the test passes vacuously.
-        assert!(
-            checked >= 30,
-            "expected global declarations, found {checked}"
+        assert_eq!(checked, 13, "expected 13 entries, checked {checked}");
+
+        // The names are also the external ABI (pipeline caches and frame
+        // snapshots key on them), so the plain-stage ones are pinned literally;
+        // the artifact check above would follow any rename.
+        assert_eq!(hdr_composite_generated::VS_ENTRY, "vs_main");
+        assert_eq!(bloom_generated::VS_ENTRY, "vs_main");
+        assert_eq!(composite_generated::VS_ENTRY, "vs_main");
+        assert_eq!(gbuffer_generated::VS_ENTRY, "vs_main");
+        assert_eq!(gbuffer_generated::VS_INDIRECT_ENTRY, "vs_main_indirect");
+        assert_eq!(pbr_generated::FS_ENTRY, "fs_main");
+        assert_eq!(lighting_generated::LIGHTING_1X_ENTRY, "fs_main_lighting");
+
+        // And the shared quad stage is deliberately not `vs_main`: a pass that
+        // keeps its own `vs_main` depends on `ornis-gpu-quad`, so the two
+        // entries would collide in that crate's build. The two passes that
+        // draw it therefore ask for the same name.
+        assert_eq!(quad_vertex_generated::VS_ENTRY, "vs_main_quad");
+        assert_eq!(
+            lighting_generated::VS_ENTRY,
+            quad_vertex_generated::VS_ENTRY
         );
-    }
-
-    /// Entry-point ABI is pinned per pass: each generated `entry_point()`
-    /// must be exactly the pipeline-convention name for its pass. A set
-    /// cannot catch distribution drift (one entry renamed, another taking
-    /// its place), so every entry is asserted individually. The renderer
-    /// and `composite.rs` request entries through these same accessors —
-    /// the names below are the external ABI (pipeline caches, snapshots).
-    #[test]
-    fn entry_points_match_pass_abi() {
-        assert_eq!(hdr_composite_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(hdr_composite_generated::fs_main::entry_point(), "fs_main");
-        assert_eq!(bloom_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(bloom_generated::fs_main::entry_point(), "fs_main");
-        assert_eq!(lighting_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(lighting_generated::fs_main::entry_point(), "fs_main");
-        assert_eq!(composite_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(composite_generated::fs_main::entry_point(), "fs_main");
-        assert_eq!(gbuffer_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(gbuffer_generated::fs_main::entry_point(), "fs_main");
-        assert_eq!(pbr_generated::fs_main::entry_point(), "fs_main");
-    }
-
-    /// `true` when `field` is a vector swizzle (`xyzw` / `rgba`), not a member.
-    fn is_field_swizzle(field: &str) -> bool {
-        field.len() <= 4 && field.chars().all(|c| "xyzwrgba".contains(c))
-    }
-
-    /// Longest known root ending exactly at `before` (identifier boundary
-    /// on the left). A glued suffix (`lightingcsm`) is not that root.
-    fn longest_field_root<'a>(
-        before: &str,
-        roots: &[(&'a str, &'a [&'a str])],
-    ) -> Option<(&'a str, &'a [&'a str])> {
-        {
-            let mut hit: Option<(&str, &[&str])> = None;
-            for (key, fields) in roots {
-                let Some(prefix) = before.strip_suffix(key) else {
-                    continue;
-                };
-                if prefix
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
-                {
-                    continue;
-                }
-                if hit.is_none_or(|(prev, _)| key.len() > prev.len()) {
-                    hit = Some((*key, *fields));
-                }
-            }
-            hit
-        }
-    }
-
-    /// Step one `.` in `rest`. The bool is `true` when the dot was a
-    /// resolved field use (swizzles, unglued dots and numeric roots are
-    /// skipped). Panics with the entry index on a typo'd root or member.
-    fn resolve_next_field<'a>(
-        rest: &'a str,
-        roots: &[(&str, &[&str])],
-        entry_n: usize,
-    ) -> (&'a str, bool) {
-        {
-            let dot = rest.find('.').expect("caller checks for a dot");
-            let before = &rest[..dot];
-            let after = &rest[dot + 1..];
-            let field: String = after
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if field.is_empty() || is_field_swizzle(&field) {
-                return (after, false);
-            }
-            let Some((root, fields)) = longest_field_root(before, roots) else {
-                // A dot that follows `]`/`)`/whitespace never opens a
-                // field use (`arr[i].xyz` reports through its swizzle).
-                // Float literals (`0.0`) look like `root.field` to the
-                // scanner; numeric roots are never field uses.
-                let glued = before
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
-                if !glued {
-                    return (after, false);
-                }
-                let numeric = before
-                    .chars()
-                    .rev()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .any(|c| c.is_ascii_digit());
-                if numeric {
-                    return (after, false);
-                }
-                panic!("entry {entry_n}: unresolved root for `{field}`");
-            };
-            assert!(
-                fields.contains(&field.as_str()),
-                "entry {entry_n}: `{root}` has no field `{field}`"
-            );
-            (after, true)
-        }
-    }
-
-    /// Every non-swizzle `root.field` use in translated entries resolves
-    /// against a real definition: `camera`/`lighting`/`bloom_params`
-    /// against their buffer layouts (`FIELD_NAMES`), `mat` against
-    /// `OPENPBR_SLOTS`, `obj` against `PerObjectGpu`, `input`/`output`
-    /// against the pass mirrors (`WGSL_FIELDS`, per entry below).
-    /// Anything else dotted is either a vector swizzle (x/y/z/w/r/g/b/a
-    /// combos, skipped by pattern) or a hard error: an unresolved root is
-    /// a free identifier past the bundles or a typo'd root, and a missing
-    /// field is a typo'd member. This is the field-resolution slice of
-    /// "valid Rust": no mocks, no second lowering — the oracles are the
-    /// real definitions, the text is the real output.
-    #[test]
-    fn stage_field_uses_resolve() {
-        use super::interface::{
-            BloomVertexOut, GbufferFragmentInput, GbufferOutput, GbufferVertexInput,
-            GbufferVertexOutput, HdrFragmentOut, UiCompositeOut,
-        };
-        use crate::renderer::{
-            BloomUniform, CameraUniform, CsmBlock, GpuLight, LightingUniform, PerObjectGpu,
-        };
-
-        // (translated entry source, input mirror fields, output mirror fields)
-        struct Entry {
-            src: &'static str,
-            input: Option<&'static [&'static str]>,
-            output: Option<&'static [&'static str]>,
-        }
-        let entries = [
-            Entry {
-                src: composite_generated::vs_main::wgsl_source(),
-                input: None,
-                output: Some(UiCompositeOut::WGSL_FIELDS),
-            },
-            Entry {
-                src: composite_generated::fs_main::wgsl_source(),
-                input: Some(UiCompositeOut::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
-                src: gbuffer_generated::vs_main::wgsl_source(),
-                input: Some(GbufferVertexInput::WGSL_FIELDS),
-                output: Some(GbufferVertexOutput::WGSL_FIELDS),
-            },
-            Entry {
-                src: gbuffer_generated::fs_main::wgsl_source(),
-                input: Some(GbufferFragmentInput::WGSL_FIELDS),
-                output: Some(GbufferOutput::WGSL_FIELDS),
-            },
-            Entry {
-                src: pbr_generated::fs_main::wgsl_source(),
-                input: Some(GbufferFragmentInput::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
-                src: material_textures::fs_main_textured::wgsl_source(),
-                input: Some(GbufferFragmentInput::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
-                src: hdr_composite_generated::vs_main::wgsl_source(),
-                input: None,
-                output: None,
-            },
-            Entry {
-                src: hdr_composite_generated::fs_main::wgsl_source(),
-                input: Some(HdrFragmentOut::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
-                src: bloom_generated::vs_main::wgsl_source(),
-                input: None,
-                output: None,
-            },
-            Entry {
-                src: bloom_generated::fs_main::wgsl_source(),
-                input: Some(BloomVertexOut::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
-                src: lighting_generated::vs_main::wgsl_source(),
-                input: None,
-                output: None,
-            },
-            Entry {
-                src: lighting_generated::fs_main::wgsl_source(),
-                input: Some(HdrFragmentOut::WGSL_FIELDS),
-                output: None,
-            },
-        ];
-        // Shared roots: uniform buffers by layout, materials by slot list.
-        // `light` is a loop-local copy of one `Lighting.lights` element
-        // (kind-selected evaluation in both fragment entries).
-        // `lighting.csm` nests one level deeper (CSM cascades, #121); the
-        // translator spells it bare (`csm.*`), hence both keys.
-        let shared: &[(&str, &[&str])] = &[
-            ("light", GpuLight::FIELD_NAMES),
-            ("camera", CameraUniform::FIELD_NAMES),
-            ("lighting", LightingUniform::FIELD_NAMES),
-            ("lighting.csm", CsmBlock::FIELD_NAMES),
-            ("csm", CsmBlock::FIELD_NAMES),
-            ("bloom_params", BloomUniform::FIELD_NAMES),
-            (
-                "exposure_params",
-                crate::auto_exposure::ExposureParams::FIELD_NAMES,
-            ),
-            ("mat", &OPENPBR_SLOTS),
-            ("obj", PerObjectGpu::FIELD_NAMES),
-        ];
-        let mut checked = 0;
-        for (n, entry) in entries.iter().enumerate() {
-            let mut roots: Vec<(&str, &[&str])> = shared.to_vec();
-            if let Some(fields) = entry.input {
-                roots.push(("input", fields));
-            }
-            if let Some(fields) = entry.output {
-                // `var`-out locals are spelled `out` (composite) or
-                // `output` (g-buffer); both resolve to the output mirror.
-                roots.push(("out", fields));
-                roots.push(("output", fields));
-            }
-            let mut rest = entry.src;
-            while rest.find('.').is_some() {
-                let (next, counted) = resolve_next_field(rest, &roots, n);
-                rest = next;
-                checked += usize::from(counted);
-            }
-        }
-        // Twelve entries, 151+ resolved uses today; fewer means the
-        // extraction broke or coverage was dropped — update deliberately.
-        assert!(checked >= 151, "expected field uses, found {checked}");
-    }
-
-    /// Every call in translated entries resolves: built-ins via the
-    /// shared `ornis-shader-lang` registry (single source with the
-    /// translator — no second spelling), WGSL natives (texture ops) via a
-    /// short stable list, type constructors via `ShaderType`, and
-    /// kernels/helpers/mirrors via `fn`/`struct` definitions extracted
-    /// from the same assembled shader. A typo'd kernel name can no longer
-    /// slide to naga — it fails here with the entry index and callee.
-    #[test]
-    fn stage_calls_resolve() {
-        use ornis_shader_lang::{ShaderBuiltin, ShaderType};
-
-        fn callee_uses(src: &str) -> Vec<(String, usize)> {
-            // `name(` occurrences with their byte offset (for messages).
-            let mut out = Vec::new();
-            let bytes = src.as_bytes();
-            let mut i = 0;
-            while i < bytes.len() {
-                if bytes[i] == b'(' {
-                    let mut j = i;
-                    while j > 0 && (bytes[j - 1].is_ascii_alphanumeric() || bytes[j - 1] == b'_') {
-                        j -= 1;
-                    }
-                    if j < i {
-                        // `@builtin(` / `@location(` are attributes, not
-                        // calls; `if (` etc. are filtered as keywords below.
-                        if j == 0 || bytes[j - 1] != b'@' {
-                            out.push((src[j..i].to_string(), j));
-                        }
-                    }
-                    i += 1;
-                } else {
-                    i += 1;
-                }
-            }
-            out
-        }
-
-        fn defined_names(assembly: &str) -> Vec<String> {
-            // `fn name` and `struct name` declared in the assembled module.
-            let mut names = Vec::new();
-            for (kw_len, kw) in [(3, "fn "), (7, "struct ")] {
-                let mut rest = assembly;
-                while let Some(pos) = rest.find(kw) {
-                    let after = &rest[pos + kw_len..];
-                    let name: String = after
-                        .chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect();
-                    if !name.is_empty() {
-                        names.push(name);
-                    }
-                    rest = after;
-                }
-            }
-            names
-        }
-
-        // WGSL-native spellings: prelude texture ops. Everything else
-        // function-like must come from the registry or the assembly.
-        const NATIVES: &[&str] = &[
-            "textureSample",
-            "textureSampleLevel",
-            "textureSampleCompare",
-            "textureLoad",
-            "textureDimensions",
-        ];
-        const KEYWORDS: &[&str] = &["if", "for", "while", "return", "loop"];
-        // (entry source, its assembled shader)
-        let hdr_vertex = hdr_composite_generated::wgsl_vertex_source();
-        let hdr_fragment = hdr_composite_generated::wgsl_source();
-        let bloom = bloom_generated::wgsl_source();
-        let lighting = lighting_generated::wgsl_source();
-        let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let composite = composite_generated::wgsl_source();
-        let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
-        let gbuffer_fragment = gbuffer_generated::wgsl_source();
-        let pbr = pbr_generated::wgsl_source();
-        let textured = material_textures::wgsl_source_textured();
-        let pairs: &[(&str, &str)] = &[
-            (
-                composite_generated::vs_main::wgsl_source(),
-                composite.as_str(),
-            ),
-            (
-                composite_generated::fs_main::wgsl_source(),
-                composite.as_str(),
-            ),
-            (
-                gbuffer_generated::vs_main::wgsl_source(),
-                gbuffer_vertex.as_str(),
-            ),
-            (
-                gbuffer_generated::fs_main::wgsl_source(),
-                gbuffer_fragment.as_str(),
-            ),
-            (pbr_generated::fs_main::wgsl_source(), pbr.as_str()),
-            (
-                material_textures::fs_main_textured::wgsl_source(),
-                textured.as_str(),
-            ),
-            (
-                hdr_composite_generated::vs_main::wgsl_source(),
-                hdr_vertex.as_str(),
-            ),
-            (
-                hdr_composite_generated::fs_main::wgsl_source(),
-                hdr_fragment.as_str(),
-            ),
-            (bloom_generated::vs_main::wgsl_source(), bloom.as_str()),
-            (bloom_generated::fs_main::wgsl_source(), bloom.as_str()),
-            (
-                lighting_generated::vs_main::wgsl_source(),
-                lighting_vertex.as_str(),
-            ),
-            (
-                lighting_generated::fs_main::wgsl_source(),
-                lighting.as_str(),
-            ),
-        ];
-        let mut checked = 0;
-        for (n, (entry, assembly)) in pairs.iter().enumerate() {
-            let defs = defined_names(assembly);
-            for (callee, _) in callee_uses(entry) {
-                if KEYWORDS.contains(&callee.as_str()) {
-                    continue;
-                }
-                let resolved = ShaderBuiltin::from_rust(&callee).is_some()
-                    || ShaderType::from_rust(&callee).is_some()
-                    || NATIVES.contains(&callee.as_str())
-                    || defs.iter().any(|d| d == &callee);
-                assert!(
-                    resolved,
-                    "entry {n}: unresolved call `{callee}` — typo'd kernel/helper or missing definition"
-                );
-                checked += 1;
-            }
-        }
-        // Twelve entries make 85+ calls today; near-zero hits would mean
-        // the extraction broke and the test passes vacuously.
-        assert!(checked >= 85, "expected calls, found {checked}");
-    }
-
-    /// Every table-backed global an entry reads is visible at that
-    /// entry's stage. Module consts (`quad`/`uvs`) have no table rows and
-    /// are skipped here — their existence is pinned by
-    /// `stage_globals_declared`; this test pins the `visibility` column
-    /// against actual use, so a vertex entry reading a fragment-only
-    /// resource fails before any GPU ever runs.
-    #[test]
-    fn stage_resources_visible_at_stage() {
-        use wgpu::ShaderStages;
-        // (globals read by one entry, pass table, entry stage)
-        let cases: &[(&[&str], &[Resource], ShaderStages)] = &[
-            (
-                QuadConsts::GLOBALS,
-                &composite_generated::COMPOSITE_RESOURCES,
-                ShaderStages::VERTEX,
-            ),
-            (
-                composite_generated::CompositeContext::GLOBALS,
-                &composite_generated::COMPOSITE_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                gbuffer_generated::GbufferVertexContext::GLOBALS,
-                &gbuffer_generated::GBUFFER_RESOURCES,
-                ShaderStages::VERTEX,
-            ),
-            (
-                gbuffer_generated::fs_main::globals(),
-                &gbuffer_generated::GBUFFER_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                pbr_generated::PbrContext::GLOBALS,
-                &pbr_generated::PBR_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                material_textures::PbrTexturedContext::GLOBALS,
-                &material_textures::TEXTURED_PBR_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                QuadConsts::GLOBALS,
-                &hdr_composite_generated::HDR_RESOURCES,
-                ShaderStages::VERTEX,
-            ),
-            (
-                hdr_composite_generated::HdrContext::GLOBALS,
-                &hdr_composite_generated::HDR_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                QuadConsts::GLOBALS,
-                &bloom_generated::BLOOM_RESOURCES,
-                ShaderStages::VERTEX,
-            ),
-            (
-                bloom_generated::BloomContext::GLOBALS,
-                &bloom_generated::BLOOM_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                QuadConsts::GLOBALS,
-                &lighting_generated::LIGHTING_RESOURCES,
-                ShaderStages::VERTEX,
-            ),
-            (
-                lighting_generated::LightingContext::GLOBALS,
-                &lighting_generated::LIGHTING_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-            (
-                lighting_generated::LightingMaps::GLOBALS,
-                &lighting_generated::LIGHTING_RESOURCES,
-                ShaderStages::FRAGMENT,
-            ),
-        ];
-        let mut checked = 0;
-        for (globals, table, stage) in cases {
-            for global in *globals {
-                if let Some(row) = table.iter().find(|r| r.name == *global) {
-                    assert!(
-                        row.visibility.contains(*stage),
-                        "`{global}` is read at {stage:?} but bound for {:?}",
-                        row.visibility
-                    );
-                    checked += 1;
-                }
-            }
-        }
-        // 28 table-backed uses today; fewer means a table lost a row the
-        // entries still read — update deliberately.
-        assert!(checked >= 28, "expected visible resources, found {checked}");
+        assert_eq!(ao_generated::VS_ENTRY, quad_vertex_generated::VS_ENTRY);
+        assert_eq!(
+            lighting_generated::wgsl_vertex_source(),
+            quad_vertex_generated::wgsl_vertex_source(),
+            "the lighting pass binds the shared quad module"
+        );
     }
 
     /// Parse and fully validate an assembled WGSL module with naga.
@@ -1474,11 +662,11 @@ mod tests {
     }
 
     /// The grouped CPU-side `OpenPBRMaterial` must lay out its groups in the
-    /// exact order the shared WGSL declaration lists the `vec4` slots:
+    /// exact order the WGSL declaration lists the `vec4` slots:
     /// base(0) → specular(32) → transmission(64) → subsurface(112) →
     /// fuzz(160) → coat(192) → thin_film(240) → emission(256) →
-    /// geometry(288), 320 bytes total. Any reordering breaks every pass that
-    /// splices [`OPENPBR_MATERIAL_DECL`].
+    /// geometry(288), 320 bytes total. Any reordering shifts every word the
+    /// shader reads, so the offsets are the contract.
     #[test]
     fn openpbr_rust_layout_matches_wgsl_order() {
         use ornis_core::material::OpenPBRMaterial;
@@ -1492,8 +680,52 @@ mod tests {
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, thin_film), 240);
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, emission), 256);
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, geometry), 288);
-        // Within-group slot order mirrors the WGSL field order.
-        assert_eq!(openpbr_material_decl().matches("vec4<f32>").count(), 20);
+        // 20 `vec4` slots of 16 bytes each fill the 320-byte record.
+        // The GPU side addresses the record by word index, so its stride is
+        // the CPU record's size: a group added on one side only would make the
+        // shader read the neighbouring entity's bytes.
+        assert_eq!(
+            ornis_gpu_pbr::layout::MATERIAL_STRIDE as usize * 4,
+            std::mem::size_of::<OpenPBRMaterial>()
+        );
+        let words = std::mem::size_of::<OpenPBRMaterial>() / 4;
+        let src = super::lighting_generated::wgsl_source_for_samples(1);
+        let mut reads = 0;
+        let mut highest = 0u32;
+        for read in src.match_indices("storage_0_2_[") {
+            let call = &src[read.0..];
+            let call = &call[..call.find(']').unwrap_or(call.len())];
+            // `base | lane` (folded word) or `base + lane` (full word).
+            for (at, _) in call.match_indices('|').chain(call.match_indices('+')) {
+                let lane: String = call[at + 1..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if let Ok(lane) = lane.parse::<u32>() {
+                    highest = highest.max(lane);
+                }
+            }
+            reads += 1;
+        }
+        assert!(reads > 20, "expected the material reads, found {reads}");
+        assert!(
+            (highest as usize) < words,
+            "the lighting kernel reads material word {highest} of a {words}-word record"
+        );
+        for (group, offset) in [
+            (std::mem::offset_of!(OpenPBRMaterial, base), 0),
+            (std::mem::offset_of!(OpenPBRMaterial, specular), 32),
+            (std::mem::offset_of!(OpenPBRMaterial, transmission), 64),
+            (std::mem::offset_of!(OpenPBRMaterial, subsurface), 112),
+            (std::mem::offset_of!(OpenPBRMaterial, fuzz), 160),
+            (std::mem::offset_of!(OpenPBRMaterial, coat), 192),
+            (std::mem::offset_of!(OpenPBRMaterial, thin_film), 240),
+            (std::mem::offset_of!(OpenPBRMaterial, emission), 256),
+            (std::mem::offset_of!(OpenPBRMaterial, geometry), 288),
+        ] {
+            assert_eq!(group, offset);
+            assert_eq!(group % 16, 0, "group must start on a slot boundary");
+        }
     }
 
     /// MSAA declaration policy: at 1x every spelling is the legacy

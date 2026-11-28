@@ -22,7 +22,7 @@
 //! the same file: [`Skeleton`]/[`JointPose`]/[`SkelPlayer`] hot lanes plus
 //! the cold [`SkelClip`] lane and [`SkinnedMesh`] bind data, sampled by
 //! `skel_sample` ([`SkelSampleSystem`]) and skinned on the CPU by
-//! `skel_skin_cpu` ([`SkelSkinSystem`]). Joint tracks that name a hierarchy
+//! `skel_skin_cpu` (`SkelSkinSystem`). Joint tracks that name a hierarchy
 //! node also write that node's local [`Transform`] (same propagation as
 //! object tracks). [`Animator`] on the character root selects a skeletal
 //! clip by name; a player stays empty until that call.
@@ -3405,7 +3405,7 @@ impl System for SkelSkinSystem {
 }
 
 /// CPU skinning pass for GPU-fallback meshes only (system name
-/// `skel_skin_cpu`, a drop-in replacement for [`SkelSkinSystem`] with the
+/// `skel_skin_cpu`, a drop-in replacement for `SkelSkinSystem` with the
 /// same ordering pin).
 ///
 /// Skins only meshes the GPU palette path cannot draw (palette over

@@ -147,14 +147,16 @@ impl GpuLanes {
 mod tests {
     use super::*;
 
-    #[ornis_macros::gpu_pipeline(
-        workgroup_size = 64,
-        storage(buf: [f32; 64], read_write),
-        builtin(gid: global_invocation_id),
-    )]
-    fn scale_lane() {
-        buf[gid.x] = buf[gid.x] * 2.0;
-    }
+    /// Doubling kernel: literal WGSL, because this test covers lane plumbing
+    /// and dispatch, not shader codegen.
+    const SCALE_LANE_WGSL: &str = "\
+@group(0) @binding(0) var<storage, read_write> buf: array<f32>;
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    buf[gid.x] = buf[gid.x] * 2.0;
+}
+";
 
     /// Adapter if the machine has one; `None` (skip the test) otherwise.
     async fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
@@ -193,7 +195,7 @@ mod tests {
     ) -> (wgpu::ComputePipeline, wgpu::BindGroup) {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gpu_lanes scale test"),
-            source: wgpu::ShaderSource::Wgsl(scale_lane::wgsl_source().into()),
+            source: wgpu::ShaderSource::Wgsl(SCALE_LANE_WGSL.into()),
         });
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,

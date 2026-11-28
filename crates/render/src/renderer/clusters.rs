@@ -1,10 +1,10 @@
-//! Clustered lighting geometry (#130): the 16×9×24 cluster grid, the
-//! GPU-side span/index-list layout (`ClusterSpan`/`ClusterParams`), and
-//! the shared constants every consumer formats from — the shading
-//! lookup (`shaders::helpers::cluster_light_span`), the assignment
-//! compute pass ([`gpu`], llvm2gpu `cs_main`) and the CPU reference
-//! ([`cpu`], test-only).
-//! The GPU owner lives in [`gpu`].
+//! Clustered lighting geometry (#130): the 16×9×24 cluster grid and the
+//! GPU-side span/index-list layout (`ClusterSpan`/`ClusterParams`).
+//!
+//! The assignment pass is the llvm2gpu artifact of [`gpu`] (`cs_main`); its
+//! slice boundaries live in that kernel, and the constants below are what the
+//! shaders and the CPU reference ([`cpu`], test-only) share so the two cannot
+//! drift. The ones only the reference reads are test-only for that reason.
 use super::WgslStruct;
 
 #[cfg(test)]
@@ -27,9 +27,14 @@ pub(crate) const CLUSTER_COUNT: u32 =
     CLUSTER_TILE_COUNT_X * CLUSTER_TILE_COUNT_Y * CLUSTER_SLICE_COUNT;
 /// View depth where the exponential slice split starts; slice 0 spans
 /// `[0, near]`.
+///
+/// Test-only: the kernel carries the value, the CPU reference and the
+/// assignment oracle are what read this copy.
+#[cfg(test)]
 pub(crate) const CLUSTER_DEPTH_NEAR: f32 = 0.5;
 /// View depth where the exponential slice split ends; the last slice
 /// spans up to [`CLUSTER_FAR_LIMIT`].
+#[cfg(test)]
 pub(crate) const CLUSTER_DEPTH_FAR: f32 = 400.0;
 /// Upper view depth of the last slice: beyond this nothing is clustered.
 /// The llvm2gpu kernel copies the value; the CPU reference and the
@@ -59,12 +64,13 @@ pub(crate) const SPOT_BOUND_COS_FLOOR: f32 = 0.1;
 /// a few ulps upward, which `ceil` would round one slice up. Every
 /// lookup (CPU reference and fragment shader) subtracts this before
 /// the `ceil`.
+#[cfg(test)]
 pub(crate) const CLUSTER_SLICE_LOOKUP_EPS: f32 = 1.0e-4;
 
 /// `ln(far/near)` of the exponential slice split. A function (not a
-/// `const`) because `ln` is not const-evaluable; every consumer — the
-/// CPU reference, the fragment consts block and the compute shader —
-/// formats this same value, so no second spelling can drift.
+/// `const`) because `ln` is not const-evaluable; the CPU reference and the
+/// assignment oracle both read it, so the two cannot drift.
+#[cfg(test)]
 pub(crate) fn cluster_log_ratio() -> f32 {
     (CLUSTER_DEPTH_FAR / CLUSTER_DEPTH_NEAR).ln()
 }
@@ -73,6 +79,7 @@ pub(crate) fn cluster_log_ratio() -> f32 {
 /// `slice = ceil(scale * ln(depth/near) - eps)`, clamped to
 /// `[0, CLUSTER_SLICE_COUNT - 1]` — the inverse of the exponential
 /// slice boundary map (see `clusters::cpu::cluster_slice_z_max`).
+#[cfg(test)]
 pub(crate) fn cluster_slice_scale() -> f32 {
     (CLUSTER_SLICE_COUNT as f32 - 1.0) / cluster_log_ratio()
 }

@@ -55,10 +55,7 @@ pub use ao::{AoBlurInputs, AoRawInputs};
 pub(crate) use ao::{AoPipelines, AoUniform};
 pub use buffers::{InstanceData, MaterialIdx, PerObjectGpu};
 pub use clusters::ClusterLightStats;
-pub(crate) use clusters::{
-    CLUSTER_DEPTH_NEAR, CLUSTER_SLICE_COUNT, CLUSTER_SLICE_LOOKUP_EPS, CLUSTER_TILE_COUNT_X,
-    CLUSTER_TILE_COUNT_Y, ClusterParams, ClusterSpan, ClusteredLights, cluster_slice_scale,
-};
+pub(crate) use clusters::{ClusterParams, ClusterSpan, ClusteredLights};
 // Cluster-assignment reference and readback selector for the GPU parity
 // gate (test-only, like the extraction culler's CPU mirror).
 #[cfg(test)]
@@ -76,7 +73,7 @@ pub use forward::{
 };
 pub use gbuffer::{GBufferTextures, GbufferTargets};
 pub use lights::CsmCamera;
-pub(crate) use lights::{CsmBlock, CsmVp, GpuLight, LIGHT_KIND_DIRECTIONAL, LightingUniform};
+pub(crate) use lights::{GpuLight, LIGHT_KIND_DIRECTIONAL, LightingUniform};
 pub use lights::{LightUploadStats, MAX_LIGHTS, ShadingDebug, count_light_drops};
 // Path-stability re-exports: `crate::renderer::X` before the split; no
 // in-crate users outside their module right now.

@@ -42,6 +42,10 @@ pub const STORAGE_WRITE_F32: &str = "storage_write_f32";
 /// The wasm result is `i32` bits. The lowerer treats them as `u32`.
 pub const STORAGE_READ_U32: &str = "storage_read_u32";
 
+/// `(param i32 i32 i32 i32) (result i32)` — one lane of an `array<vec4<u32>>`
+/// storage element (`group, binding, index, lane`).
+pub const STORAGE_READ_U32_LANE: &str = "storage_read_u32_lane";
+
 /// `(param i32 i32 i32 i32)` — store one `u32` element.
 pub const STORAGE_WRITE_U32: &str = "storage_write_u32";
 
@@ -64,6 +68,14 @@ pub const STORAGE_BASE: &str = "storage_base";
 /// and signed texel coordinate `(x, y)` at mip level zero.
 pub const TEXTURE_LOAD_2D: &str = "texture_load_2d";
 
+/// `(param i32 i32 i32 i32) (result f32)` — `textureLoad` of a depth image at
+/// mip 0. Depth images return the scalar the load gives them.
+pub const TEXTURE_LOAD_2D_F32: &str = "texture_load_2d_f32";
+
+/// `(param i32 i32 i32 i32 i32) (result f32)` — one lane of a sampled
+/// `texture_2d<f32>` texel at mip 0 (`group, binding, x, y, lane`).
+pub const TEXTURE_LOAD_2D_F32X4: &str = "texture_load_2d_f32x4";
+
 /// `(param f32 × 6) (result f32)` — dot product of two `vec3<f32>` values.
 pub const MATH_DOT3: &str = "math_dot3";
 
@@ -82,6 +94,9 @@ pub const STORAGE_ATOMIC_ADD_U32: &str = "storage_atomic_add_u32";
 /// `(param i32) (result i32)` — load one word from workgroup scratch.
 pub const WORKGROUP_LOAD_U32: &str = "workgroup_load_u32";
 
+/// `(param i32) (result i32)` — atomic load of one workgroup word.
+pub const WORKGROUP_ATOMIC_LOAD_U32: &str = "workgroup_atomic_load_u32";
+
 /// `(param i32 i32)` — store one word into workgroup scratch.
 pub const WORKGROUP_STORE_U32: &str = "workgroup_store_u32";
 
@@ -91,11 +106,37 @@ pub const WORKGROUP_ATOMIC_ADD_U32: &str = "workgroup_atomic_add_u32";
 /// `()` — synchronize workgroup execution and workgroup memory.
 pub const WORKGROUP_BARRIER: &str = "workgroup_barrier";
 
+/// `()` — discard the current fragment invocation.
+pub const FRAGMENT_DISCARD: &str = "fragment_discard";
+
 /// `()` — order storage memory accesses.
 pub const STORAGE_BARRIER: &str = "storage_barrier";
 
 /// Number of `u32` words in the translator's fixed workgroup scratch array.
 pub const WORKGROUP_WORDS: u32 = 256;
+
+/// `(param i32 i32 i32 i32) (result i32)` — one lane of a `texture_2d<u32>`
+/// texel at mip 0.
+///
+/// A packed `R16Uint`-style target carries motion validity and previous depth
+/// as one word, so the load returns `u32` rather than `f32`.
+pub const TEXTURE_LOAD_2D_U32: &str = "texture_load_2d_u32";
+
+/// `(param i32 × 5) (result f32)` — depth of sample `s` of a multisampled
+/// `texture_depth_multisampled_2d`, at mip 0.
+///
+/// A multisampled target has samples where a plain one has mip levels, and the
+/// g-buffer resolve reads every covered sample, so the sample index is an
+/// argument rather than the fixed zero the single-sample load implies.
+pub const TEXTURE_LOAD_2D_F32_SAMPLE: &str = "texture_load_2d_f32_sample";
+
+/// `(param i32 × 5) (result i32)` — first lane of sample `s` of a
+/// multisampled `texture_2d<u32>`.
+pub const TEXTURE_LOAD_2D_U32_SAMPLE: &str = "texture_load_2d_u32_sample";
+
+/// `(param i32 × 6) (result f32)` — lane `lane` of sample `s` of a
+/// multisampled `texture_2d<f32>`.
+pub const TEXTURE_LOAD_2D_F32X4_SAMPLE: &str = "texture_load_2d_f32x4_sample";
 
 /// `(param i32 i32) (result i32)` — width of a 2D texture.
 pub const TEXTURE_WIDTH_2D: &str = "texture_width_2d";
@@ -176,6 +217,32 @@ pub const UNIFORM_FIELD_VEC3: &str = "uniform_field_vec3";
 /// `(param i32 i32 i32 i32) (result f32 f32 f32 f32)` — one `vec4<f32>` field.
 pub const UNIFORM_FIELD_VEC4: &str = "uniform_field_vec4";
 
+/// `(param i32 i32 i32 i32 i32 i32 i32) (result f32)` — lane of a `vec4` field
+/// of one element of a fixed-size uniform array.
+///
+/// Operands are group, binding, struct id, array field index, the element
+/// index, the element struct's field index and the lane. The element index is
+/// a runtime value — WGSL allows a dynamic index into a fixed-size uniform
+/// array — while the field and the lane are constants, because struct fields
+/// and vector components are not dynamically indexed.
+pub const UNIFORM_ARRAY_VEC4_LANE: &str = "uniform_array_vec4_lane";
+
+/// `(param i32 ×8) (result f32)` — the same read one struct deeper:
+/// `outer.inner[index].element_field[lane]`.
+///
+/// Operands are group, binding, struct id, the outer field (a nested struct),
+/// the array field inside it, the element index, the element struct's field and
+/// the lane. `Lighting` nests its cascade data in `csm`, so the access path
+/// starts one field further out.
+pub const UNIFORM_NESTED_ARRAY_VEC4_LANE: &str = "uniform_nested_array_vec4_lane";
+
+/// `(param i32 ×6) (result f32)` — lane `component` of `vec4` field `inner` of
+/// the struct in field `field`: `outer.inner.inner[component]`.
+///
+/// The cascade view axis and split distances live one struct deep in
+/// `Lighting`, and a `vec4` field is read by its constant lane.
+pub const UNIFORM_NESTED_VEC4_LANE: &str = "uniform_nested_vec4_lane";
+
 /// `(param i32 i32 i32 i32) (result f32)` — `array<f32, len>[index]`.
 ///
 /// The element stride is the uniform stride of `f32` (16 bytes), not the
@@ -209,11 +276,297 @@ pub const TEXTURE_SAMPLE_2D: &str = "texture_sample_2d";
 /// binding, UV, then an explicit mip level.
 pub const TEXTURE_SAMPLE_2D_LOD: &str = "texture_sample_2d_lod";
 
-/// Vertex entry the toy translator expects.
+/// `(param i32 i32 i32 i32 f32 f32 f32) (result f32)` — lane of
+/// `textureSample(tex, sampler, uv)`.
+///
+/// Same operands as [`TEXTURE_SAMPLE_2D_F32X4`]; the level comes from the
+/// screen-space derivatives of `uv`, so this only exists in a fragment stage.
+pub const TEXTURE_SAMPLE_2D_F32X4: &str = "texture_sample_2d_f32x4";
+
+/// `(param i32 i32 i32 i32 f32 f32 f32 f32) (result f32)` — lane of
+/// `textureSampleLevel(cube, sampler, direction, lod)`.
+///
+/// Operands are texture group, texture binding, sampler group, sampler
+/// binding, the three direction lanes, the level, then the lane.
+pub const TEXTURE_SAMPLE_LEVEL_CUBE_F32X4: &str = "texture_sample_level_cube_f32x4";
+
+/// `(param i32 i32 i32 i32 f32 f32 f32 f32) (result f32)` — lane of
+/// `textureSample(cube, sampler, direction)`.
+///
+/// The irradiance cube is read at the level its derivatives select, so this
+/// is fragment-only like [`TEXTURE_SAMPLE_2D_F32X4`].
+pub const TEXTURE_SAMPLE_CUBE_F32X4: &str = "texture_sample_cube_f32x4";
+
+/// `(param i32 i32 i32 i32 f32 f32 i32 f32) (result f32)` —
+/// `textureSampleCompare(depth_2d_array, comparison_sampler, uv, layer, ref)`.
+///
+/// Operands are texture group, texture binding, sampler group, sampler
+/// binding, the two uv lanes, the array layer, then the reference value. The
+/// hardware filters the 2×2 taps into one visibility factor.
+pub const TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32: &str = "texture_sample_compare_2d_array_f32";
+
+/// `(param i32 i32 i32 i32 f32 f32 f32 i32 f32) (result f32)` — the cube-array
+/// twin of [`TEXTURE_SAMPLE_COMPARE_2D_ARRAY_F32`].
+///
+/// The coordinate is a direction, so it takes three lanes; the point-light
+/// shadow pool is one cube array and the layer picks the light.
+pub const TEXTURE_SAMPLE_COMPARE_CUBE_ARRAY_F32: &str = "texture_sample_compare_cube_array_f32";
+
+/// Vertex entry. The compiled signature is `vs_main()`: builtins and
+/// `@location` values are [`VERTEX_INDEX`], [`VERTEX_INPUT_LANE`], and the
+/// `vertex_store_*` imports.
 pub const VS_MAIN: &str = "vs_main";
 
-/// Fragment entry the toy translator expects.
+/// Fragment entry the offline translator expects.
 pub const FS_MAIN: &str = "fs_main";
+
+/// `(result i32)` — `@builtin(vertex_index)` of a vertex entry.
+pub const VERTEX_INDEX: &str = "vertex_index";
+
+/// `(result i32)` — `@builtin(instance_index)` of a vertex entry.
+pub const INSTANCE_INDEX: &str = "instance_index";
+
+/// `(param i32) (result i32)` — one lane of `@builtin(global_invocation_id)`.
+pub const GLOBAL_INVOCATION_LANE: &str = "global_invocation_lane";
+
+/// `(result i32)` — `@builtin(local_invocation_index)` of a compute entry.
+pub const LOCAL_INVOCATION_INDEX: &str = "local_invocation_index";
+
+/// `(param i32 i32 i32) (result f32)` — lane of a vertex `@location` input.
+///
+/// The operands are the location, the declared lane count, and the lane, all
+/// immediates. The width is explicit because the vertex and fragment stages
+/// must agree on it, and each side is compiled separately.
+pub const VERTEX_INPUT_LANE: &str = "vertex_input_lane";
+
+/// Vertex entry. `(i32) -> i32`: the `u32` `@location` input's single lane.
+///
+/// Joint indices and weights ride as `vec4<u32>`/`vec4<f32>` varying; the
+/// integer one is declared flat, so it needs the word form rather than a float
+/// lane.
+pub const VERTEX_INPUT_U32: &str = "vertex_input_u32";
+
+/// Vertex entry. `(i32, i32) -> i32`: lane of a `vec4<u32>` `@location` input.
+///
+/// A `vec4<u32>` is one location, not four: joint indices must be read lane by
+/// lane out of the declared four-component integer varying, which is flat
+/// because WGSL forbids interpolating an integer.
+pub const VERTEX_INPUT_U32X4: &str = "vertex_input_u32x4";
+
+/// `(param f32 f32 f32 f32)` — clip-space `@builtin(position)` of a vertex
+/// entry.
+pub const VERTEX_POSITION: &str = "vertex_position";
+
+/// `(param i32 f32 f32)` — write one `vec2<f32>` vertex `@location` output.
+///
+/// The first operand is the location, the rest are the lanes.
+pub const VERTEX_STORE_F32X2: &str = "vertex_store_f32x2";
+
+/// `(param i32 f32 f32 f32)` — write one `vec3<f32>` vertex `@location`
+/// output.
+///
+/// The G-buffer varyings (world position, normal, tangent) are three-lane, so
+/// the width has an import of its own instead of a padded `vec4`.
+pub const VERTEX_STORE_F32X3: &str = "vertex_store_f32x3";
+
+/// `(param i32 f32 f32 f32 f32)` — write one `vec4<f32>` vertex `@location`
+/// output.
+pub const VERTEX_STORE_F32X4: &str = "vertex_store_f32x4";
+
+/// `(param i32 i32)` — write one scalar `u32` vertex `@location` output.
+///
+/// An integer varying is `@interpolate(flat)`: it carries an index (the
+/// G-buffer's material id), not an interpolated quantity.
+pub const VERTEX_STORE_U32: &str = "vertex_store_u32";
+
+/// `(param i32 i32 i32) (result f32)` — lane of a fragment `@location` input.
+///
+/// Same shape as [`VERTEX_INPUT_LANE`]: location, lane count, lane. Both stages
+/// declare the interpolant the vertex stage writes at the same location, so the
+/// lane count is declared on both sides and not inferred.
+pub const FRAGMENT_INPUT_LANE: &str = "fragment_input_lane";
+
+/// `(param i32) (result i32)` — the scalar `u32` fragment `@location` input.
+///
+/// The integer twin of [`FRAGMENT_INPUT_LANE`]: a flat varying carries one
+/// word, not lanes of an interpolated vector.
+pub const FRAGMENT_INPUT_U32: &str = "fragment_input_u32";
+
+/// `(param i32 f32 f32)` — write one `vec2<f32>` fragment `@location` output.
+///
+/// The G-buffer's encoded normal, world-position xy and motion vector are two
+/// lanes each; padding them to a `vec4` would change the attachment formats.
+pub const FRAGMENT_STORE_F32X2_LOCATION: &str = "fragment_store_f32x2_location";
+
+/// `(param i32 i32)` — write one scalar `u32` fragment `@location` output.
+///
+/// Integer attachments (material id, quantized previous depth) are `u32`
+/// targets, not colors: the output struct member is a plain `u32`.
+pub const FRAGMENT_STORE_U32_LOCATION: &str = "fragment_store_u32_location";
+
+/// `(param i32 f32 f32 f32 f32)` — write one fragment `@location` output.
+///
+/// The first operand is the location, the rest are the RGBA lanes. A single
+/// `@location(0)` output keeps the bare `vec4<f32>` result that
+/// `fragment_store_f32x4` produces; anything else becomes a struct.
+pub const FRAGMENT_STORE_LOCATION: &str = "fragment_store_location";
+
+/// `(param i32) (result f32)` — lane of the fragment's `@location(0)` vec2.
+///
+/// The two-lane version of [`FRAGMENT_INPUT_LANE`] the AO passes use; the
+/// translator declares `@location(0) uv: vec2<f32>` for it.
+pub const FRAGMENT_UV_LANE: &str = "fragment_uv_lane";
+
+/// `(param i32) (result f32)` — lane of the fragment's `@builtin(position)`.
+pub const FRAGMENT_POSITION_LANE: &str = "fragment_position_lane";
+
+/// `(param f32 f32 f32 f32)` — the fragment's `@location(0)` color.
+///
+/// Shorthand for [`FRAGMENT_STORE_LOCATION`] at location 0; a fragment with
+/// that one target returns a bare `vec4<f32>`.
+pub const FRAGMENT_STORE_F32X4: &str = "fragment_store_f32x4";
+
+/// `(param f32) (result f32)` — `sqrt(value)`, one WGSL `sqrt`.
+///
+/// The host evaluates [`f32::sqrt`]; this import is what the translator lowers
+/// to one WGSL `sqrt`, which a Newton series would not match.
+pub const GPU_SQRT: &str = "gpu_sqrt";
+
+/// `(param f32 f32) (result f32)` — `pow(base, exponent)`, one WGSL `pow`.
+///
+/// A software `exp2(y * log2(x))` would round twice and drift from the GPU
+/// instruction the DSL path used, so the operation is an import of its own.
+pub const GPU_POW: &str = "gpu_pow";
+
+/// `(param f32 f32) (result f32)` — `atan2(y, x)`, one WGSL `atan2`.
+pub const GPU_ATAN2: &str = "gpu_atan2";
+
+/// `(param f32 f32 f32) (result f32)` — `smoothstep(low, high, x)`, one WGSL
+/// `smoothstep`.
+///
+/// Spelling it as `clamp((x - low) / (high - low))³` would round differently
+/// from the instruction the DSL path used, so the operation is an import.
+pub const GPU_SMOOTHSTEP: &str = "gpu_smoothstep";
+
+/// `(param f32) (result f32)` — `dpdx(value)`, the screen-space derivative
+/// along x.
+///
+/// WGSL only allows a derivative in uniform control flow, so a kernel that
+/// takes one has to call it before any `discard` or divergent branch.
+pub const GPU_DPDX: &str = "gpu_dpdx";
+
+/// `(param f32) (result f32)` — `dpdy(value)`, the screen-space derivative
+/// along y.
+pub const GPU_DPDY: &str = "gpu_dpdy";
+
+/// `(param f32) (result f32)` — `tan(value)`, one WGSL `tan`.
+pub const GPU_TAN: &str = "gpu_tan";
+
+/// `(param f32) (result f32)` — `floor(value)`, one WGSL `floor`.
+pub const GPU_FLOOR: &str = "gpu_floor";
+
+/// `(param f32) (result f32)` — `ceil(value)`, one WGSL `ceil`.
+pub const GPU_CEIL: &str = "gpu_ceil";
+
+/// `(param f32) (result f32)` — `ln(value)`, the natural logarithm, one WGSL
+/// `log`.
+pub const GPU_LN: &str = "gpu_ln";
+
+/// `(param f32) (result f32)` — `exp(value)`, one WGSL `exp`.
+pub const GPU_EXP: &str = "gpu_exp";
+
+/// `(param f32) (result f32)` — `exp2(value)`, one WGSL `exp2`.
+///
+/// Separate from [`GPU_EXP`] because `exp2` is not `exp(2^y)` rounded once: a
+/// shader that wrote the series would drift from the instruction.
+pub const GPU_EXP2: &str = "gpu_exp2";
+
+/// `(param f32) (result f32)` — `log2(value)`, one WGSL `log2`.
+pub const GPU_LOG2: &str = "gpu_log2";
+
+/// `(param f32) (result f32)` — `abs(value)`, one WGSL `abs`.
+pub const GPU_ABS: &str = "gpu_abs";
+
+/// `(param f32) (result f32)` — `sign(value)`, one WGSL `sign`.
+pub const GPU_SIGN: &str = "gpu_sign";
+
+/// `(param f32) (result f32)` — `fract(value)`, one WGSL `fract`.
+pub const GPU_FRACT: &str = "gpu_fract";
+
+/// `(param f32) (result f32)` — `cos(value)`, one WGSL `cos`.
+pub const GPU_COS: &str = "gpu_cos";
+
+/// `(param f32) (result f32)` — `sin(value)`, one WGSL `sin`.
+pub const GPU_SIN: &str = "gpu_sin";
+
+/// `(param f32) (result f32)` — `acos(value)`, one WGSL `acos`.
+pub const GPU_ACOS: &str = "gpu_acos";
+
+/// `(param f32 f32 f32) (result f32)` — `clamp(value, low, high)`.
+pub const GPU_CLAMP: &str = "gpu_clamp";
+
+/// `(param f32 f32 f32) (result f32)` — `mix(low, high, weight)`.
+pub const GPU_MIX: &str = "gpu_mix";
+
+/// `(param f32 f32) (result f32)` — x of `dot(vec2(a, b), vec2(a, b))`.
+///
+/// The two-lane dot the AO passes take of a corner offset: WGSL has no
+/// two-lane `dot` on scalars, so the sum is an import.
+pub const GPU_DOT2_XY: &str = "gpu_dot2_xy";
+
+/// `(param f32 f32 f32) (result f32)` — `dot(vec3, vec3)` of two operand triples.
+pub const GPU_DOT3_XYZ: &str = "gpu_dot3_xyz";
+
+/// `(param f32 f32 f32) (result f32)` — `length(vec3, vec3)` of one triple.
+pub const GPU_LENGTH3_XYZ: &str = "gpu_length3_xyz";
+
+/// `(param f32 f32 f32 f32 f32 f32) (result f32)` — lane of
+/// `cross(a, b)` computed from two operand triples.
+///
+/// The lane is an operand rather than a fourth argument so one import serves
+/// the three components.
+pub const GPU_CROSS3_LANE: &str = "gpu_cross3_lane";
+
+/// `(param f32 f32 f32 f32) (result f32)` — lane of `normalize(vec3)` computed
+/// from one operand triple.
+pub const GPU_NORMALIZE3_LANE: &str = "gpu_normalize3_lane";
+
+/// `(param i32 i32 i32 i32 i32) (result f32)` — one component of a `vec4`
+/// uniform field (`group, binding, struct id, field, component`).
+///
+/// The SDK exposes one component per import, so a shader may read the same
+/// field through four calls; the translator deduplicates those loads.
+pub const UNIFORM_FIELD_VEC4_COMPONENT_F32: &str = "uniform_field_vec4_component_f32";
+
+/// `(param i32 i32 i32 i32 i32) (result f32)` — `dot` of one operand triple
+/// with the xyz lanes of a `vec4` uniform field.
+pub const UNIFORM_FIELD_VEC4_PLANE_DOT: &str = "uniform_field_vec4_plane_dot";
+
+/// `(param i32 i32 i32 i32 i32) (result f32)` — `f32` field of a nested
+/// uniform struct (`group, binding, struct id, nested index, field`).
+pub const UNIFORM_NESTED_FIELD_F32: &str = "uniform_nested_field_f32";
+
+/// `u32` sibling of [`UNIFORM_NESTED_FIELD_F32`]: same operands, `u32` field.
+pub const UNIFORM_NESTED_FIELD_U32: &str = "uniform_nested_field_u32";
+
+/// Width of a texture whose sampled shape is `f32x4`.
+///
+/// Distinct from [`TEXTURE_WIDTH_2D`]: the declared sample type is part of
+/// the import name, so the depth and colour shapes stay separate opcodes.
+pub const TEXTURE_WIDTH_2D_F32X4: &str = "texture_width_2d_f32x4";
+
+/// `f32x4` sibling of [`TEXTURE_HEIGHT_2D`]; see [`TEXTURE_WIDTH_2D_F32X4`].
+pub const TEXTURE_HEIGHT_2D_F32X4: &str = "texture_height_2d_f32x4";
+
+/// `(param i32 i32) (result i32)` — element count of an `array<f32>` storage
+/// binding (`group, binding`).
+pub const STORAGE_LEN_F32: &str = "storage_len_f32";
+
+/// `u32` sibling of [`STORAGE_LEN_F32`]: element count of `array<u32>`.
+pub const STORAGE_LEN_U32: &str = "storage_len_u32";
+
+/// `vec4` sibling of [`STORAGE_LEN_F32`]: element count of `array<vec4<f32>>`.
+pub const STORAGE_LEN_U32X4: &str = "storage_len_u32x4";
 
 /// Compute entry. Optional: a module without this export still lowers.
 ///
@@ -255,6 +608,7 @@ pub fn is_toy_import(name: &str) -> bool {
             | WORKGROUP_STORE_U32
             | WORKGROUP_ATOMIC_ADD_U32
             | WORKGROUP_BARRIER
+            | FRAGMENT_DISCARD
             | STORAGE_BARRIER
             | STORAGE_READ_VEC2
             | STORAGE_WRITE_VEC2

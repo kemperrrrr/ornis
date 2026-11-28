@@ -5,9 +5,10 @@
 //! `crates/gpu-*` kernel: `ssao_generated.wgsl`, `gtao_generated.wgsl`,
 //! `ao_blur_generated.wgsl`, and the `--multisampled` builds used by the 4x
 //! lighting path (`ssao_msaa_generated.wgsl`, `gtao_msaa_generated.wgsl`).
-//! This module owns what is left of the hand-written WGSL here: the shared
-//! fullscreen-quad vertex stage, the bind-group layouts, and the mapping from
-//! a sample count to the artifact.
+//! Both AO methods draw the same triangle-strip quad, so the vertex stage is
+//! the shared [`quad_vertex_generated`](super::quad_vertex_generated) module;
+//! this module owns the bind-group layouts and the mapping from a sample count
+//! to the artifact.
 //!
 //! At 4x the depth and the octahedral normal stay per-sample (the normal must
 //! not go through the hardware box filter: a cleared texel is `(0, 0)`, which
@@ -16,14 +17,10 @@
 //! only change the declared texture types.
 //!
 //! Depth source is the g-buffer `Depth` buffer (hardware `Depth32Float`,
-//! linearized through `Camera::inv_view_proj` by the shared
-//! `reconstruct_world_pos`); normals decode from the octahedral layer.
+//! linearized through `Camera::inv_view_proj` inside the kernel); normals
+//! decode from the octahedral layer.
 
-use super::interface::HdrFragmentOut as QuadVertexOutput;
-use super::{
-    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, ShaderModule, naga_ir,
-    resource_stays_multisampled, wgsl_decl,
-};
+use super::{Resource, ResourceKind, resource_stays_multisampled};
 use crate::renderer::{AoUniform, CameraUniform};
 
 /// Resource layout of the AO raw pass (what `Renderer3D::create_ao_passes`
@@ -121,14 +118,6 @@ pub(crate) fn ao_per_sample_flag(sample_count: u32, keeps: bool) -> bool {
     sample_count > 1 && keeps
 }
 
-/// Fullscreen vertex entry shared by all AO stages (triangle-strip quad).
-const AO_VERTEX_ENTRY: &str = r#"
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> QuadVertexOutput {
-    return QuadVertexOutput(quad[vertex_index], uvs[vertex_index]);
-}
-"#;
-
 /// Full WGSL source for the AO raw fragment stage at a sample count.
 ///
 /// The kernels come from the llvm2gpu crates: one artifact for 1x and the
@@ -160,21 +149,18 @@ pub fn wgsl_source_blur() -> String {
     include_str!("ao_blur_generated.wgsl").to_string()
 }
 
-/// Full WGSL source for the shared AO vertex stage.
-pub fn wgsl_vertex_source() -> String {
-    ShaderModule::new()
-        .consts(naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS))
-        .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
-        .entry(AO_VERTEX_ENTRY)
-        .emit()
-}
-
 /// Vertex entry-point name (the pipeline-convention ABI).
-pub mod vs_main {
-    /// Pipeline entry-point name.
-    pub fn entry_point() -> &'static str {
-        "vs_main"
-    }
+///
+/// The stage itself is the shared quad module: both AO methods draw the same
+/// triangle-strip quad, so they bind
+/// [`quad_vertex_generated`](super::quad_vertex_generated) for the vertex stage
+/// and their own artifact for the fragment.
+pub use super::quad_vertex_generated::VS_ENTRY;
+
+/// Full WGSL source for the shared AO vertex stage.
+#[must_use]
+pub fn wgsl_vertex_source() -> String {
+    super::quad_vertex_generated::wgsl_vertex_source()
 }
 
 /// Fragment entry-point name (the pipeline-convention ABI).

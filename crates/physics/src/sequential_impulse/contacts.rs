@@ -13,8 +13,8 @@ use super::*;
 use crate::constants::{
     DEGENERATE_LEN2, FEATURE_NORMAL_DOT_MIN, FRICTION_IMPULSE_DUST, MIN_EFFECTIVE_MASS,
 };
-use crate::contact_math::{contact_friction_clamp, contact_normal_step};
 use crate::flags::{Dispatch, RestitutionGate, RollAxis, SolvePath};
+use ornis_gpu_si::row::{contact_friction_clamp, contact_normal_step};
 
 /// Warm-start / restitution policy constants, shared by the CPU island path
 /// and the GPU single-point path (identical preamble semantics).
@@ -873,9 +873,9 @@ impl SequentialImpulseEngine {
                 // (below), never accumulated. G6: the target is the
                 // speculative approach limit (0 when touching), not
                 // necessarily a full stop. Shared isotropic row
-                // (contact_math): the reciprocal folds the division into
+                // (row::contact_normal_step): the reciprocal folds the division into
                 // the kernel's multiply form.
-                let new_acc = contact_normal_step::eval(vn, st.target[k], 1.0 / k_eff, st.acc[k]);
+                let new_acc = contact_normal_step(vn, st.target[k], 1.0 / k_eff, st.acc[k]);
                 let delta = new_acc - st.acc[k];
                 st.acc[k] = new_acc;
                 if delta.abs() > DEGENERATE_LEN2 {
@@ -1311,9 +1311,9 @@ fn tangent_effective_mass(
 
 /// Coulomb cone projection for one friction axis given the accumulated
 /// impulse on the perpendicular axis. Thin alias over the shared isotropic
-/// row ([`crate::contact_math`]); kept so solver call sites stay unchanged.
+/// row ([`ornis_gpu_si::row`]); kept so solver call sites stay unchanged.
 fn clamp_friction_impulse(new_t: f32, other: f32, max_friction: f32) -> f32 {
-    contact_friction_clamp::eval(new_t, other, max_friction)
+    contact_friction_clamp(new_t, other, max_friction)
 }
 
 impl SequentialImpulseEngine {

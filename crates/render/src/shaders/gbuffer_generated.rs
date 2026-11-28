@@ -1,219 +1,50 @@
-//! G-buffer shader generated from Rust (Render path 2).
+//! G-buffer pass: translated from Rust through LLVM IR.
 //!
-//! Canonical source is the Rust code in this module: the instance-transform
-//! vertex boilerplate and the five standard MRTs plus optional motion
-//! target live here as Rust strings, and the `octahedral_encode` kernel is
-//! spliced in from
-//! [`crate::shaders::math`] (single source of truth via `#[kernel]`).
-//! The former handwritten `shaders/wgsl/gbuffer_*.wgsl` sources were deleted
-//! after the `#[stage]` translation; the `gbuffer_*_matches_legacy_shape`
-//! tests pin the entry shapes.
+//! The shader lives in `crates/gpu-gbuffer`. Two vertex entries transform one
+//! mesh instance with its own matrices — `vs_main` indexes the per-object
+//! record with `instance_index`, `vs_main_indirect` first reads the scene index
+//! out of the compacted visibility list — and the fragment stage fills the five
+//! lighting targets plus the two temporal ones the resolve reads (motion vector
+//! and quantized previous depth).
 //!
-//! Note: the vertex boilerplate matches the forward-PBR vertex (same
-//! transform. The PBR migration (`pbr_generated`) reuses
-//! [`wgsl_vertex_source`] rather than duplicating it.
+//! `xtask build-shaders --package ornis-gpu-gbuffer --entry all` writes the
+//! checked-in `gbuffer_generated.wgsl` (all three entries, one module);
+//! `--entry vs_main` writes `gbuffer_vertex_generated.wgsl`, the vertex-only
+//! module the forward-PBR pass shares. `--check` in CI catches drift.
 
-use super::interface::{
-    GbufferFragmentInput as FragmentInput, GbufferOutput as GBufferOutput,
-    GbufferVertexInput as VertexInput, GbufferVertexOutput as VertexOutput,
-};
-use super::{
-    OPENPBR_WGSL_NAME, Resource, ResourceKind, ShaderModule, helpers, openpbr_material_decl,
-    wgsl_decl,
-};
+use super::{OPENPBR_WGSL_NAME, Resource, ResourceKind};
 use crate::renderer::{CameraUniform, PerObjectGpu};
-use crate::shaders::math::octahedral_encode;
-use ornis_macros::stage;
 
-/// G-buffer vertex resources as a context bundle (`ctx.per_objects`, …).
-#[allow(dead_code)]
-#[derive(ornis_macros::ShaderContext)]
-pub(crate) struct GbufferVertexContext {
-    pub per_objects: Vec<PerObjectGpu>,
-    pub camera: CameraUniform,
-}
+/// Vertex entry point of the translated module (`instance_index` indexes the
+/// object record directly).
+pub const VS_ENTRY: &str = "vs_main";
 
-/// Index-compaction side table for the indirect vertex entry.
-#[allow(dead_code)]
-#[derive(ornis_macros::ShaderContext)]
-pub(crate) struct GbufferIndicesContext {
-    pub visible_indices: Vec<u32>,
-}
+/// Vertex entry point that reads the compacted visibility list first.
+pub const VS_INDIRECT_ENTRY: &str = "vs_main_indirect";
 
-/// G-buffer vertex entry, translated by [`stage`](ornis_macros::stage):
-/// instance transform + world-space varying. DSL-only — `per_objects` /
-/// `camera` globals declared via `#[wgsl(global)]`.
-#[stage(vertex)]
-fn vs_main(
-    input: VertexInput,
-    instance_index: super::InstanceIndex,
-    ctx: Context<GbufferVertexContext>,
-) -> VertexOutput {
-    let obj = ctx.per_objects[instance_index];
-    let world_pos = obj.model * Vec4::new(input.position, 1.0);
-    let mut previous_world_pos = obj.previous_model * Vec4::new(input.position, 1.0);
-    if obj.motion_valid == 0 {
-        previous_world_pos = Vec4::new(previous_world_pos.xyz, 0.0);
-    }
-    let mut world_normal = normalize((obj.normal_matrix * Vec4::new(input.normal, 0.0)).xyz);
-    // Tangents are directions: the model matrix, not the inverse-transpose
-    // used for normals. Under non-uniform scale the inverse-transpose
-    // shears the tangent off the surface.
-    let mut world_tangent = normalize((obj.model * Vec4::new(input.tangent, 0.0)).xyz);
-    let mut output: VertexOutput;
-    output.clip_position = ctx.camera.view_proj * world_pos;
-    output.world_position = world_pos.xyz;
-    output.previous_world_position = previous_world_pos;
-    output.world_normal = world_normal;
-    output.uv = input.uv;
-    output.world_tangent = world_tangent;
-    output.material_index = obj.material_index;
-    return output;
-}
+/// Fragment entry point of the translated module.
+pub const FS_ENTRY: &str = "fs_main";
 
-/// Indirect g-buffer vertex entry: the compacted index list selects the
-/// source `PerObject` record before the shared transform.
-#[stage(vertex)]
-fn vs_main_indirect(
-    input: VertexInput,
-    instance_index: super::InstanceIndex,
-    ctx: Context<GbufferVertexContext>,
-    indices: Context<GbufferIndicesContext>,
-) -> VertexOutput {
-    let scene_index = indices.visible_indices[instance_index];
-    let obj = ctx.per_objects[scene_index];
-    let world_pos = obj.model * Vec4::new(input.position, 1.0);
-    let mut previous_world_pos = obj.previous_model * Vec4::new(input.position, 1.0);
-    if obj.motion_valid == 0 {
-        previous_world_pos = Vec4::new(previous_world_pos.xyz, 0.0);
-    }
-    let mut world_normal = normalize((obj.normal_matrix * Vec4::new(input.normal, 0.0)).xyz);
-    let mut world_tangent = normalize((obj.model * Vec4::new(input.tangent, 0.0)).xyz);
-    let mut output: VertexOutput;
-    output.clip_position = ctx.camera.view_proj * world_pos;
-    output.world_position = world_pos.xyz;
-    output.previous_world_position = previous_world_pos;
-    output.world_normal = world_normal;
-    output.uv = input.uv;
-    output.world_tangent = world_tangent;
-    output.material_index = obj.material_index;
-    return output;
-}
-
-/// G-buffer vertex shader: instance transforms + world position.
-///
-/// Assembled from the derived `Camera`/`PerObject` layouts plus the vertex
-/// body; entry point name `vs_main` is kept for compatibility with
-/// `create_gbuffer_pass` / `create_pbr_pass`. Matches the former handwritten
-/// vertex except the dropped `_padding` line
-/// (`#[wgsl(skip)]` pads are not shader-visible).
-///
-/// Note: unlike the fragment skeletons, this stage terminates structs
-/// with bare `}` (no `;`), so the layouts splice raw here instead of via
-/// `wgsl_decl`.
-pub fn wgsl_vertex_source() -> String {
-    ShaderModule::new()
-        .decl(CameraUniform::WGSL_SOURCE)
-        .decl(PerObjectGpu::WGSL_SOURCE)
-        .resources(&GBUFFER_RESOURCES, &[0, 1])
-        .resources(GBUFFER_INDICES_RESOURCES, &[0])
-        .decl(wgsl_decl(VertexInput::WGSL_SOURCE))
-        .decl(wgsl_decl(VertexOutput::WGSL_SOURCE))
-        .entry(vs_main::wgsl_source())
-        .entry(vs_main_indirect::wgsl_source())
-        .emit()
-}
-
-/// G-buffer fragment entry, translated by [`stage`](ornis_macros::stage):
-/// five standard targets plus optional motion and previous-depth targets. DSL-only —
-/// `materials` global declared via `#[wgsl(global)]`.
-#[stage(fragment)]
-fn fs_main(
-    input: FragmentInput,
-    #[wgsl(global = "materials")] materials: [OpenPBRMaterial],
-    #[wgsl(global = "camera")] camera: CameraUniform,
-) -> GBufferOutput {
-    let mat = materials[input.material_index];
-    let n = normalize(input.world_normal);
-    let world_pos = input.world_position;
-    let base_color = mat.base_color.rgb;
-    let opacity = mat.base_color.a;
-    let normal_enc = octahedral_encode(n);
-    let material_id = input.material_index;
-    let world_pos_enc = Vec2::new(world_pos.x, world_pos.y);
-    let roughness = mat.specular_params.y;
-    let metalness = mat.base_params.z;
-    let specular_weight = mat.specular_params.x;
-    let specular_ior = mat.specular_params.z;
-    let coat_weight = mat.coat_params.x;
-    let coat_roughness = mat.coat_params.y;
-    let subsurface_weight = mat.subsurface_params.x;
-    let transmission_weight = mat.transmission_params.x;
-    let fuzz_weight = mat.fuzz_params.x;
-    let thin_film_weight = mat.thin_film_params.x;
-    let emission_luminance = mat.emission_params.x;
-    let mat_params = Vec4::new(roughness, metalness, specular_ior, coat_weight);
-    let current_clip = camera.view_proj * Vec4::new(world_pos.xyz, 1.0);
-    let previous_clip =
-        camera.previous_view_proj * Vec4::new(input.previous_world_position.xyz, 1.0);
-    let mut motion = Vec2::new(0.0, 0.0);
-    // The reserved integer code and depth scale pack validity and prior depth.
-    let mut previous_depth = PREVIOUS_DEPTH_INVALID;
-    if current_clip.w > 0.0
-        && previous_clip.w > 0.0
-        && input.previous_world_position.w > MOTION_VALID_THRESHOLD
-    {
-        let current_ndc = current_clip.xyz / current_clip.w;
-        let previous_ndc = previous_clip.xyz / previous_clip.w;
-        let current_uv = Vec2::new(
-            current_ndc.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
-            NDC_TO_UV_HALF - current_ndc.y * NDC_TO_UV_HALF,
-        );
-        let previous_uv = Vec2::new(
-            previous_ndc.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
-            NDC_TO_UV_HALF - previous_ndc.y * NDC_TO_UV_HALF,
-        );
-        motion = current_uv - previous_uv;
-        previous_depth =
-            u32(clamp(previous_ndc.z, 0.0, 1.0) * PREVIOUS_DEPTH_MAX + DEPTH_ROUNDING_BIAS);
-    }
-    let mut output: GBufferOutput;
-    output.albedo = Vec4::new(base_color, opacity);
-    output.normal = normal_enc;
-    output.material_id = material_id;
-    output.world_pos = world_pos_enc;
-    output.mat_params = mat_params;
-    output.motion = motion;
-    output.previous_depth = previous_depth;
-    return output;
-}
-
-/// G-buffer fragment shader: the standard targets plus motion/depth, splicing
-/// the octahedral normal-encoding kernel via `wgsl_source()`.
-///
-/// Assembled from the shared `openpbr_material_decl()`, the shared varyings,
-/// the translated [`fs_main`] body and kernel; entry point `fs_main`
-/// is kept.
+/// The generated g-buffer module: both vertex entries and the fragment stage.
 pub fn wgsl_source() -> String {
-    ShaderModule::new()
-        .decl(CameraUniform::WGSL_SOURCE)
-        .decl(openpbr_material_decl())
-        .resources(&GBUFFER_RESOURCES, &[0, 2])
-        .consts(helpers::wgsl_consts())
-        .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
-        .decl(wgsl_decl(GBufferOutput::WGSL_SOURCE))
-        .entry(fs_main::wgsl_source())
-        .helper(octahedral_encode::wgsl_source())
-        .emit()
+    include_str!("gbuffer_generated.wgsl").to_string()
 }
 
-/// Static view for naga validation in tests.
-pub fn wgsl_source_static() -> String {
-    wgsl_source()
+/// The vertex-only module, shared with the forward-PBR pass.
+///
+/// A pipeline layout only has to cover the bindings the entry point it draws
+/// with actually uses, so the forward pass builds its vertex stage from this
+/// narrower module instead of the whole g-buffer one.
+pub fn wgsl_vertex_source() -> String {
+    include_str!("gbuffer_vertex_generated.wgsl").to_string()
 }
 
 /// Resource layout of the g-buffer pass. Type names come from the Rust
 /// side (`WGSL_NAME` / `OPENPBR_WGSL_NAME`) — never retyped.
+///
+/// The translated kernel reads `per_objects` and `materials` word by word
+/// (they mix matrices and counters), which the layout does not describe: a
+/// bind group layout only fixes the address space and the access mode.
 pub const GBUFFER_RESOURCES: [Resource; 3] = [
     Resource {
         group: 0,
@@ -253,7 +84,7 @@ pub(crate) const GBUFFER_INDICES_RESOURCES: &[Resource] = &[Resource {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{bgl_entry, resource_decl};
+    use super::super::{bgl_entry, declared_bindings, entry_stage};
     use super::*;
 
     fn assert_valid_wgsl(name: &str, source: &str) {
@@ -270,110 +101,104 @@ mod tests {
 
     #[test]
     fn gbuffer_generated_validates_with_naga() {
+        assert_valid_wgsl("gbuffer", &wgsl_source());
         assert_valid_wgsl("gbuffer_vertex", &wgsl_vertex_source());
-        assert_valid_wgsl("gbuffer_fragment", &wgsl_source());
     }
 
+    /// All three entries live in one module, and the fragment stage fills
+    /// seven targets.
     #[test]
-    fn gbuffer_generated_contains_expected_bindings() {
-        let vs = wgsl_vertex_source();
-        assert!(vs.contains("@group(0) @binding(1) var<storage, read> per_objects"));
-        assert!(vs.contains("fn vs_main("));
-        let fs = wgsl_source();
-        assert!(fs.contains("@group(0) @binding(2) var<storage, read> materials"));
-        assert!(fs.contains("fn fs_main("));
-        assert!(fs.contains("fn octahedral_encode"));
-    }
-
-    /// The translated vertex entry must keep the legacy shape: storage read,
-    /// instance transform, var-out varying. (Byte-parity no longer applies —
-    /// the generated entry is single-line.)
-    /// Severity: medium. Non-uniform scale must not shear tangents.
-    #[test]
-    fn tangent_uses_the_model_matrix_not_the_inverse_transpose() {
-        let entry = vs_main::wgsl_source();
-        assert!(
-            entry.contains("normalize((obj.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz)"),
-            "{entry}"
+    fn gbuffer_shader_has_every_entry_and_target() {
+        let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
+        assert_eq!(
+            entry_stage(&module, VS_ENTRY),
+            Some(naga::ShaderStage::Vertex)
         );
-        assert!(
-            entry.contains("normalize((obj.model * vec4<f32>(input.tangent, 0.0)).xyz)"),
-            "{entry}"
+        assert_eq!(
+            entry_stage(&module, VS_INDIRECT_ENTRY),
+            Some(naga::ShaderStage::Vertex)
         );
-        assert!(
-            !entry.contains("normal_matrix * vec4<f32>(input.tangent"),
-            "{entry}"
+        assert_eq!(
+            entry_stage(&module, FS_ENTRY),
+            Some(naga::ShaderStage::Fragment)
         );
-        let tangent = glam::Vec3::new(1.0, 1.0, 0.0);
-        let model = glam::Mat4::from_scale(glam::Vec3::new(2.0, 1.0, 1.0));
-        let by_model = (model * tangent.extend(0.0)).truncate().normalize();
-        let by_inverse_transpose = (model.inverse().transpose() * tangent.extend(0.0))
-            .truncate()
-            .normalize();
-        assert!((by_model - glam::Vec3::new(2.0, 1.0, 0.0).normalize()).length() < 1e-5);
-        assert!(
-            by_model.dot(by_inverse_transpose) < 0.8,
-            "model {by_model} inverse-transpose {by_inverse_transpose}"
+        let fragment = module
+            .entry_points
+            .iter()
+            .find(|entry| entry.name == FS_ENTRY)
+            .expect("fragment entry");
+        let result = fragment.function.result.as_ref().expect("result");
+        let naga::TypeInner::Struct { members, .. } = &module.types[result.ty].inner else {
+            panic!("the fragment stage returns a struct");
+        };
+        assert_eq!(members.len(), 7, "five lighting targets plus motion");
+    }
+
+    /// The vertex-only module carries the shared entry and nothing else, so
+    /// the forward pass does not inherit the g-buffer's fragment bindings.
+    #[test]
+    fn gbuffer_vertex_module_is_vertex_only() {
+        let module = naga::front::wgsl::parse_str(&wgsl_vertex_source()).expect("parse");
+        assert_eq!(module.entry_points.len(), 1, "one entry point");
+        assert_eq!(
+            entry_stage(&module, VS_ENTRY),
+            Some(naga::ShaderStage::Vertex)
         );
+        let bindings = declared_bindings(&module);
+        assert_eq!(bindings.len(), 2, "{bindings:?}");
     }
 
+    /// Every table row's binding appears in the shader, and every row maps to
+    /// a layout entry: shader and pipeline agree.
     #[test]
-    fn gbuffer_vertex_entry_matches_legacy_shape() {
-        let entry = vs_main::wgsl_source();
-        assert!(entry.starts_with(
-            "@vertex\nfn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32)"
-        ));
-        assert!(entry.contains("-> VertexOutput"));
-        assert!(entry.contains("let obj = per_objects[instance_index];"));
-        assert!(entry.contains("output.clip_position = camera.view_proj * world_pos;"));
-        assert!(entry.contains("output.material_index = obj.material_index;"));
-        assert!(entry.contains("return output;"));
-    }
-
-    /// The translated fragment entry must keep the legacy shape: storage
-    /// read, standard attachments plus motion output, same kernel call. (Byte-parity no longer
-    /// applies — the generated entry is single-line.)
-    #[test]
-    fn gbuffer_fragment_entry_matches_legacy_shape() {
-        let entry = fs_main::wgsl_source();
-        assert!(entry.starts_with("@fragment\nfn fs_main(input: FragmentInput)"));
-        assert!(entry.contains("-> GBufferOutput"));
-        assert!(entry.contains("let mat = materials[input.material_index];"));
-        assert!(entry.contains("let normal_enc = octahedral_encode(n);"));
-        assert!(entry.contains("output.mat_params = mat_params;"));
-        assert!(entry.contains("return output;"));
-    }
-
-    #[test]
-    fn gbuffer_motion_rejects_unreliable_previous_positions() {
-        let vertex = vs_main::wgsl_source();
-        let fragment = fs_main::wgsl_source();
-        assert!(vertex.contains("obj.motion_valid"));
-        assert!(fragment.contains("input.previous_world_position.w > MOTION_VALID_THRESHOLD"));
-        assert!(fragment.contains("output.motion = motion;"));
-        assert!(fragment.contains("output.previous_depth = previous_depth;"));
-    }
-
-    /// Every table row's declaration appears in the assembled stages, and
-    /// every row maps to a layout entry: shader and pipeline agree.
-    #[test]
-    fn gbuffer_resources_cover_stages_and_layout() {
-        let src = wgsl_vertex_source() + &wgsl_source();
+    fn gbuffer_resources_cover_every_binding() {
+        let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
+        let bindings = declared_bindings(&module);
+        for resource in GBUFFER_INDICES_RESOURCES {
+            assert_eq!(
+                bgl_entry(resource, false).binding,
+                resource.binding,
+                "{}",
+                resource.name
+            );
+            assert!(
+                bindings.contains(&(resource.group, resource.binding)),
+                "missing {}",
+                resource.name
+            );
+        }
         assert_eq!(GBUFFER_RESOURCES.len(), 3);
-        for r in GBUFFER_RESOURCES {
-            assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
-            let e = bgl_entry(&r, false);
-            assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
+        for resource in GBUFFER_RESOURCES {
+            assert!(
+                bindings.contains(&(resource.group, resource.binding)),
+                "missing {}",
+                resource.name
+            );
+            let entry = bgl_entry(&resource, false);
+            assert_eq!(
+                (entry.binding, entry.visibility),
+                (resource.binding, resource.visibility)
+            );
         }
     }
 
+    /// The module declares the compacted visibility list the indirect entry
+    /// reads, and the table binds it at that same address.
     #[test]
-    fn gbuffer_generated_parity_with_legacy_assembly() {
-        // Layouts still splice the derived declarations.
-        let src = wgsl_source();
-        assert!(src.contains(CameraUniform::WGSL_SOURCE));
-        assert!(src.contains(openpbr_material_decl().as_str()));
-        assert!(src.contains(&wgsl_decl(FragmentInput::WGSL_SOURCE)));
-        assert!(src.contains(&wgsl_decl(GBufferOutput::WGSL_SOURCE)));
+    fn gbuffer_indirect_entry_reads_the_visibility_list() {
+        let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
+        let group_one: Vec<(u32, u32)> = declared_bindings(&module)
+            .into_iter()
+            .filter(|(group, _)| *group == 1)
+            .collect();
+        let expected: Vec<(u32, u32)> = GBUFFER_INDICES_RESOURCES
+            .iter()
+            .map(|resource| (resource.group, resource.binding))
+            .collect();
+        assert_eq!(group_one, expected);
+        assert_eq!(
+            entry_stage(&module, VS_INDIRECT_ENTRY),
+            Some(naga::ShaderStage::Vertex)
+        );
     }
 }

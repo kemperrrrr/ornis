@@ -675,9 +675,9 @@ mod tests {
 
     #[test]
     fn per_object_material_index_substitutes_to_u32() {
-        use crate::shaders::interface::{GbufferFragmentInput, GbufferVertexOutput};
-        // The DSL substitutes the transparent `MaterialIdx` newtype to WGSL
-        // `u32`: the declaration texts are unchanged from the raw-`u32` era.
+        // The `WgslStruct` derive substitutes the transparent `MaterialIdx`
+        // newtype to WGSL `u32`: the declaration texts are unchanged from the
+        // raw-`u32` era.
         assert!(
             PerObjectGpu::WGSL_SOURCE.contains("material_index: u32"),
             "{}",
@@ -698,25 +698,13 @@ mod tests {
                 "motion_valid",
             ]
         );
+        // The g-buffer artifact reads the same words positionally (`in4_` is
+        // the flat `u32` the newtype becomes), so the type contract is the
+        // artifact's own signature and the layout above.
+        let gbuffer = crate::shaders::gbuffer_generated::wgsl_source();
         assert!(
-            GbufferVertexOutput::WGSL_SOURCE.contains("material_index: u32"),
-            "{}",
-            GbufferVertexOutput::WGSL_SOURCE
-        );
-        assert!(
-            GbufferFragmentInput::WGSL_SOURCE.contains("material_index: u32"),
-            "{}",
-            GbufferFragmentInput::WGSL_SOURCE
-        );
-        assert!(
-            GbufferVertexOutput::WGSL_SOURCE.contains("previous_world_position: vec4<f32>"),
-            "{}",
-            GbufferVertexOutput::WGSL_SOURCE
-        );
-        assert!(
-            GbufferFragmentInput::WGSL_SOURCE.contains("previous_world_position: vec4<f32>"),
-            "{}",
-            GbufferFragmentInput::WGSL_SOURCE
+            gbuffer.contains("@location(4) @interpolate(flat) in4_: u32"),
+            "g-buffer artifact lost the integer material index"
         );
         // Assert the CPU layout from its field types, then compare it with
         // the generated WGSL declaration rather than pinning byte offsets.

@@ -11,7 +11,8 @@
 //! 2. `#[unsafe(export_name = "cs_main")]` is attached here, so a kernel writes a
 //!    plain safe `pub fn` — no `extern "C"`, no `#[unsafe(no_mangle)]`;
 //! 3. the attribute's own arguments are validated — `compute(threads(N))`,
-//!    `compute(threads(X, Y))`, `compute(threads(X, Y, Z))`, or `fragment`;
+//!    `compute(threads(X, Y))`, `compute(threads(X, Y, Z))`, `vertex`, or
+//!    `fragment`;
 //! 4. a `#[used]` record is emitted whose uniform tags are read from the
 //!    parameter types, not from the attribute.
 //!
@@ -68,11 +69,12 @@ pub(super) fn expand(
     })
 }
 
-/// Parse `compute(threads(..))` or `fragment` into an `@workgroup_size` triple.
+/// Parse `compute(threads(..))`, `vertex`, or `fragment` into an
+/// `@workgroup_size` triple.
 ///
 /// One thread count is `(N, 1, 1)`. Two are `(X, Y, 1)`. Three are the full
-/// triple. A fragment has no workgroup; the record still carries `1,1,1`,
-/// which is what the translator stores for `fs_main`.
+/// triple. A raster stage has no workgroup; the record still carries `1,1,1`,
+/// which is what the translator stores for `vs_main` and `fs_main`.
 fn parse_attr(attr: proc_macro2::TokenStream, name: &syn::Ident) -> syn::Result<[u32; 3]> {
     let parser = Punctuated::<Expr, syn::Token![,]>::parse_terminated;
     let exprs = parser.parse2(attr)?;
@@ -87,27 +89,30 @@ fn parse_attr(attr: proc_macro2::TokenStream, name: &syn::Ident) -> syn::Result<
         stage = Some(parse_stage(&expr)?);
     }
     stage.ok_or_else(|| {
-        syn::Error::new_spanned(name, "missing `compute(threads(..))` or `fragment`")
+        syn::Error::new_spanned(
+            name,
+            "missing `compute(threads(..))`, `vertex`, or `fragment`",
+        )
     })
 }
 
-/// One stage expression: `fragment` or `compute(threads(..))`.
+/// One stage expression: `fragment`, `vertex`, or `compute(threads(..))`.
 fn parse_stage(expr: &Expr) -> syn::Result<[u32; 3]> {
     if let Expr::Path(path) = expr
-        && path.path.is_ident("fragment")
+        && (path.path.is_ident("fragment") || path.path.is_ident("vertex"))
     {
         return Ok([1, 1, 1]);
     }
     let Expr::Call(call) = expr else {
         return Err(syn::Error::new_spanned(
             expr,
-            "expected `compute(threads(..))` or `fragment`",
+            "expected `compute(threads(..))`, `vertex`, or `fragment`",
         ));
     };
     if !path_ident_is(&call.func, "compute") {
         return Err(syn::Error::new_spanned(
             &call.func,
-            "expected `compute(threads(..))` or `fragment`",
+            "expected `compute(threads(..))`, `vertex`, or `fragment`",
         ));
     }
     let Some(Expr::Call(inner)) = call.args.first() else {

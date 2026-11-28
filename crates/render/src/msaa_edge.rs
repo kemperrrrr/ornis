@@ -105,7 +105,7 @@ mod tests {
         assert!(mask.shades(2), "the covered sample must be shaded");
         assert!(!mask.shades(1) && !mask.shades(3));
         // Hardware resolve of one +X encoding and three clears is not +X.
-        let encoded = octahedral_encode::eval(Vec3::X);
+        let encoded = octahedral_encode(Vec3::X);
         let filtered = octahedral_decode_rust(encoded * 0.25);
         assert!(
             filtered.x < 0.5,

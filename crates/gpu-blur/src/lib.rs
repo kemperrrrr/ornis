@@ -92,6 +92,7 @@ fn min_u32(a: u32, b: u32) -> u32 {
 
 /// Weight of the tap at `uv + (dx, dy) * texel` for the bilateral curve.
 #[inline(always)]
+// qual:allow(test_quality, untested) reason: "samples the depth texture and reads the camera uniform; the host build has neither, and the device gate compares the blurred frame"
 // qual:allow(srp, max_parameters=12) reason: "one tap; the arguments are the entry's live values, and a struct would allocate in the shader"
 #[allow(clippy::too_many_arguments)]
 fn tap_weight(

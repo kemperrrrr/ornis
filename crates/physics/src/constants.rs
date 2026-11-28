@@ -2,8 +2,10 @@
 //!
 //! These are domain floors, not idiomatic factors: a bare `1e-10` in a
 //! contact row and the same literal in the wide path mean the same gate
-//! and must stay coupled. GPU/`#[kernel]` bodies keep literals — the WGSL
-//! DSL has no spelling for a Rust `const` (see `gpu/avbd.rs`).
+//! and must stay coupled. The gates the GPU kernels share with the CPU paths
+//! are defined once in `ornis_gpu_abi::thresholds` and re-exported here, so a
+//! translated contact/AVBD kernel and the Rust solver read one number, not two
+//! spellings that can drift apart.
 
 /// Effective-mass floor for sequential-impulse constraint rows.
 ///
@@ -17,8 +19,10 @@ pub(crate) const MIN_EFFECTIVE_MASS: f32 = 1e-10;
 ///
 /// Used for joint-axis admission, friction-cone length guards and similar
 /// “direction has collapsed” checks. Distinct from [`MIN_EFFECTIVE_MASS`]
-/// (mass domain) and from AVBD's `1e-9` near-zero used for TOI/spin.
-pub(crate) const DEGENERATE_LEN2: f32 = 1e-12;
+/// (mass domain) and from AVBD's `1e-9` near-zero used for TOI/spin. The
+/// value is `ornis_gpu_abi::thresholds::DEGENERATE` — the constant the
+/// translated contact and AVBD kernels branch on.
+pub(crate) const DEGENERATE_LEN2: f32 = ornis_gpu_abi::thresholds::DEGENERATE;
 
 /// Absolute near-zero for soft/XPBD constraint residuals and distances.
 ///
@@ -76,5 +80,6 @@ pub(crate) const CCD_TRAVEL_GATE_FRACTION: f32 = 0.5;
 /// Squared friction impulse treated as dust (skip applying).
 ///
 /// Shared by the scalar SI contact path and the SIMD-wide batch so both
-/// skip the same near-zero Coulomb deltas.
-pub(crate) const FRICTION_IMPULSE_DUST: f32 = 1e-24;
+/// skip the same near-zero Coulomb deltas. Same definition the translated
+/// contact kernel reads (`ornis_gpu_abi::thresholds::FRICTION_DUST`).
+pub(crate) const FRICTION_IMPULSE_DUST: f32 = ornis_gpu_abi::thresholds::FRICTION_DUST;

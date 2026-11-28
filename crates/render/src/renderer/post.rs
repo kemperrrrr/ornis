@@ -198,13 +198,13 @@ impl Renderer3D {
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &vs_module,
-                    entry_point: Some(shaders::hdr_composite_generated::vs_main::entry_point()),
+                    entry_point: Some(shaders::hdr_composite_generated::VS_ENTRY),
                     buffers: &[],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &fs_module,
-                    entry_point: Some(shaders::hdr_composite_generated::fs_main::entry_point()),
+                    entry_point: Some(shaders::hdr_composite_generated::FS_ENTRY),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: surface_format,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -332,13 +332,13 @@ impl Renderer3D {
             layout: Some(layout),
             vertex: wgpu::VertexState {
                 module: vs_module,
-                entry_point: Some(shaders::bloom_generated::vs_main::entry_point()),
+                entry_point: Some(shaders::bloom_generated::VS_ENTRY),
                 buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: fs_module,
-                entry_point: Some(shaders::bloom_generated::fs_main::entry_point()),
+                entry_point: Some(shaders::bloom_generated::FS_ENTRY),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba16Float,
                     blend,
@@ -368,8 +368,8 @@ impl Renderer3D {
 
     /// Builds the opt-in distance-fog fullscreen pass for `surface_format`.
     ///
-    /// The shader is generated from Rust
-    /// ([`crate::shaders::fog_generated`], `#[stage]` entries — no
+    /// The shader is translated from Rust
+    /// ([`crate::shaders::fog_generated`], checked-in artifact — no
     /// handwritten WGSL); the layout comes from its `FOG_RESOURCES` table.
     /// The params buffer starts at a benign enabled-neutral value (black,
     /// zero density is never drawn — [`render_fog`](Self::render_fog)
@@ -417,13 +417,13 @@ impl Renderer3D {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &vertex_module,
-                entry_point: Some(shaders::fog_generated::vs_main::entry_point()),
+                entry_point: Some(shaders::fog_generated::VS_ENTRY),
                 buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &fog_module,
-                entry_point: Some(shaders::fog_generated::fs_main::entry_point()),
+                entry_point: Some(shaders::fog_generated::FS_ENTRY),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
                     blend: Some(wgpu::BlendState::REPLACE),
@@ -1044,7 +1044,7 @@ mod tests {
                 .expect("positive density"),
         );
         let tonemap = |rgb: [f32; 3]| {
-            let mapped = crate::shaders::math::aces_tonemap::eval(glam::Vec3::from(rgb));
+            let mapped = crate::shaders::math::aces_tonemap(glam::Vec3::from(rgb));
             [mapped.x, mapped.y, mapped.z]
         };
         // The pass mixes in scene-linear space, then applies the same ACES
@@ -1348,7 +1348,7 @@ mod tests {
             ]
         };
         let aces = |rgb: [f32; 3]| {
-            let mapped = aces_tonemap::eval(glam::Vec3::from(rgb));
+            let mapped = aces_tonemap(glam::Vec3::from(rgb));
             [mapped.x, mapped.y, mapped.z]
         };
         let near = |actual: [f32; 3], expected: [f32; 3]| {
