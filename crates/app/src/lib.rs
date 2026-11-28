@@ -12,7 +12,6 @@
 use glam::Vec3;
 use ornis_animation::{
     AnimClip, AnimPlayer, AnimSampleSystem, SkelSampleSystem, SkelSkinGpuFallbackSystem,
-    SkelSkinSystem,
 };
 use ornis_assets::scene::TransformDesc;
 use ornis_core::{
@@ -174,10 +173,6 @@ pub fn install_skeletal_animation(engine: &mut Engine) {
         .fixed_schedule_mut()
         .try_order_before("physics_sync_out", "ragdoll_sync");
     engine.schedule_mut().add_system(SkelSampleSystem::new());
-    // The CPU pass is what a custom schedule installs in place of the GPU
-    // fallback. Naming the constructor here is what keeps that public pass
-    // reachable from the host, not only from the animation crate's tests.
-    let _cpu_skin: fn() -> SkelSkinSystem = SkelSkinSystem::new;
     engine.schedule_mut().add_system(SkelSkinGpuFallbackSystem);
     let _ = engine
         .schedule_mut()

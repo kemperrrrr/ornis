@@ -14,9 +14,11 @@
 #[allow(dead_code)]
 mod common;
 
-use common::parity::half;
 use common::parity::half_to_f32;
 use common::parity::map_readback;
+use common::parity::solid_rgba16;
+use common::parity::solid_rgba16_cube;
+use common::parity::write_image_term;
 use glam::{Mat4, Vec3};
 
 /// The forward-PBR fragment stage this pass used before the migration.
@@ -203,9 +205,21 @@ impl Inputs {
             shadow_tex: cleared_depth(device, queue, "pbr shadow atlas", 1),
             shadow_sampler: comparison_sampler(device),
             shadow_cube_tex: cleared_cube(device, queue, "pbr shadow cube"),
-            prefilter_cube: solid_cube(device, queue, "pbr prefiltered", [0.3, 0.4, 0.5, 1.0]),
-            irradiance_cube: solid_cube(device, queue, "pbr irradiance", [0.6, 0.5, 0.4, 1.0]),
-            brdf_lut: solid_texture(device, queue, "pbr brdf lut", [1.0, 0.0, 0.0, 1.0]),
+            prefilter_cube: solid_rgba16_cube(
+                device,
+                queue,
+                "pbr prefiltered",
+                [0.3, 0.4, 0.5, 1.0],
+                8,
+            ),
+            irradiance_cube: solid_rgba16_cube(
+                device,
+                queue,
+                "pbr irradiance",
+                [0.6, 0.5, 0.4, 1.0],
+                8,
+            ),
+            brdf_lut: solid_rgba16(device, queue, "pbr brdf lut", [1.0, 0.0, 0.0, 1.0], 4),
             ibl_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("pbr ibl sampler"),
                 mag_filter: wgpu::FilterMode::Linear,
@@ -224,14 +238,15 @@ impl Inputs {
             cluster_light_indices: storage(device, queue, "pbr cluster indices", &[0u8; 4]),
             cluster_grid: storage(device, queue, "pbr cluster grid", &[0u8; 8]),
             vertices: vertex_buffer(device, queue),
-            base_color_tex: solid_texture(device, queue, "pbr base color", [0.8, 0.5, 0.2, 1.0]),
-            metallic_roughness_tex: solid_texture(
+            base_color_tex: solid_rgba16(device, queue, "pbr base color", [0.8, 0.5, 0.2, 1.0], 4),
+            metallic_roughness_tex: solid_rgba16(
                 device,
                 queue,
                 "pbr metallic roughness",
                 [0.0, 0.7, 0.35, 1.0],
+                4,
             ),
-            emissive_tex: solid_texture(device, queue, "pbr emissive", [0.1, 0.2, 0.3, 1.0]),
+            emissive_tex: solid_rgba16(device, queue, "pbr emissive", [0.1, 0.2, 0.3, 1.0], 4),
             material_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("pbr material sampler"),
                 mag_filter: wgpu::FilterMode::Linear,
@@ -423,10 +438,7 @@ fn lighting_bytes() -> Vec<u8> {
     put(&mut bytes, point + 16, 2, 0.9);
     put(&mut bytes, point + 16, 3, 0.0);
     // light_count, ibl_weight, ibl_max_mip, debug_view.
-    // qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
-    bytes[LIGHT_COUNT_AT..LIGHT_COUNT_AT + 4].copy_from_slice(&2u32.to_le_bytes());
-    put(&mut bytes, LIGHT_COUNT_AT + 4, 0, 0.4);
-    put(&mut bytes, LIGHT_COUNT_AT + 8, 0, 4.0);
+    write_image_term(&mut bytes, LIGHT_COUNT_AT, 2);
     // csm: four cascades, the view axis, the splits and the far split.
     let csm = CSM_AT;
     for cascade in 0..CASCADES {
@@ -610,104 +622,6 @@ fn clear_depth(device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureV
     });
     drop(_pass);
     queue.submit([encoder.finish()]);
-}
-
-/// A `Rgba16Float` cube of `size × size` faces holding one colour.
-fn solid_cube(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    label: &str,
-    color: [f32; 4],
-) -> wgpu::TextureView {
-    let size: u32 = 8;
-    let texture = cube_texture(device, label, size);
-    let mut texels = Vec::with_capacity((size * size) as usize * 8);
-    for _ in 0..size * size {
-        for lane in color {
-            texels.extend_from_slice(&half(lane));
-        }
-    }
-    for face in 0..6 {
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: face,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            &texels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(size * 8),
-                rows_per_image: Some(size),
-            },
-            extent(size, size, 1),
-        );
-    }
-    texture.create_view(&wgpu::TextureViewDescriptor {
-        dimension: Some(wgpu::TextureViewDimension::Cube),
-        ..Default::default()
-    })
-}
-
-/// A `Rgba16Float` cube texture of `size × size` faces.
-fn cube_texture(device: &wgpu::Device, label: &str, size: u32) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: extent(size, size, 6),
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba16Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    })
-}
-
-/// A `Rgba16Float` texture holding one colour.
-fn solid_texture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    label: &str,
-    color: [f32; 4],
-) -> wgpu::TextureView {
-    let size = 4u32;
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: extent(size, size, 1),
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba16Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let mut texels = Vec::with_capacity((size * size) as usize * 8);
-    for _ in 0..size * size {
-        for lane in color {
-            texels.extend_from_slice(&half(lane));
-        }
-    }
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &texels,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(size * 8),
-            rows_per_image: Some(size),
-        },
-        extent(size, size, 1),
-    );
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 /// Vertex attributes of the interleaved mesh.

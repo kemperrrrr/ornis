@@ -241,6 +241,188 @@ pub fn half(value: f32) -> [u8; 2] {
     encoded.to_le_bytes()
 }
 
+/// Little-endian `Rgba16Float` texels of one `size × size` image of `color`.
+pub fn rgba16_texels(size: u32, color: [f32; 4]) -> Vec<u8> {
+    let mut texels = Vec::with_capacity((size * size) as usize * 8);
+    for _ in 0..size * size {
+        for lane in color {
+            texels.extend_from_slice(&half(lane));
+        }
+    }
+    texels
+}
+
+/// A `Rgba16Float` cube whose every face is `color`.
+pub fn solid_rgba16_cube(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    color: [f32; 4],
+    size: u32,
+) -> wgpu::TextureView {
+    let texture = rgba16_texture(device, label, size, 6);
+    paint_cube(queue, &texture, size, &rgba16_texels(size, color));
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::Cube),
+        ..Default::default()
+    })
+}
+
+/// A square `Rgba16Float` texture holding `color`.
+pub fn solid_rgba16(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    color: [f32; 4],
+    size: u32,
+) -> wgpu::TextureView {
+    let texture = rgba16_texture(device, label, size, 1);
+    queue.write_texture(
+        texel_origin(&texture, 0),
+        &rgba16_texels(size, color),
+        texel_layout(size),
+        square(size),
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn rgba16_texture(device: &wgpu::Device, label: &str, size: u32, layers: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: layers,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+fn paint_cube(queue: &wgpu::Queue, texture: &wgpu::Texture, size: u32, texels: &[u8]) {
+    for face in 0..6 {
+        queue.write_texture(
+            texel_origin(texture, face),
+            texels,
+            texel_layout(size),
+            square(size),
+        );
+    }
+}
+
+fn texel_origin(texture: &wgpu::Texture, layer: u32) -> wgpu::TexelCopyTextureInfo<'_> {
+    wgpu::TexelCopyTextureInfo {
+        texture,
+        mip_level: 0,
+        origin: wgpu::Origin3d {
+            x: 0,
+            y: 0,
+            z: layer,
+        },
+        aspect: wgpu::TextureAspect::All,
+    }
+}
+
+fn texel_layout(size: u32) -> wgpu::TexelCopyBufferLayout {
+    wgpu::TexelCopyBufferLayout {
+        offset: 0,
+        bytes_per_row: Some(size * 8),
+        rows_per_image: Some(size),
+    }
+}
+
+fn square(size: u32) -> wgpu::Extent3d {
+    wgpu::Extent3d {
+        width: size,
+        height: size,
+        depth_or_array_layers: 1,
+    }
+}
+
+/// `light_count`, then the image-based weight and the prefilter mip count.
+///
+/// Both lighting stands write this triple at the same place in the block.
+pub fn write_image_term(bytes: &mut [u8], at: usize, count: u32) {
+    bytes[at..at + 4].copy_from_slice(&count.to_le_bytes());
+    write_f32(bytes, at + 4, 0.4);
+    write_f32(bytes, at + 8, 4.0);
+}
+
+fn write_f32(bytes: &mut [u8], at: usize, value: f32) {
+    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+/// A colour attachment cleared to transparent. Two of them open an MRT pass.
+pub fn cleared_color<'a>(
+    view: &'a wgpu::TextureView,
+) -> Option<wgpu::RenderPassColorAttachment<'a>> {
+    Some(wgpu::RenderPassColorAttachment {
+        view,
+        resolve_target: None,
+        depth_slice: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            store: wgpu::StoreOp::Store,
+        },
+    })
+}
+
+/// A uniform buffer binding visible to both stages.
+pub fn uniform_binding(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    buffer_binding(binding, wgpu::BufferBindingType::Uniform)
+}
+
+/// A storage buffer binding visible to both stages.
+pub fn storage_binding(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+    buffer_binding(binding, wgpu::BufferBindingType::Storage { read_only })
+}
+
+fn buffer_binding(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+/// A sampled texture binding visible to both stages.
+pub fn sampled_binding(
+    binding: u32,
+    sample_type: wgpu::TextureSampleType,
+    view_dimension: wgpu::TextureViewDimension,
+    multisampled: bool,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type,
+            view_dimension,
+            multisampled,
+        },
+        count: None,
+    }
+}
+
+/// A filtering sampler binding visible to both stages.
+pub fn filtering_binding(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
 /// Decode one little-endian IEEE-754 binary16.
 pub fn half_to_f32(bytes: &[u8]) -> f32 {
     let bits = u16::from_le_bytes([bytes[0], bytes[1]]);

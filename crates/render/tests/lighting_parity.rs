@@ -36,11 +36,18 @@
 #[allow(dead_code)]
 mod common;
 
+use common::parity::cleared_color;
 use common::parity::device_pair;
-use common::parity::half;
+use common::parity::filtering_binding;
 use common::parity::half_to_f32;
 use common::parity::map_readback;
+use common::parity::sampled_binding;
+use common::parity::solid_rgba16;
+use common::parity::solid_rgba16_cube;
+use common::parity::storage_binding;
+use common::parity::uniform_binding;
 use common::parity::upload_rgba8;
+use common::parity::write_image_term;
 use glam::Mat4;
 
 /// The deferred-lighting fragment stage this pass used before the migration.
@@ -88,12 +95,18 @@ const MATERIALS: usize = 4;
 /// 1x: beauty plus the diffuse debug view, which isolates the direct walk.
 const DEBUG_VIEWS: [u32; 2] = [0, 3];
 
+/// Device, queue and the fully lit 1x stand, or `None` when there is no adapter.
+fn standard_inputs() -> Option<(wgpu::Device, wgpu::Queue, Inputs)> {
+    let (device, queue) = device_pair()?;
+    let inputs = Inputs::new(&device, &queue, false, &keep_lights);
+    Some((device, queue, inputs))
+}
+
 #[test]
 fn translated_lighting_matches_the_dsl_pixels() {
-    let Some((device, queue)) = device_pair() else {
+    let Some((device, queue, inputs)) = standard_inputs() else {
         return;
     };
-    let inputs = Inputs::new(&device, &queue, false, &keep_lights);
     for debug_view in DEBUG_VIEWS {
         let reference = render(
             &device,
@@ -128,13 +141,11 @@ fn translated_lighting_matches_the_dsl_pixels() {
 ///
 /// This is the one view that runs the lookups and reports them, so comparing
 /// it is what keeps the shadow selectors inside the gate.
-// qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
 #[test]
 fn translated_shadow_visibility_matches_the_dsl_pixels() {
-    let Some((device, queue)) = device_pair() else {
+    let Some((device, queue, inputs)) = standard_inputs() else {
         return;
     };
-    let inputs = Inputs::new(&device, &queue, false, &keep_lights);
     let reference = render(&device, &queue, &inputs, pass(DSL_1X, "fs_main", 6));
     let translated = render(
         &device,
@@ -163,10 +174,9 @@ fn translated_shadow_visibility_matches_the_dsl_pixels() {
 /// the walk never reads) passed while covering no direct light at all.
 #[test]
 fn each_light_moves_pixels_on_its_own() {
-    let Some((device, queue)) = device_pair() else {
+    let Some((device, queue, lit)) = standard_inputs() else {
         return;
     };
-    let lit = Inputs::new(&device, &queue, false, &keep_lights);
     for kind in 0..LIGHT_RECORDS as u32 {
         for view in [0u32, 3] {
             let dark = Inputs::new(&device, &queue, false, &light_off(kind as usize));
@@ -184,13 +194,11 @@ fn each_light_moves_pixels_on_its_own() {
 /// The shadow view is not a vacuum: some texels report full visibility, some
 /// are occluded by the painted band, and the spot light's radiance actually
 /// follows the band (lit above it, dark below it).
-// qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
 #[test]
 fn shadow_view_reports_lit_and_occluded_texels() {
-    let Some((device, queue)) = device_pair() else {
+    let Some((device, queue, inputs)) = standard_inputs() else {
         return;
     };
-    let inputs = Inputs::new(&device, &queue, false, &keep_lights);
     let beauty_lit = render(&device, &queue, &inputs, pass(DSL_1X, "fs_main", 0));
     let shadow = render(&device, &queue, &inputs, pass(DSL_1X, "fs_main", 6));
     // The readback rows carry padding chunks; keep the real texels only.
@@ -470,9 +478,21 @@ impl Inputs {
             shadow_tex: shadow_atlas(device, queue),
             shadow_sampler: comparison_sampler(device),
             shadow_cube_tex: shadow_cube(device, queue),
-            prefilter_cube: solid_cube(device, queue, "lighting prefiltered", [0.3, 0.4, 0.5, 1.0]),
-            irradiance_cube: solid_cube(device, queue, "lighting irradiance", [0.6, 0.5, 0.4, 1.0]),
-            brdf_lut: solid_texture(device, queue, "lighting brdf lut", [1.0, 0.5, 0.0, 1.0]),
+            prefilter_cube: solid_rgba16_cube(
+                device,
+                queue,
+                "lighting prefiltered",
+                [0.3, 0.4, 0.5, 1.0],
+                8,
+            ),
+            irradiance_cube: solid_rgba16_cube(
+                device,
+                queue,
+                "lighting irradiance",
+                [0.6, 0.5, 0.4, 1.0],
+                8,
+            ),
+            brdf_lut: solid_rgba16(device, queue, "lighting brdf lut", [1.0, 0.5, 0.0, 1.0], 4),
             ibl_sampler: linear_sampler(device),
             ao_tex: ao_view(device, queue),
             csm_tex: shadow_cascades(device, queue),
@@ -756,55 +776,18 @@ fn copy_out(
 }
 
 /// The bind group layout of the pass, in binding order.
-// qual:allow(dry, boilerplate) reason: "one layout entry per binding, in binding order"
 fn layout_entries(multisampled: bool) -> Vec<wgpu::BindGroupLayoutEntry> {
-    let uniform = |binding| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    };
-    let storage = |binding, read_only| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    };
-    let sampled = |binding, sample_type, view_dimension, multisampled| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-        ty: wgpu::BindingType::Texture {
-            sample_type,
-            view_dimension,
-            multisampled,
-        },
-        count: None,
-    };
-    let filtering = |binding| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-        count: None,
-    };
     vec![
-        uniform(0),
-        uniform(1),
-        storage(2, true),
-        sampled(
+        uniform_binding(0),
+        uniform_binding(1),
+        storage_binding(2, true),
+        sampled_binding(
             3,
             wgpu::TextureSampleType::Float { filterable: true },
             wgpu::TextureViewDimension::D2,
             false,
         ),
-        sampled(
+        sampled_binding(
             4,
             wgpu::TextureSampleType::Float {
                 filterable: !multisampled,
@@ -812,32 +795,32 @@ fn layout_entries(multisampled: bool) -> Vec<wgpu::BindGroupLayoutEntry> {
             wgpu::TextureViewDimension::D2,
             multisampled,
         ),
-        sampled(
+        sampled_binding(
             5,
             wgpu::TextureSampleType::Uint,
             wgpu::TextureViewDimension::D2,
             multisampled,
         ),
-        sampled(
+        sampled_binding(
             6,
             wgpu::TextureSampleType::Float { filterable: true },
             wgpu::TextureViewDimension::D2,
             false,
         ),
-        sampled(
+        sampled_binding(
             7,
             wgpu::TextureSampleType::Float { filterable: true },
             wgpu::TextureViewDimension::D2,
             false,
         ),
-        sampled(
+        sampled_binding(
             8,
             wgpu::TextureSampleType::Depth,
             wgpu::TextureViewDimension::D2,
             multisampled,
         ),
-        filtering(9),
-        sampled(
+        filtering_binding(9),
+        sampled_binding(
             10,
             wgpu::TextureSampleType::Depth,
             wgpu::TextureViewDimension::D2Array,
@@ -849,47 +832,47 @@ fn layout_entries(multisampled: bool) -> Vec<wgpu::BindGroupLayoutEntry> {
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
             count: None,
         },
-        sampled(
+        sampled_binding(
             12,
             wgpu::TextureSampleType::Depth,
             wgpu::TextureViewDimension::CubeArray,
             false,
         ),
-        sampled(
+        sampled_binding(
             13,
             wgpu::TextureSampleType::Float { filterable: true },
             wgpu::TextureViewDimension::Cube,
             false,
         ),
-        sampled(
+        sampled_binding(
             14,
             wgpu::TextureSampleType::Float { filterable: true },
             wgpu::TextureViewDimension::Cube,
             false,
         ),
-        sampled(
+        sampled_binding(
             15,
             wgpu::TextureSampleType::Float { filterable: true },
             wgpu::TextureViewDimension::D2,
             false,
         ),
-        filtering(16),
-        sampled(
+        filtering_binding(16),
+        sampled_binding(
             17,
             wgpu::TextureSampleType::Float { filterable: true },
             wgpu::TextureViewDimension::D2,
             false,
         ),
-        sampled(
+        sampled_binding(
             18,
             wgpu::TextureSampleType::Depth,
             wgpu::TextureViewDimension::D2Array,
             false,
         ),
-        uniform(19),
-        storage(20, true),
-        storage(21, true),
-        storage(22, true),
+        uniform_binding(19),
+        storage_binding(20, true),
+        storage_binding(21, true),
+        storage_binding(22, true),
     ]
 }
 
@@ -995,12 +978,9 @@ fn lighting_bytes() -> Vec<u8> {
     // The block carries the same records the walk reads from the clustered
     // storage; one spelling ([`light_records`]) feeds both, so a patched
     // intensity reaches the loop through the path it actually reads.
-    // qual:allow(dry, fragment) reason: "the block spellings the sibling parity gates repeat; a shared helper would have to ship in a production crate for test modules"
     let records = light_records();
     bytes[16..16 + records.len()].copy_from_slice(&records);
-    bytes[LIGHT_COUNT_AT..LIGHT_COUNT_AT + 4].copy_from_slice(&3u32.to_le_bytes());
-    put(&mut bytes, LIGHT_COUNT_AT + 4, 0, 0.4);
-    put(&mut bytes, LIGHT_COUNT_AT + 8, 0, 4.0);
+    write_image_term(&mut bytes, LIGHT_COUNT_AT, 3);
     let columns = view_proj().to_cols_array();
     let csm = CSM_AT;
     for cascade in 0..CASCADES {
@@ -1453,7 +1433,6 @@ fn gbuffer_pipeline(device: &wgpu::Device, shader: &wgpu::ShaderModule) -> wgpu:
 }
 
 /// Render the three per-sample g-buffer layers.
-// qual:allow(dry, boilerplate) reason: "the pass descriptor the sibling gates spell too"
 fn msaa_gbuffer(device: &wgpu::Device, queue: &wgpu::Queue) -> MsaaGbuffer {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("lighting g-buffer"),
@@ -1492,26 +1471,7 @@ fn msaa_gbuffer(device: &wgpu::Device, queue: &wgpu::Queue) -> MsaaGbuffer {
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lighting g-buffer"),
-            color_attachments: &[
-                Some(wgpu::RenderPassColorAttachment {
-                    view: &normal,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: &id,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-            ],
+            color_attachments: &[cleared_color(&normal), cleared_color(&id)],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &depth_view,
                 depth_ops: Some(wgpu::Operations {
@@ -1556,101 +1516,8 @@ fn multisampled_target(
 
 /// Render a near-to-far depth ramp.
 fn depth_ramp(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("lighting depth ramp"),
-        source: wgpu::ShaderSource::Wgsl(
-            DEPTH_RAMP
-                .replace("NEAR_DEPTH", &format!("{NEAR_DEPTH:?}"))
-                .replace("FAR_DEPTH", &format!("{FAR_DEPTH:?}"))
-                .into(),
-        ),
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("lighting depth ramp"),
-        layout: None,
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_depth"),
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_depth"),
-            targets: &[],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleStrip,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Always),
-            stencil: Default::default(),
-            bias: Default::default(),
-        }),
-        multisample: Default::default(),
-        multiview_mask: None,
-        cache: None,
-    });
-    let texture = depth_texture(device, "lighting depth", extent(SIZE.0, SIZE.1, 1), 1);
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("lighting depth ramp"),
-    });
-    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("lighting depth ramp"),
-            color_attachments: &[],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.draw(0..4, 0..1);
-    }
-    queue.submit([encoder.finish()]);
-    view
+    common::parity::depth_ramp(device, queue, SIZE)
 }
-
-/// Depth-only WGSL that fills a target with a near-to-far ramp.
-const DEPTH_RAMP: &str = r#"
-struct Varyings {
-    @builtin(position) position: vec4<f32>,
-    @location(0) t: f32,
-}
-
-@vertex
-fn vs_depth(@builtin(vertex_index) index: u32) -> Varyings {
-    let corners = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0),
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-    );
-    let corner = corners[index];
-    var out: Varyings;
-    out.position = vec4<f32>(corner, 0.0, 1.0);
-    out.t = corner.y * 0.5 + 0.5;
-    return out;
-}
-
-@fragment
-fn fs_depth(input: Varyings) -> @builtin(frag_depth) f32 {
-    return mix(NEAR_DEPTH, FAR_DEPTH, input.t);
-}
-"#;
 
 /// A `Depth32Float` texture.
 fn depth_texture(
@@ -1903,103 +1770,6 @@ fn clear_layer_range(
         }
         queue.submit([encoder.finish()]);
     }
-}
-
-/// A `Rgba16Float` cube of `size × size` faces holding one colour.
-fn solid_cube(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    label: &str,
-    color: [f32; 4],
-) -> wgpu::TextureView {
-    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
-    let size: u32 = 8;
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: extent(size, size, 6),
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: FORMAT,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
-    let mut texels = Vec::with_capacity((size * size) as usize * 8);
-    for _ in 0..size * size {
-        for lane in color {
-            texels.extend_from_slice(&half(lane));
-        }
-    }
-    for face in 0..6 {
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: face,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            &texels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(size * 8),
-                rows_per_image: Some(size),
-            },
-            extent(size, size, 1),
-        );
-    }
-    texture.create_view(&wgpu::TextureViewDescriptor {
-        dimension: Some(wgpu::TextureViewDimension::Cube),
-        ..Default::default()
-    })
-}
-
-/// A `Rgba16Float` texture holding one colour.
-fn solid_texture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    label: &str,
-    color: [f32; 4],
-) -> wgpu::TextureView {
-    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
-    let size = 4u32;
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: extent(size, size, 1),
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: FORMAT,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    // qual:allow(dry, fragment) reason: "the g-buffer blocks and the texture fills the sibling parity gates spell too; a shared helper would have to ship in a production crate for test modules"
-    let mut texels = Vec::with_capacity((size * size) as usize * 8);
-    for _ in 0..size * size {
-        for lane in color {
-            texels.extend_from_slice(&half(lane));
-        }
-    }
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &texels,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(size * 8),
-            rows_per_image: Some(size),
-        },
-        extent(size, size, 1),
-    );
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 /// A linear clamp sampler, the filter every texture binding uses.

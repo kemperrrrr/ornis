@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.758926326613309,
-  "iosp_score": 0.9694620064416081,
+  "quality_score": 0.7591529390388996,
+  "iosp_score": 0.9694911214396377,
   "violations": 256,
-  "total": 12798,
+  "total": 12810,
   "complexity_warnings": 73,
   "magic_number_warnings": 132,
   "nesting_depth_warnings": 19,
@@ -88,7 +88,7 @@
     {
       "name": "install_object_animation",
       "file": "crates/app/src/lib.rs",
-      "line": 124
+      "line": 123
     },
     {
       "name": "set_rigid_field",
@@ -228,7 +228,7 @@
     {
       "name": "bake_bind_transform",
       "file": "crates/animation/src/lib.rs",
-      "line": 3794
+      "line": 3796
     },
     {
       "name": "assemble_clips",
