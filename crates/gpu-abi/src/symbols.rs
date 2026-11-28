@@ -42,6 +42,10 @@ pub const STORAGE_WRITE_F32: &str = "storage_write_f32";
 /// The wasm result is `i32` bits. The lowerer treats them as `u32`.
 pub const STORAGE_READ_U32: &str = "storage_read_u32";
 
+/// `(param i32 i32 i32 i32) (result i32)` — one lane of an `array<vec4<u32>>`
+/// storage element (`group, binding, index, lane`).
+pub const STORAGE_READ_U32_LANE: &str = "storage_read_u32_lane";
+
 /// `(param i32 i32 i32 i32)` — store one `u32` element.
 pub const STORAGE_WRITE_U32: &str = "storage_write_u32";
 
@@ -64,6 +68,14 @@ pub const STORAGE_BASE: &str = "storage_base";
 /// and signed texel coordinate `(x, y)` at mip level zero.
 pub const TEXTURE_LOAD_2D: &str = "texture_load_2d";
 
+/// `(param i32 i32 i32 i32) (result f32)` — `textureLoad` of a depth image at
+/// mip 0. Depth images return the scalar the load gives them.
+pub const TEXTURE_LOAD_2D_F32: &str = "texture_load_2d_f32";
+
+/// `(param i32 i32 i32 i32 i32) (result f32)` — one lane of a sampled
+/// `texture_2d<f32>` texel at mip 0 (`group, binding, x, y, lane`).
+pub const TEXTURE_LOAD_2D_F32X4: &str = "texture_load_2d_f32x4";
+
 /// `(param f32 × 6) (result f32)` — dot product of two `vec3<f32>` values.
 pub const MATH_DOT3: &str = "math_dot3";
 
@@ -81,6 +93,9 @@ pub const STORAGE_ATOMIC_ADD_U32: &str = "storage_atomic_add_u32";
 
 /// `(param i32) (result i32)` — load one word from workgroup scratch.
 pub const WORKGROUP_LOAD_U32: &str = "workgroup_load_u32";
+
+/// `(param i32) (result i32)` — atomic load of one workgroup word.
+pub const WORKGROUP_ATOMIC_LOAD_U32: &str = "workgroup_atomic_load_u32";
 
 /// `(param i32 i32)` — store one word into workgroup scratch.
 pub const WORKGROUP_STORE_U32: &str = "workgroup_store_u32";
@@ -311,6 +326,12 @@ pub const VERTEX_INDEX: &str = "vertex_index";
 /// `(result i32)` — `@builtin(instance_index)` of a vertex entry.
 pub const INSTANCE_INDEX: &str = "instance_index";
 
+/// `(param i32) (result i32)` — one lane of `@builtin(global_invocation_id)`.
+pub const GLOBAL_INVOCATION_LANE: &str = "global_invocation_lane";
+
+/// `(result i32)` — `@builtin(local_invocation_index)` of a compute entry.
+pub const LOCAL_INVOCATION_INDEX: &str = "local_invocation_index";
+
 /// `(param i32 i32 i32) (result f32)` — lane of a vertex `@location` input.
 ///
 /// The operands are the location, the declared lane count, and the lane, all
@@ -407,8 +428,8 @@ pub const FRAGMENT_STORE_F32X4: &str = "fragment_store_f32x4";
 
 /// `(param f32) (result f32)` — `sqrt(value)`, one WGSL `sqrt`.
 ///
-/// `no_std` has no `f32::sqrt`, and a Newton series would not match the GPU
-/// instruction.
+/// The host evaluates [`f32::sqrt`]; this import is what the translator lowers
+/// to one WGSL `sqrt`, which a Newton series would not match.
 pub const GPU_SQRT: &str = "gpu_sqrt";
 
 /// `(param f32 f32) (result f32)` — `pow(base, exponent)`, one WGSL `pow`.

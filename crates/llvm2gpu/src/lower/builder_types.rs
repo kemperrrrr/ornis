@@ -226,7 +226,7 @@ impl Builders {
         let element_stride = ornis_gpu_abi::storage_stride(size, align);
         if !element_stride.is_multiple_of(ornis_gpu_abi::UNIFORM_STRUCT_ALIGN) {
             return Err(TranslateError::UnsupportedType(format!(
-                "a uniform array of {size}-byte elements has an {element_stride}-byte stride, but \
+                "a uniform array of {size}-byte elements has a {element_stride}-byte stride, but \
                  WGSL requires a multiple of {} — wrap the element in a padded struct instead of a \
                  plain array",
                 ornis_gpu_abi::UNIFORM_STRUCT_ALIGN

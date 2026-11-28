@@ -11,8 +11,8 @@ use crate::error::TranslateError;
 use crate::parse::Operand;
 
 impl<'a, 'b> Lowerer<'a, 'b> {
-    /// The expression `request` already emitted in this function, else `expr`
-    /// appended now and remembered for the next lane that asks for it.
+    /// The expression `request` already emitted in this basic block, else
+    /// `expr` appended now and remembered for the next lane in the block.
     pub(crate) fn image_expr(
         &mut self,
         out: &mut naga::Block,

@@ -15,6 +15,7 @@ use super::texture::{Elem, TextureKind, compare_import, sample_import};
 use crate::error::TranslateError;
 use crate::parse::Operand;
 use crate::symbol;
+use ornis_gpu_abi::symbols as sym;
 
 impl<'a, 'b> Lowerer<'a, 'b> {
     /// Value-returning call: math or storage read / atomic add.
@@ -118,19 +119,19 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 value
             });
         }
-        if symbol::imported(callee) == "global_invocation_lane" {
+        if symbol::imported(callee) == sym::GLOBAL_INVOCATION_LANE {
             return self.global_invocation_lane(out, args);
         }
-        if symbol::imported(callee) == "vertex_index" {
+        if symbol::imported(callee) == sym::VERTEX_INDEX {
             return self.vertex_index.ok_or_else(TranslateError::unsupported);
         }
-        if symbol::imported(callee) == "instance_index" {
+        if symbol::imported(callee) == sym::INSTANCE_INDEX {
             return self.instance_index.ok_or_else(TranslateError::unsupported);
         }
-        if symbol::imported(callee) == "local_invocation_index" {
+        if symbol::imported(callee) == sym::LOCAL_INVOCATION_INDEX {
             return self.local_index.ok_or_else(TranslateError::unsupported);
         }
-        if symbol::imported(callee) == "fragment_uv_lane" {
+        if symbol::imported(callee) == sym::FRAGMENT_UV_LANE {
             return self.input_lane(
                 out,
                 0,
@@ -155,24 +156,24 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 args.first().ok_or_else(TranslateError::unsupported)?,
             )?);
         }
-        if symbol::imported(callee) == "vertex_input_lane"
-            || symbol::imported(callee) == "fragment_input_lane"
+        if symbol::imported(callee) == sym::VERTEX_INPUT_LANE
+            || symbol::imported(callee) == sym::FRAGMENT_INPUT_LANE
         {
             if args.len() != INPUT_LANE_ARGS {
                 return Err(TranslateError::unsupported());
             }
             return self.input_lane(out, const_u32(&args[0])?, &args[2]);
         }
-        if symbol::imported(callee) == "fragment_position_lane" {
+        if symbol::imported(callee) == sym::FRAGMENT_POSITION_LANE {
             return self.fragment_position(out, args);
         }
-        if symbol::imported(callee) == "workgroup_atomic_add_u32" {
+        if symbol::imported(callee) == sym::WORKGROUP_ATOMIC_ADD_U32 {
             return self.workgroup_atomic_add(out, args);
         }
-        if symbol::imported(callee) == "workgroup_atomic_load_u32" {
+        if symbol::imported(callee) == sym::WORKGROUP_ATOMIC_LOAD_U32 {
             return self.workgroup_load(out, args, true);
         }
-        if symbol::imported(callee) == "workgroup_load_u32" {
+        if symbol::imported(callee) == sym::WORKGROUP_LOAD_U32 {
             return self.workgroup_load(out, args, false);
         }
         if let Some((shape, level)) = sample_import(callee) {
@@ -193,10 +194,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if symbol::imported(callee) == ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_U32 {
             return self.texture_load_u32(out, args);
         }
-        if symbol::imported(callee) == "texture_load_2d_f32x4" {
+        if symbol::imported(callee) == sym::TEXTURE_LOAD_2D_F32X4 {
             return self.texture_load_lane(out, args);
         }
-        if symbol::imported(callee) == "texture_load_2d_f32" {
+        if symbol::imported(callee) == sym::TEXTURE_LOAD_2D_F32 {
             return self.texture_load_f32(out, args);
         }
         if symbol::imported(callee) == ornis_gpu_abi::symbols::TEXTURE_WIDTH_2D_F32X4 {
@@ -205,10 +206,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if symbol::imported(callee) == ornis_gpu_abi::symbols::TEXTURE_HEIGHT_2D_F32X4 {
             return self.texture_size(out, args, 1, TextureKind::Sampled);
         }
-        if symbol::imported(callee) == "texture_width_2d" {
+        if symbol::imported(callee) == sym::TEXTURE_WIDTH_2D {
             return self.texture_size(out, args, 0, TextureKind::Depth);
         }
-        if symbol::imported(callee) == "texture_height_2d" {
+        if symbol::imported(callee) == sym::TEXTURE_HEIGHT_2D {
             return self.texture_size(out, args, 1, TextureKind::Depth);
         }
         if symbol::imported(callee) == ornis_gpu_abi::symbols::UNIFORM_NESTED_VEC4_LANE {
@@ -232,13 +233,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if symbol::imported(callee) == ornis_gpu_abi::symbols::UNIFORM_FIELD_VEC4_COMPONENT_F32 {
             return self.uniform_field_vec4_component(out, args);
         }
-        if symbol::imported(callee) == "uniform_field_f32" {
+        if symbol::imported(callee) == sym::UNIFORM_FIELD_F32 {
             return self.uniform_field(out, args, ornis_gpu_abi::TYPE_TAG_F32);
         }
-        if symbol::imported(callee) == "uniform_field_u32" {
+        if symbol::imported(callee) == sym::UNIFORM_FIELD_U32 {
             return self.uniform_field(out, args, ornis_gpu_abi::TYPE_TAG_U32);
         }
-        if symbol::imported(callee) == "uniform_read_f32" {
+        if symbol::imported(callee) == sym::UNIFORM_READ_F32 {
             if args.len() != 4 {
                 return Err(TranslateError::unsupported());
             }
@@ -258,7 +259,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let global = self.builders.uniform_global(group, binding, len);
             return load_uniform(&mut self.func, out, global, index);
         }
-        if symbol::imported(callee) == "storage_len_f32" {
+        if symbol::imported(callee) == sym::STORAGE_LEN_F32 {
             if args.len() != 2 {
                 return Err(TranslateError::unsupported());
             }
@@ -270,7 +271,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
         }
-        if symbol::imported(callee) == "storage_len_u32" {
+        if symbol::imported(callee) == sym::STORAGE_LEN_U32 {
             if args.len() != 2 {
                 return Err(TranslateError::unsupported());
             }
@@ -282,7 +283,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
         }
-        if symbol::imported(callee) == "storage_len_u32x4" {
+        if symbol::imported(callee) == sym::STORAGE_LEN_U32X4 {
             if args.len() != 2 {
                 return Err(TranslateError::unsupported());
             }
@@ -294,7 +295,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
         }
-        if symbol::imported(callee) == "storage_read_u32_lane" {
+        if symbol::imported(callee) == sym::STORAGE_READ_U32_LANE {
             if args.len() != 4 {
                 return Err(TranslateError::unsupported());
             }
@@ -316,21 +317,21 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             );
             return Ok(self.expr(out, naga::Expression::Load { pointer }));
         }
-        if symbol::imported(callee) == "storage_read_f32" {
+        if symbol::imported(callee) == sym::STORAGE_READ_F32 {
             let (group, binding, index) = self.storage_args(out, args, 3)?;
             let global = self
                 .builders
                 .storage_global(group, binding, Elem::F32, false)?;
             return load_global(&mut self.func, out, global, index);
         }
-        if symbol::imported(callee) == "storage_read_u32" {
+        if symbol::imported(callee) == sym::STORAGE_READ_U32 {
             let (group, binding, index) = self.storage_args(out, args, 3)?;
             let global = self
                 .builders
                 .storage_global(group, binding, Elem::U32, false)?;
             return load_global(&mut self.func, out, global, index);
         }
-        if symbol::imported(callee) == "storage_atomic_add_u32" {
+        if symbol::imported(callee) == sym::STORAGE_ATOMIC_ADD_U32 {
             if args.len() != 4 {
                 return Err(TranslateError::unsupported());
             }

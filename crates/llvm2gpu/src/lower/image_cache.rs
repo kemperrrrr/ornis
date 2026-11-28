@@ -59,5 +59,8 @@ pub(crate) enum SampleLevelKey {
     Exact(naga::Handle<naga::Expression>),
 }
 
-/// Image expressions already emitted in the function being lowered.
+/// Image expressions already emitted in the basic block being lowered.
+///
+/// The cache is cleared at the start of every block: a handle is valid only
+/// inside the block that emitted it, so a later block must not reuse it.
 pub(crate) type ImageCache = HashMap<ImageRequest, naga::Handle<naga::Expression>>;

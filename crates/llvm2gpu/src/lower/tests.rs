@@ -544,4 +544,198 @@ start:
         text.contains("4-byte stride"),
         "the rejection names the element stride: {text}"
     );
+    assert!(
+        text.contains("has a 4-byte stride"),
+        "the article agrees with the digit: {text}"
+    );
+}
+
+fn image_samples(module: &naga::Module) -> Vec<&naga::SampleLevel> {
+    module
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.function.expressions.iter())
+        .filter_map(|(_, expr)| match expr {
+            naga::Expression::ImageSample { level, .. } => Some(level),
+            _ => None,
+        })
+        .collect()
+}
+
+fn image_queries(module: &naga::Module) -> usize {
+    module
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.function.expressions.iter())
+        .filter(|(_, expr)| matches!(expr, naga::Expression::ImageQuery { .. }))
+        .count()
+}
+
+/// Four lanes of one texel are one `textureSample`, not four.
+#[test]
+pub(crate) fn four_lanes_of_one_texel_share_one_sample() {
+    use ornis_gpu_abi::symbols::TEXTURE_SAMPLE_2D_F32X4;
+    let ir = format!(
+        r#"
+declare float @{sample}(i32, i32, i32, i32, float, float, i32)
+declare void @fragment_store_f32x4(float, float, float, float)
+define void @fs_main() {{
+start:
+  %x = fadd float 5.000000e-01, 0.000000e+00
+  %y = fadd float 2.500000e-01, 0.000000e+00
+  %r = call float @{sample}(i32 0, i32 0, i32 0, i32 1, float %x, float %y, i32 0)
+  %g = call float @{sample}(i32 0, i32 0, i32 0, i32 1, float %x, float %y, i32 1)
+  %b = call float @{sample}(i32 0, i32 0, i32 0, i32 1, float %x, float %y, i32 2)
+  %a = call float @{sample}(i32 0, i32 0, i32 0, i32 1, float %x, float %y, i32 3)
+  call void @fragment_store_f32x4(float %r, float %g, float %b, float %a)
+  ret void
+}}
+"#,
+        sample = TEXTURE_SAMPLE_2D_F32X4
+    );
+    let module = lower_fragment(&ir);
+    assert_eq!(
+        image_samples(&module).len(),
+        1,
+        "four lanes share one sample"
+    );
+}
+
+/// The cache is cleared at each block, so the same texel in the next block
+/// is a second sample.
+#[test]
+pub(crate) fn adjacent_blocks_do_not_share_an_image_query() {
+    use ornis_gpu_abi::symbols::TEXTURE_SAMPLE_2D_F32X4;
+    let ir = format!(
+        r#"
+declare float @{sample}(i32, i32, i32, i32, float, float, i32)
+declare void @fragment_store_f32x4(float, float, float, float)
+define void @fs_main() {{
+start:
+  %r = call float @{sample}(i32 0, i32 0, i32 0, i32 1, float 5.000000e-01, float 2.500000e-01, i32 0)
+  br label %next
+next:
+  %g = call float @{sample}(i32 0, i32 0, i32 0, i32 1, float 5.000000e-01, float 2.500000e-01, i32 1)
+  call void @fragment_store_f32x4(float %r, float %g, float %g, float %g)
+  ret void
+}}
+"#,
+        sample = TEXTURE_SAMPLE_2D_F32X4
+    );
+    let module = lower_fragment(&ir);
+    assert_eq!(
+        image_samples(&module).len(),
+        2,
+        "a handle from one block is not reused in the next"
+    );
+}
+
+/// `textureSample` (implicit LOD) and `textureSampleLevel` (explicit LOD) of
+/// the same direction are different expressions.
+#[test]
+pub(crate) fn an_auto_sample_is_not_an_exact_sample() {
+    use ornis_gpu_abi::symbols::{TEXTURE_SAMPLE_CUBE_F32X4, TEXTURE_SAMPLE_LEVEL_CUBE_F32X4};
+    let ir = format!(
+        r#"
+declare float @{auto}(i32, i32, i32, i32, float, float, float, i32)
+declare float @{exact}(i32, i32, i32, i32, float, float, float, float, i32)
+declare void @fragment_store_f32x4(float, float, float, float)
+define void @fs_main() {{
+start:
+  %a = call float @{auto}(i32 0, i32 0, i32 0, i32 1, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, i32 0)
+  %b = call float @{exact}(i32 0, i32 0, i32 0, i32 1, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 2.000000e+00, i32 1)
+  call void @fragment_store_f32x4(float %a, float %b, float %b, float %b)
+  ret void
+}}
+"#,
+        auto = TEXTURE_SAMPLE_CUBE_F32X4,
+        exact = TEXTURE_SAMPLE_LEVEL_CUBE_F32X4
+    );
+    let module = lower_fragment(&ir);
+    let levels = image_samples(&module);
+    assert_eq!(levels.len(), 2, "auto and exact do not share a sample");
+    assert!(
+        levels
+            .iter()
+            .any(|level| matches!(level, naga::SampleLevel::Auto)),
+        "one sample lets the hardware pick the level"
+    );
+    assert!(
+        levels
+            .iter()
+            .any(|level| matches!(level, naga::SampleLevel::Exact(_))),
+        "the other sample takes the explicit level"
+    );
+}
+
+/// Width and height of one image are one `textureDimensions`. A different
+/// mip level is a different query: the cache key carries the level.
+#[test]
+pub(crate) fn texture_dimensions_share_a_level_and_not_two() {
+    use super::image_cache::{ImageCache, ImageRequest, SampleLevelKey};
+    let ir = r#"
+declare i32 @texture_width_2d(i32, i32)
+declare i32 @texture_height_2d(i32, i32)
+declare void @fragment_store_f32x4(float, float, float, float)
+define void @fs_main() {
+start:
+  %w = call i32 @texture_width_2d(i32 0, i32 1)
+  %h = call i32 @texture_height_2d(i32 0, i32 1)
+  %wf = uitofp nneg i32 %w to float
+  %hf = uitofp nneg i32 %h to float
+  call void @fragment_store_f32x4(float %wf, float %hf, float 0.000000e+00, float 1.000000e+00)
+  ret void
+}
+"#;
+    let module = lower_fragment(ir);
+    assert_eq!(
+        image_queries(&module),
+        1,
+        "width and height at the same level share one textureDimensions"
+    );
+
+    let mut arena = naga::Arena::new();
+    let image = arena.append(
+        naga::Expression::Literal(naga::Literal::U32(0)),
+        naga::Span::default(),
+    );
+    let level_a = arena.append(
+        naga::Expression::Literal(naga::Literal::U32(1)),
+        naga::Span::default(),
+    );
+    let level_b = arena.append(
+        naga::Expression::Literal(naga::Literal::U32(2)),
+        naga::Span::default(),
+    );
+    let mut cache = ImageCache::default();
+    let at = |level| ImageRequest::Size {
+        image,
+        level: Some(level),
+    };
+    cache.insert(at(level_a), image);
+    cache.insert(at(level_a), image);
+    cache.insert(at(level_b), level_b);
+    assert_eq!(
+        cache.len(),
+        2,
+        "two mip levels are two textureDimensions queries"
+    );
+    let auto = cached_sample(image, SampleLevelKey::Auto);
+    let exact = cached_sample(image, SampleLevelKey::Exact(level_a));
+    assert!(auto != exact, "Auto and Exact are different cache keys");
+}
+
+fn cached_sample(
+    image: naga::Handle<naga::Expression>,
+    level: super::image_cache::SampleLevelKey,
+) -> super::image_cache::ImageRequest {
+    super::image_cache::ImageRequest::Sample {
+        image,
+        sampler: image,
+        coordinate: image,
+        array_index: None,
+        depth_ref: None,
+        level,
+        clamp_to_edge: false,
+    }
 }
